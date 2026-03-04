@@ -55,13 +55,27 @@
 
 
   <p>Periodically export a backend Excel backup (top-left download button)</p>
-  <div id="desktopSelectionHeader" class="desktop-selection-header"></div>
+  <div class="header-import-selection-row">
+    <button id="importWizardBtn" class="primary-btn import-wizard-btn" type="button">
+      <span class="import-wizard-icon" aria-hidden="true"></span>
+      <span>Import Wizard</span>
+    </button>
+    <button id="attributeTableBtn" class="primary-btn attribute-table-btn" type="button">
+      <span class="attribute-table-icon" aria-hidden="true"></span>
+      <span>Attribute Table</span>
+    </button>
+    <div id="desktopSelectionHeader" class="desktop-selection-header"></div>
+  </div>
 
   <div class="mobile-header-buttons">
     <button id="hardRefreshBtn" class="primary-btn" title="Reload app data and clear cached view">Refresh App</button>
+    <button id="importWizardBtnMobile" class="primary-btn" title="Open Import Wizard">Import</button>
+    <button id="attributeTableBtnMobile" class="primary-btn" title="Open Attribute Table">Table</button>
     <button id="mobileMenuBtn">☰ Menu</button>
     <button id="locateMeBtn" class="primary-btn">📍</button>
   </div>
+  <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+  <input type="file" id="summaryFileInput" accept=".xlsx,.xls,.csv" hidden>
 
 </header>
 
@@ -73,13 +87,6 @@
   
 <button id="toggleSidebarBtn" class="sidebar-toggle" aria-label="Toggle left sidebar"></button>
   <aside class="sidebar">
-
-    <div id="dropZone" aria-label="Upload Excel file">
-      <div class="dropzone-title">Upload Route File</div>
-      <div class="dropzone-subtitle">Drop .xlsx, .xls, or .csv here</div>
-      <div class="dropzone-browse">Click to choose file</div>
-    </div>
-    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
     <div id="currentFileDisplay" class="current-file-display">
       <span class="current-file-label">Current file</span>
       <span id="currentFileName" class="current-file-name">None</span>
@@ -231,7 +238,7 @@
   
 <label class="street-toggle-label">
   <input type="checkbox" id="streetLabelToggle">
-  Street Labels
+  Street Labels for Records
 </label>
 
 
@@ -246,6 +253,39 @@
 <button id="toggleSelectionBtn" class="sidebar-toggle-right">❯</button>
 
 </div> <!-- end app-container -->
+<div id="attributeTablePanel" class="attribute-table-panel collapsed closed" aria-hidden="true">
+  <div class="attribute-table-header">
+    <div class="attribute-resize-hint">Drag header to move, snap to corners, or drag far out to pop out</div>
+    <span class="attribute-title">Attribute Table</span>
+    <button id="attributePopoutBtn" class="primary-btn" type="button">Pop Out</button>
+    <button id="attributeDockCloseBtn" class="primary-btn collapse-btn" type="button">Hide</button>
+  </div>
+  <div class="attribute-toolbar">
+    <input id="attributeSearchInput" type="text" placeholder="Filter records by any field..." />
+    <label class="attribute-selected-only">
+      <input id="attributeSelectedOnly" type="checkbox" />
+      Selected only
+    </label>
+    <button id="attributeSelectVisibleBtn" class="primary-btn" type="button">Select Visible</button>
+    <button id="attributeClearSelectionBtn" class="primary-btn" type="button">Clear Selection</button>
+    <button id="attributeZoomSelectedBtn" class="primary-btn" type="button">Zoom to Selected</button>
+    <button id="attributeExportCsvBtn" class="primary-btn" type="button">Export CSV</button>
+    <button id="attributePrevPageBtn" class="primary-btn" type="button">Prev</button>
+    <button id="attributeNextPageBtn" class="primary-btn" type="button">Next</button>
+    <span id="attributePageInfo" class="attribute-page-info">Page 1/1</span>
+    <span id="attributeStatus" class="attribute-status">0 selected</span>
+  </div>
+  <div id="attributeTableWrap" class="attribute-table-wrap">
+    <div id="attributeTableEmpty" class="attribute-empty">Upload a route file to view attributes.</div>
+    <table id="attributeTableGrid" class="attribute-table-grid"></table>
+  </div>
+  <div id="attributeResizeHandleRight" class="attribute-resize-handle edge-right" data-dir="e" aria-hidden="true"></div>
+  <div id="attributeResizeHandleBottom" class="attribute-resize-handle edge-bottom" data-dir="s" aria-hidden="true"></div>
+  <div id="attributeResizeHandleNW" class="attribute-resize-handle corner-nw" data-dir="nw" aria-hidden="true"></div>
+  <div id="attributeResizeHandleNE" class="attribute-resize-handle corner-ne" data-dir="ne" aria-hidden="true"></div>
+  <div id="attributeResizeHandleSW" class="attribute-resize-handle corner-sw" data-dir="sw" aria-hidden="true"></div>
+  <div id="attributeResizeHandleSE" class="attribute-resize-handle corner-se" data-dir="se" aria-hidden="true"></div>
+</div>
 <!-- ===== BOTTOM ROUTE SUMMARY PANEL ===== -->
 <div id="bottomSummary" class="bottom-summary">
 
@@ -300,7 +340,41 @@
     </div>
   </div>
 </div>
-<div id="downloadConfirmModal" class="modal">
+<div id="summaryAttachModal" class="modal">
+  <div class="modal-content attach-modal-content">
+    <h3>Attach Route Summary</h3>
+    <p id="summaryAttachModalText">Choose which route file this summary should be attached to.</p>
+    <div class="attach-modal-selected">
+      <span class="attach-pill-label">Selected Route</span>
+      <span id="summaryAttachSelectedRoute" class="attach-pill-value">None</span>
+    </div>
+    <input id="summaryAttachSearch" type="text" placeholder="Search saved route files..." />
+    <div id="summaryAttachList" class="attach-route-list"></div>
+    <div class="modal-actions">
+      <button id="summaryAttachCancel">Cancel</button>
+      <button id="summaryAttachConfirm">Attach</button>
+    </div>
+  </div>
+</div>
+<div id="importWizardModal" class="modal">
+  <div class="modal-content import-wizard-modal-content">
+    <h3>Import Wizard</h3>
+    <p>Choose what you want to import.</p>
+    <div class="import-wizard-actions">
+      <button id="importWizardRouteBtn" class="primary-btn import-wizard-action-btn" type="button">
+        <span class="import-wizard-action-title">Upload Route File</span>
+        <span class="import-wizard-action-subtitle">Import map points, route/day layers, and stop data</span>
+      </button>
+      <button id="importWizardSummaryBtn" class="primary-btn import-wizard-action-btn" type="button">
+        <span class="import-wizard-action-title">Upload Route Summary</span>
+        <span class="import-wizard-action-subtitle">Attach a summary file to an existing saved route file</span>
+      </button>
+    </div>
+    <div class="modal-actions">
+      <button id="importWizardClose">Close</button>
+    </div>
+  </div>
+</div><div id="downloadConfirmModal" class="modal">
   <div class="modal-content">
     <h3>Download Excel File</h3>
     <p>Are you sure you want to download the full Excel file?</p>
@@ -324,6 +398,12 @@
 </div>
 </body>
 </html>
+
+
+
+
+
+
 
 
 

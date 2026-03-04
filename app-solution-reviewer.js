@@ -16,8 +16,22 @@ window._currentWorkbook = null;
 window._currentFilePath = null;
 window._summaryRows = [];
 window._summaryHeaders = [];
+window._attributeHeaders = [];
 
 window.streetLabelsEnabled = false;
+const attributeRowToId = new WeakMap();
+let attributeRowToMarker = new WeakMap();
+const attributeMarkerByRowId = new Map();
+const attributeState = {
+  sortKey: null,
+  sortDir: 1,
+  filterText: "",
+  selectedOnly: false,
+  page: 1,
+  pageSize: 300,
+  selectedRowIds: new Set(),
+  lastVisibleRows: []
+};
 const APP_STORAGE_NS = (() => {
   const path = (window.location.pathname || "").toLowerCase();
   if (path.endsWith("/sales-polygon-viewer.html") || path.endsWith("sales-polygon-viewer.html")) return "sales-polygon-viewer";
@@ -383,6 +397,159 @@ function normalizeName(name) {
     .trim();
 }
 
+function isRouteSummaryFileName(fileName) {
+  const lower = String(fileName || "").toLowerCase();
+  return lower.includes("routesummary") || lower.includes("route summary");
+}
+
+const SUMMARY_ATTACH_STORAGE_KEY = storageKey("summaryAttachments");
+
+function getSummaryAttachments() {
+  try {
+    const raw = localStorage.getItem(SUMMARY_ATTACH_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function setSummaryAttachments(map) {
+  localStorage.setItem(SUMMARY_ATTACH_STORAGE_KEY, JSON.stringify(map || {}));
+}
+
+function setRouteSummaryAttachment(routeFileName, summaryFileName) {
+  const map = getSummaryAttachments();
+  Object.keys(map).forEach(routeKey => {
+    if (map[routeKey] === summaryFileName) delete map[routeKey];
+  });
+  map[routeFileName] = summaryFileName;
+  setSummaryAttachments(map);
+}
+
+function removeRouteSummaryAttachment(routeFileName) {
+  const map = getSummaryAttachments();
+  delete map[routeFileName];
+  setSummaryAttachments(map);
+}
+
+function cleanupSummaryAttachments(existingFileNames) {
+  const existing = new Set(existingFileNames || []);
+  const map = getSummaryAttachments();
+  let dirty = false;
+
+  Object.entries(map).forEach(([routeName, summaryName]) => {
+    if (!existing.has(routeName) || !existing.has(summaryName)) {
+      delete map[routeName];
+      dirty = true;
+    }
+  });
+
+  if (dirty) setSummaryAttachments(map);
+  return map;
+}
+
+function resolveSummaryForRoute(routeFileName, filesList) {
+  const fileNames = (filesList || []).map(f => f.name);
+  const attachmentMap = cleanupSummaryAttachments(fileNames);
+  const attachedSummary = attachmentMap[routeFileName];
+
+  if (attachedSummary && fileNames.includes(attachedSummary)) {
+    return attachedSummary;
+  }
+
+  const normalizedRoute = normalizeName(routeFileName);
+  const fallback = (filesList || []).find(f => {
+    if (!isRouteSummaryFileName(f.name)) return false;
+    return normalizeName(f.name) === normalizedRoute;
+  });
+
+  return fallback ? fallback.name : null;
+}
+
+function openSummaryAttachModal(summaryFileName, routeFileNames) {
+  return new Promise(resolve => {
+    const modal = document.getElementById("summaryAttachModal");
+    const text = document.getElementById("summaryAttachModalText");
+    const selectedLabel = document.getElementById("summaryAttachSelectedRoute");
+    const searchInput = document.getElementById("summaryAttachSearch");
+    const listBox = document.getElementById("summaryAttachList");
+    const cancelBtn = document.getElementById("summaryAttachCancel");
+    const confirmBtn = document.getElementById("summaryAttachConfirm");
+
+    if (!modal || !text || !selectedLabel || !searchInput || !listBox || !cancelBtn || !confirmBtn) {
+      resolve(null);
+      return;
+    }
+
+    text.textContent = `Choose which saved route file should attach to: ${summaryFileName}`;
+    let selectedRoute = null;
+    const sortedRoutes = routeFileNames
+      .slice()
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+
+    const setSelected = routeName => {
+      selectedRoute = routeName;
+      selectedLabel.textContent = routeName || "None";
+      confirmBtn.disabled = !routeName;
+      [...listBox.querySelectorAll(".attach-route-item")].forEach(btn => {
+        btn.classList.toggle("selected", btn.dataset.routeName === routeName);
+      });
+    };
+
+    const renderList = filterText => {
+      const needle = String(filterText || "").trim().toLowerCase();
+      listBox.innerHTML = "";
+      const shown = sortedRoutes.filter(name => name.toLowerCase().includes(needle));
+
+      if (!shown.length) {
+        const empty = document.createElement("div");
+        empty.className = "attach-route-empty";
+        empty.textContent = "No matching route files.";
+        listBox.appendChild(empty);
+        return;
+      }
+
+      shown.forEach(routeName => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "attach-route-item";
+        btn.dataset.routeName = routeName;
+        btn.textContent = routeName;
+        btn.addEventListener("click", () => setSelected(routeName));
+        listBox.appendChild(btn);
+      });
+
+      if (selectedRoute && shown.includes(selectedRoute)) {
+        setSelected(selectedRoute);
+      } else if (!selectedRoute) {
+        setSelected(shown[0]);
+      } else {
+        confirmBtn.disabled = true;
+      }
+    };
+
+    searchInput.value = "";
+    selectedLabel.textContent = "None";
+    confirmBtn.disabled = true;
+    renderList("");
+    searchInput.oninput = () => renderList(searchInput.value);
+
+    const close = value => {
+      modal.style.display = "none";
+      searchInput.oninput = null;
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+      resolve(value);
+    };
+
+    cancelBtn.onclick = () => close(null);
+    confirmBtn.onclick = () => close(selectedRoute || null);
+    modal.style.display = "flex";
+    searchInput.focus();
+  });
+}
+
 // Prevent recursive growth like "..._Downloaded_<ts>_Downloaded_<ts>".
 function getDownloadBaseName(filePath) {
   const rawName = (filePath || "Export").replace(/\.[^/.]+$/, "");
@@ -467,6 +634,7 @@ map.addControl(drawControl);
 function updateSelectionCount() {
 const polygon = drawnLayer.getLayers()[0];
 let count = 0;
+const nextSelectedRowIds = new Set();
 
 Object.entries(routeDayGroups).forEach(([key, group]) => {
  group.layers.forEach(marker => {
@@ -484,6 +652,9 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
      // highlight selected marker
      marker.setStyle?.({ color: "#ffff00", fillColor: "#ffff00" });
 
+     if (Number.isFinite(marker._rowId)) {
+       nextSelectedRowIds.add(marker._rowId);
+     }
      count++; // ✅ only counting here
    } else {
      // restore original color
@@ -493,7 +664,15 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
  });
 });
 
-document.getElementById("selectionCount").textContent = count;
+const prev = attributeState.selectedRowIds;
+const changed =
+  prev.size !== nextSelectedRowIds.size ||
+  [...prev].some(id => !nextSelectedRowIds.has(id));
+
+attributeState.selectedRowIds = nextSelectedRowIds;
+syncSelectedStopsHeaderCount(count);
+refreshAttributeStatus();
+if (changed) renderAttributeTable();
 }
 
 
@@ -833,6 +1012,7 @@ function applyFilters() {
     group.layers.forEach(l => show ? l.addTo(map) : map.removeLayer(l));
   });
 
+  updateSelectionCount();
   updateStats();
 }
 
@@ -996,16 +1176,1103 @@ function buildRouteDayLayerControls() {
 }
 
 
-// ================= PROCESS ROUTE EXCEL =================
-function processExcelBuffer(buffer) {
+// ================= COLUMN MAPPING (UPLOAD) =================
+const COLUMN_MAPPING_FIELDS = [
+  { key: "LATITUDE", label: "Latitude", required: true },
+  { key: "LONGITUDE", label: "Longitude", required: true },
+  { key: "NEWROUTE", label: "Route Code", required: false },
+  { key: "NEWDAY", label: "Day", required: false },
+  { key: "del_status", label: "Delivery Status", required: false },
+  { key: "CSADR#", label: "Street Number", required: false },
+  { key: "CSSDIR", label: "Street Direction", required: false },
+  { key: "CSSTRT", label: "Street Name", required: false },
+  { key: "CSSFUX", label: "Street Suffix", required: false },
+  { key: "SIZE", label: "Container Size", required: false },
+  { key: "QTY", label: "Quantity", required: false },
+  { key: "BINNO", label: "Bin Number", required: false }
+];
+
+const COLUMN_MAPPING_ALIASES = {
+  LATITUDE: ["latitude", "lat", "y", "ycoord", "ycoordinate"],
+  LONGITUDE: ["longitude", "lon", "lng", "long", "x", "xcoord", "xcoordinate"],
+  NEWROUTE: ["newroute", "route", "routecode", "routeid", "rte"],
+  NEWDAY: ["newday", "day", "weekday", "serviceday"],
+  del_status: ["delstatus", "deliverystatus", "status", "delivered", "stopstatus"],
+  "CSADR#": ["csadr", "addressnumber", "streetnumber", "housenumber"],
+  CSSDIR: ["cssdir", "streetdir", "direction", "predir"],
+  CSSTRT: ["csstrt", "street", "streetname", "road"],
+  CSSFUX: ["cssfux", "streetsuffix", "suffix", "sfx"],
+  SIZE: ["size", "containersize", "binsize"],
+  QTY: ["qty", "quantity", "count"],
+  BINNO: ["binno", "bin", "binnumber", "containerid"]
+};
+
+function normalizeColumnName(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function getColumnMappingStorageKey(headers) {
+  const normalized = [...headers]
+    .map(normalizeColumnName)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  return `colmap:${APP_STORAGE_NS}:${normalized}`;
+}
+
+function loadSavedColumnMapping(headers) {
+  try {
+    const raw = localStorage.getItem(getColumnMappingStorageKey(headers));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveColumnMapping(headers, mapping) {
+  try {
+    localStorage.setItem(getColumnMappingStorageKey(headers), JSON.stringify(mapping || {}));
+  } catch (_) {
+    // Ignore storage failures.
+  }
+}
+
+function buildColumnMappingGuess(headers) {
+  const normalizedHeaders = headers.map(h => ({
+    raw: h,
+    norm: normalizeColumnName(h)
+  }));
+
+  const mapping = {};
+  const used = new Set();
+
+  const pickBest = field => {
+    const fieldNorm = normalizeColumnName(field.key);
+    const aliases = [field.key, ...(COLUMN_MAPPING_ALIASES[field.key] || [])]
+      .map(normalizeColumnName);
+
+    const scored = normalizedHeaders
+      .filter(h => !used.has(h.raw))
+      .map(h => {
+        let score = 0;
+        if (h.norm === fieldNorm) score = 100;
+        else if (aliases.includes(h.norm)) score = 90;
+        else if (aliases.some(a => a && (h.norm.includes(a) || a.includes(h.norm)))) score = 60;
+        return { header: h.raw, score };
+      })
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scored.length ? scored[0].header : "";
+  };
+
+  COLUMN_MAPPING_FIELDS.forEach(field => {
+    const picked = pickBest(field);
+    if (picked) used.add(picked);
+    mapping[field.key] = picked;
+  });
+
+  return mapping;
+}
+
+function ensureColumnMappingModal() {
+  let modal = document.getElementById("columnMappingModal");
+  if (modal) return modal;
+
+  modal = document.createElement("div");
+  modal.id = "columnMappingModal";
+  modal.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "background:rgba(10,14,20,0.68)",
+    "display:none",
+    "align-items:center",
+    "justify-content:center",
+    "z-index:12000",
+    "padding:18px"
+  ].join(";");
+
+  modal.innerHTML = `
+    <div style="width:min(680px,100%);max-height:86vh;overflow:auto;background:#172230;border:1px solid #32465c;border-radius:12px;padding:14px 14px 12px;color:#eef6ff;">
+      <div style="font-size:18px;font-weight:700;margin-bottom:6px;">Map Upload Columns</div>
+      <div id="columnMappingDesc" style="font-size:12px;color:#b7c9db;margin-bottom:12px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:10px;">
+        <button id="columnMappingSuggestBtn" type="button" class="primary-btn" style="background:#2a3a4d;color:#eaf4ff;">Use Suggested</button>
+      </div>
+      <div id="columnMappingRequiredTitle" style="font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#dff0ff;margin:0 0 8px;"></div>
+      <div id="columnMappingRequiredFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;margin-bottom:12px;"></div>
+      <div id="columnMappingOptionalTitle" style="font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#9eb6cc;margin:0 0 8px;">Optional Fields</div>
+      <div id="columnMappingOptionalFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;"></div>
+      <div id="columnMappingError" style="min-height:18px;color:#ffb4b4;font-size:12px;margin-top:8px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+        <button id="columnMappingCancelBtn" type="button" class="primary-btn" style="background:#3b4d62;color:#fff;">Cancel</button>
+        <button id="columnMappingApplyBtn" type="button" class="primary-btn">Apply Mapping</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function openColumnMappingPrompt(headers, initialMapping, fileName, sampleByHeader = {}) {
+  return new Promise(resolve => {
+    const modal = ensureColumnMappingModal();
+    const desc = modal.querySelector("#columnMappingDesc");
+    const requiredTitle = modal.querySelector("#columnMappingRequiredTitle");
+    const requiredBox = modal.querySelector("#columnMappingRequiredFields");
+    const optionalBox = modal.querySelector("#columnMappingOptionalFields");
+    const errorBox = modal.querySelector("#columnMappingError");
+    const suggestBtn = modal.querySelector("#columnMappingSuggestBtn");
+    const cancelBtn = modal.querySelector("#columnMappingCancelBtn");
+    const applyBtn = modal.querySelector("#columnMappingApplyBtn");
+
+    desc.textContent = `File: ${fileName || "Selected file"}. Only Latitude and Longitude are required. Missing optional fields will use smart defaults.`;
+    errorBox.textContent = "";
+    requiredBox.innerHTML = "";
+    optionalBox.innerHTML = "";
+
+    const selectByKey = {};
+    const sortedHeaders = [...headers].sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true })
+    );
+    const updateRequiredTitle = () => {
+      const missing = COLUMN_MAPPING_FIELDS
+        .filter(f => f.required)
+        .filter(f => !selectByKey[f.key]?.value).length;
+      requiredTitle.textContent = `Required Fields (${missing} missing)`;
+      requiredTitle.style.color = missing ? "#ffd6d6" : "#d6ffd8";
+    };
+
+    const renderField = (field, container) => {
+      const row = document.createElement("label");
+      row.style.display = "flex";
+      row.style.flexDirection = "column";
+      row.style.gap = "4px";
+      row.style.padding = "8px";
+      row.style.border = "1px solid #33485d";
+      row.style.borderRadius = "9px";
+      row.style.background = "rgba(255,255,255,0.03)";
+
+      const title = document.createElement("span");
+      title.textContent = `${field.label}${field.required ? " *" : ""}`;
+      title.style.fontSize = "12px";
+      title.style.color = field.required ? "#dff0ff" : "#b7c9db";
+
+      const select = document.createElement("select");
+      select.style.cssText = "height:32px;border-radius:8px;border:1px solid #3f566f;background:#0f1822;color:#eef6ff;padding:0 8px;";
+      select.dataset.key = field.key;
+
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = field.required ? "Select a column..." : "Not mapped";
+      select.appendChild(blank);
+
+      sortedHeaders.forEach(header => {
+        const opt = document.createElement("option");
+        opt.value = header;
+        opt.textContent = header;
+        select.appendChild(opt);
+      });
+
+      const expandedSize = Math.min(10, Math.max(4, sortedHeaders.length + 1));
+      const collapseSelect = () => {
+        select.size = 1;
+        select.style.height = "32px";
+        select.dataset.expanded = "0";
+      };
+      const expandSelect = () => {
+        select.size = expandedSize;
+        select.style.height = "auto";
+        select.dataset.expanded = "1";
+      };
+
+      collapseSelect();
+      if (window.innerWidth > 900) {
+        select.addEventListener("mousedown", e => {
+          // Keep the list attached to the field so it remains scrollable in-page.
+          e.preventDefault();
+          if (select.dataset.expanded === "1") collapseSelect();
+          else expandSelect();
+          select.focus();
+        });
+      }
+      select.addEventListener("blur", collapseSelect);
+
+      const sample = document.createElement("span");
+      sample.style.fontSize = "11px";
+      sample.style.color = "#9eb6cc";
+      sample.style.minHeight = "14px";
+
+      const setSample = () => {
+        const picked = select.value;
+        const value = picked ? sampleByHeader[picked] : "";
+        sample.textContent = picked
+          ? `Sample: ${String(value || "(blank)").slice(0, 80)}`
+          : "Sample: —";
+      };
+
+      select.value = initialMapping[field.key] || "";
+      select.addEventListener("change", () => {
+        setSample();
+        updateRequiredTitle();
+        collapseSelect();
+      });
+      setSample();
+
+      row.appendChild(title);
+      row.appendChild(select);
+      row.appendChild(sample);
+      container.appendChild(row);
+      selectByKey[field.key] = select;
+    };
+
+    COLUMN_MAPPING_FIELDS.filter(f => f.required).forEach(field => renderField(field, requiredBox));
+    COLUMN_MAPPING_FIELDS.filter(f => !f.required).forEach(field => renderField(field, optionalBox));
+    updateRequiredTitle();
+
+    suggestBtn.onclick = () => {
+      COLUMN_MAPPING_FIELDS.forEach(field => {
+        selectByKey[field.key].value = initialMapping[field.key] || "";
+        selectByKey[field.key].dispatchEvent(new Event("change"));
+      });
+      errorBox.textContent = "";
+    };
+
+    const close = value => {
+      modal.style.display = "none";
+      suggestBtn.onclick = null;
+      cancelBtn.onclick = null;
+      applyBtn.onclick = null;
+      resolve(value);
+    };
+
+    cancelBtn.onclick = () => close(null);
+    applyBtn.onclick = () => {
+      const mapping = {};
+      const selected = [];
+
+      for (const field of COLUMN_MAPPING_FIELDS) {
+        const value = selectByKey[field.key].value;
+        if (field.required && !value) {
+          errorBox.textContent = `Please map required field: ${field.label}.`;
+          return;
+        }
+        if (value) selected.push(value);
+        mapping[field.key] = value;
+      }
+
+      const dupes = selected.filter((v, i) => selected.indexOf(v) !== i);
+      if (dupes.length) {
+        errorBox.textContent = "Each source column can only be mapped once.";
+        return;
+      }
+
+      saveColumnMapping(headers, mapping);
+      close(mapping);
+    };
+
+    modal.style.display = "flex";
+  });
+}
+
+function applyColumnAliasesToRows(rows, mapping) {
+  if (!Array.isArray(rows)) return;
+  rows.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    COLUMN_MAPPING_FIELDS.forEach(field => {
+      const targetKey = field.key;
+      const sourceKey = mapping[targetKey];
+      if (!sourceKey || sourceKey === targetKey) return;
+      if (Object.prototype.hasOwnProperty.call(row, targetKey)) return;
+
+      Object.defineProperty(row, targetKey, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          return row[sourceKey];
+        },
+        set(value) {
+          row[sourceKey] = value;
+        }
+      });
+    });
+  });
+}
+
+function getAttributeHeaders(rows) {
+  const seen = new Set();
+  (rows || []).forEach(row => {
+    Object.keys(row || {}).forEach(key => {
+      if (key && !seen.has(key)) seen.add(key);
+    });
+  });
+  return [...seen];
+}
+
+function getAttributeRowId(row) {
+  return attributeRowToId.get(row);
+}
+
+function getAttributeMarker(rowId) {
+  return attributeMarkerByRowId.get(rowId) || null;
+}
+
+function refreshAttributeStatus() {
+  const status = document.getElementById("attributeStatus");
+  if (!status) return;
+  const selectedCount = attributeState.selectedRowIds.size;
+  const visibleCount = attributeState.lastVisibleRows.length;
+  status.textContent = `${selectedCount} selected • ${visibleCount} visible`;
+}
+
+function syncSelectedStopsHeaderCount(count) {
+  const countNode = document.getElementById("selectionCount");
+  if (countNode) countNode.textContent = String(Math.max(0, Number(count) || 0));
+  const mobileBtn = document.getElementById("mobileSelectionBtn");
+  if (mobileBtn) mobileBtn.textContent = `Selected: ${countNode?.textContent || "0"}`;
+}
+
+function applyAttributeSelectionStyles() {
+  attributeMarkerByRowId.forEach((marker, rowId) => {
+    if (!marker || !marker._base?.symbol) return;
+    const baseColor = marker._base.symbol.color;
+    const selected = attributeState.selectedRowIds.has(rowId);
+    const color = selected ? "#ffe066" : baseColor;
+    marker.setStyle?.({
+      color,
+      fillColor: color,
+      fillOpacity: selected ? 1 : 0.95
+    });
+  });
+}
+
+function setAttributeRowSelected(rowId, selected, rerender = true) {
+  if (!Number.isFinite(rowId)) return;
+  if (selected) {
+    attributeState.selectedRowIds.add(rowId);
+  } else {
+    attributeState.selectedRowIds.delete(rowId);
+  }
+  applyAttributeSelectionStyles();
+  refreshAttributeStatus();
+  syncSelectedStopsHeaderCount(attributeState.selectedRowIds.size);
+  if (rerender) renderAttributeTable();
+}
+
+window.focusAttributeRowOnMap = function(rowId) {
+  const marker = getAttributeMarker(Number(rowId));
+  if (!marker) return;
+  const latlng = getLayerLatLng(marker);
+  if (!latlng) return;
+  map.setView(latlng, Math.max(map.getZoom(), 16), { animate: true });
+  marker.openPopup?.();
+};
+
+window.getAttributeSelectedRowIds = function() {
+  return [...attributeState.selectedRowIds];
+};
+
+window.setAttributeSelectedRowIds = function(rowIds) {
+  const ids = Array.isArray(rowIds) ? rowIds : [];
+  const next = new Set(
+    ids
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v))
+  );
+  const prev = attributeState.selectedRowIds;
+  const changed =
+    prev.size !== next.size ||
+    [...prev].some(id => !next.has(id));
+
+  if (!changed) return false;
+  attributeState.selectedRowIds = next;
+  applyAttributeSelectionStyles();
+  refreshAttributeStatus();
+  syncSelectedStopsHeaderCount(next.size);
+  renderAttributeTable();
+  return true;
+};
+
+window.zoomToAttributeRowsOnMap = function(rowIds) {
+  const ids = Array.isArray(rowIds) ? rowIds : [];
+  if (!ids.length) return false;
+  const bounds = L.latLngBounds();
+  ids.forEach(id => {
+    const marker = getAttributeMarker(Number(id));
+    const latlng = getLayerLatLng(marker);
+    if (latlng) bounds.extend(latlng);
+  });
+  if (!bounds.isValid()) return false;
+  map.fitBounds(bounds.pad(0.18));
+  return true;
+};
+
+function getFilteredAttributeRows() {
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const headers = window._attributeHeaders || [];
+  const needle = attributeState.filterText.trim().toLowerCase();
+
+  let data = rows
+    .map(row => ({ row, rowId: getAttributeRowId(row) }))
+    .filter(item => Number.isFinite(item.rowId));
+
+  if (needle) {
+    data = data.filter(({ row }) =>
+      headers.some(h => String(row?.[h] ?? "").toLowerCase().includes(needle))
+    );
+  }
+
+  if (attributeState.selectedOnly) {
+    data = data.filter(({ rowId }) => attributeState.selectedRowIds.has(rowId));
+  }
+
+  if (attributeState.sortKey) {
+    const key = attributeState.sortKey;
+    const dir = attributeState.sortDir;
+    data.sort((a, b) => {
+      const av = a.row?.[key];
+      const bv = b.row?.[key];
+      const an = Number(av);
+      const bn = Number(bv);
+      if (Number.isFinite(an) && Number.isFinite(bn)) {
+        return (an - bn) * dir;
+      }
+      return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+    });
+  }
+
+  attributeState.lastVisibleRows = data;
+  return data;
+}
+
+function renderAttributeTable() {
+  const table = document.getElementById("attributeTableGrid");
+  const empty = document.getElementById("attributeTableEmpty");
+  const pageInfo = document.getElementById("attributePageInfo");
+  const prevBtn = document.getElementById("attributePrevPageBtn");
+  const nextBtn = document.getElementById("attributeNextPageBtn");
+  if (!table || !empty) return;
+
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const headers = window._attributeHeaders || [];
+
+  if (!rows.length || !headers.length) {
+    table.innerHTML = "";
+    empty.style.display = "block";
+    if (pageInfo) pageInfo.textContent = "Page 1/1";
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    refreshAttributeStatus();
+    return;
+  }
+
+  const visibleRows = getFilteredAttributeRows();
+  const totalRows = visibleRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / attributeState.pageSize));
+  if (attributeState.page > totalPages) attributeState.page = totalPages;
+  if (attributeState.page < 1) attributeState.page = 1;
+  const pageStart = (attributeState.page - 1) * attributeState.pageSize;
+  const pageRows = visibleRows.slice(pageStart, pageStart + attributeState.pageSize);
+
+  if (pageInfo) pageInfo.textContent = `Page ${attributeState.page}/${totalPages}`;
+  if (prevBtn) prevBtn.disabled = attributeState.page <= 1;
+  if (nextBtn) nextBtn.disabled = attributeState.page >= totalPages;
+
+  empty.style.display = visibleRows.length ? "none" : "block";
+  if (!visibleRows.length) {
+    table.innerHTML = "";
+    if (pageInfo) pageInfo.textContent = "Page 1/1";
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    refreshAttributeStatus();
+    return;
+  }
+
+  const sortIndicator = (key) => {
+    if (attributeState.sortKey !== key) return "";
+    return attributeState.sortDir > 0 ? " ▲" : " ▼";
+  };
+
+  let html = "<thead><tr><th>Sel</th><th>#</th>";
+  headers.forEach(h => {
+    html += `<th><button type="button" data-sort="${h.replace(/"/g, "&quot;")}">${h}${sortIndicator(h)}</button></th>`;
+  });
+  html += "</tr></thead><tbody>";
+
+  pageRows.forEach(({ row, rowId }, idx) => {
+    const checked = attributeState.selectedRowIds.has(rowId) ? " checked" : "";
+    html += `<tr data-row-id="${rowId}" class="${checked ? "selected" : ""}">`;
+    html += `<td><input type="checkbox" data-row-select="${rowId}"${checked}></td>`;
+    html += `<td>${pageStart + idx + 1}</td>`;
+    headers.forEach(h => {
+      const value = row?.[h];
+      html += `<td>${String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</td>`;
+    });
+    html += "</tr>";
+  });
+  html += "</tbody>";
+  table.innerHTML = html;
+
+  table.querySelectorAll("button[data-sort]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      const key = e.currentTarget.getAttribute("data-sort");
+      if (!key) return;
+      if (attributeState.sortKey === key) {
+        attributeState.sortDir = attributeState.sortDir * -1;
+      } else {
+        attributeState.sortKey = key;
+        attributeState.sortDir = 1;
+      }
+      attributeState.page = 1;
+      renderAttributeTable();
+    });
+  });
+
+  table.querySelectorAll("input[data-row-select]").forEach(input => {
+    input.addEventListener("change", e => {
+      const rowId = Number(e.currentTarget.getAttribute("data-row-select"));
+      setAttributeRowSelected(rowId, e.currentTarget.checked, true);
+    });
+  });
+
+  table.querySelectorAll("tbody tr").forEach(tr => {
+    tr.addEventListener("click", e => {
+      if (e.target.closest("input")) return;
+      const rowId = Number(tr.getAttribute("data-row-id"));
+      if (!Number.isFinite(rowId)) return;
+      window.focusAttributeRowOnMap(rowId);
+    });
+  });
+
+  refreshAttributeStatus();
+}
+
+function exportAttributeVisibleRowsToCsv() {
+  const headers = window._attributeHeaders || [];
+  const rows = getFilteredAttributeRows();
+  if (!rows.length || !headers.length) {
+    alert("No attribute rows to export.");
+    return;
+  }
+
+  const esc = (v) => {
+    const raw = String(v ?? "");
+    if (/[",\n]/.test(raw)) return `"${raw.replace(/"/g, "\"\"")}"`;
+    return raw;
+  };
+
+  const lines = [];
+  lines.push(headers.map(esc).join(","));
+  rows.forEach(({ row }) => {
+    lines.push(headers.map(h => esc(row?.[h] ?? "")).join(","));
+  });
+
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "attribute-table.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getAttributePanelBounds() {
+  const mapEl = document.getElementById("map");
+  const header = document.querySelector("header");
+  const selectionBox = document.getElementById("selectionBox");
+  const summary = document.getElementById("bottomSummary");
+
+  const mapRect = mapEl?.getBoundingClientRect?.() || {
+    left: 8,
+    top: 84,
+    right: window.innerWidth - 8,
+    bottom: window.innerHeight - 8
+  };
+
+  const headerBottom = Math.ceil(header?.getBoundingClientRect?.().bottom || 84);
+  let left = Math.max(8, Math.ceil(mapRect.left) + 8);
+  let top = Math.max(headerBottom + 8, Math.ceil(mapRect.top) + 8);
+  let right = Math.min(window.innerWidth - 8, Math.ceil(mapRect.right) - 8);
+  let bottom = Math.min(window.innerHeight - 8, Math.ceil(mapRect.bottom) - 8);
+
+  if (window.innerWidth > 900 && selectionBox && !selectionBox.classList.contains("collapsed")) {
+    const selRect = selectionBox.getBoundingClientRect();
+    right = Math.min(right, Math.floor(selRect.left) - 8);
+  }
+
+  if (summary && !summary.classList.contains("collapsed")) {
+    const sumRect = summary.getBoundingClientRect();
+    bottom = Math.min(bottom, Math.floor(sumRect.top) - 8);
+  }
+
+  return { left, top, right, bottom };
+}
+
+function clampAttributePanelRect(left, top, width, height) {
+  const bounds = getAttributePanelBounds();
+  const minWidth = window.innerWidth > 900 ? 420 : 320;
+  const minHeight = 220;
+  const maxWidth = Math.max(minWidth, bounds.right - bounds.left);
+  const maxHeight = Math.max(minHeight, bounds.bottom - bounds.top);
+
+  const safeWidth = Math.max(minWidth, Math.min(maxWidth, Number(width) || minWidth));
+  const safeHeight = Math.max(minHeight, Math.min(maxHeight, Number(height) || minHeight));
+  const safeLeft = Math.max(bounds.left, Math.min(bounds.right - safeWidth, Number(left) || bounds.left));
+  const safeTop = Math.max(bounds.top, Math.min(bounds.bottom - safeHeight, Number(top) || bounds.top));
+
+  return { left: safeLeft, top: safeTop, width: safeWidth, height: safeHeight, bounds };
+}
+
+function applyAttributePanelRect(panel, rect) {
+  if (!panel || !rect) return;
+  panel.style.left = `${Math.round(rect.left)}px`;
+  panel.style.top = `${Math.round(rect.top)}px`;
+  panel.style.width = `${Math.round(rect.width)}px`;
+  panel.style.height = `${Math.round(rect.height)}px`;
+}
+
+function saveAttributePanelRect(panel) {
+  if (!panel) return;
+  storageSet("attributePanelLeft", Math.round(panel.offsetLeft));
+  storageSet("attributePanelTop", Math.round(panel.offsetTop));
+  storageSet("attributePanelWidth", Math.round(panel.offsetWidth));
+  storageSet("attributePanelHeight", Math.round(panel.offsetHeight));
+}
+
+function refreshMapAfterOverlayChange() {
+  if (!map || typeof map.invalidateSize !== "function") return;
+  requestAnimationFrame(() => {
+    try { map.invalidateSize({ pan: false }); } catch (_) {}
+  });
+  setTimeout(() => {
+    try { map.invalidateSize({ pan: false }); } catch (_) {}
+  }, 120);
+}
+
+function snapAttributePanelToCorner(panel) {
+  if (!panel) return;
+  const rect = clampAttributePanelRect(panel.offsetLeft, panel.offsetTop, panel.offsetWidth, panel.offsetHeight);
+  const threshold = 72;
+  const corners = [
+    { left: rect.bounds.left, top: rect.bounds.top }, // top-left
+    { left: rect.bounds.right - rect.width, top: rect.bounds.top }, // top-right
+    { left: rect.bounds.left, top: rect.bounds.bottom - rect.height }, // bottom-left
+    { left: rect.bounds.right - rect.width, top: rect.bounds.bottom - rect.height } // bottom-right
+  ];
+
+  let closest = null;
+  let minDist = Infinity;
+  corners.forEach(corner => {
+    const dx = rect.left - corner.left;
+    const dy = rect.top - corner.top;
+    const dist = Math.hypot(dx, dy);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = corner;
+    }
+  });
+
+  if (closest && minDist <= threshold) {
+    applyAttributePanelRect(panel, { ...rect, left: closest.left, top: closest.top });
+    return true;
+  }
+  return false;
+}
+
+function syncAttributePanelLayout() {
+  const panel = document.getElementById("attributeTablePanel");
+  const btnDesktop = document.getElementById("attributeTableBtn");
+  const btnMobile = document.getElementById("attributeTableBtnMobile");
+  const collapseBtn = document.getElementById("attributeDockCloseBtn");
+  if (!panel) return;
+
+  const isClosed = panel.classList.contains("closed");
+  const isCollapsed = panel.classList.contains("collapsed");
+  panel.setAttribute("aria-hidden", isClosed ? "true" : "false");
+
+  const label = isClosed ? "Attribute Table" : "Hide Table";
+  if (btnDesktop) btnDesktop.querySelector("span:last-child").textContent = label;
+  if (btnMobile) btnMobile.textContent = isClosed ? "Table" : "Close Table";
+  if (collapseBtn) collapseBtn.textContent = isCollapsed ? "Show" : "Hide";
+}
+
+function openAttributePanel() {
+  const panel = document.getElementById("attributeTablePanel");
+  if (!panel) return;
+  panel.classList.remove("closed", "collapsed");
+  const bounds = getAttributePanelBounds();
+  const savedW = Number(storageGet("attributePanelWidth"));
+  const savedH = Number(storageGet("attributePanelHeight"));
+  const savedL = Number(storageGet("attributePanelLeft"));
+  const savedT = Number(storageGet("attributePanelTop"));
+
+  const defaultWidth = Math.min(980, Math.max(420, bounds.right - bounds.left - 120));
+  const defaultHeight = Math.min(520, Math.max(240, bounds.bottom - bounds.top - 60));
+  const defaultLeft = bounds.left + 16;
+  const defaultTop = bounds.top + 8;
+
+  const rect = clampAttributePanelRect(
+    Number.isFinite(savedL) ? savedL : defaultLeft,
+    Number.isFinite(savedT) ? savedT : defaultTop,
+    Number.isFinite(savedW) ? savedW : defaultWidth,
+    Number.isFinite(savedH) ? savedH : defaultHeight
+  );
+  applyAttributePanelRect(panel, rect);
+  syncAttributePanelLayout();
+  renderAttributeTable();
+  refreshMapAfterOverlayChange();
+}
+
+function closeAttributePanel() {
+  const panel = document.getElementById("attributeTablePanel");
+  if (!panel) return;
+  panel.classList.add("closed");
+  syncAttributePanelLayout();
+  refreshMapAfterOverlayChange();
+}
+
+function zoomToSelectedAttributeRows() {
+  if (!attributeState.selectedRowIds.size) {
+    alert("No selected rows.");
+    return;
+  }
+  const bounds = L.latLngBounds();
+  attributeState.selectedRowIds.forEach(rowId => {
+    const marker = getAttributeMarker(rowId);
+    const latlng = getLayerLatLng(marker);
+    if (latlng) bounds.extend(latlng);
+  });
+  if (!bounds.isValid()) {
+    alert("Selected rows are not currently on the map.");
+    return;
+  }
+  map.fitBounds(bounds.pad(0.18));
+}
+
+function openAttributeTablePopout() {
+  const headers = window._attributeHeaders || [];
+  const rows = (window._currentRows || [])
+    .map(row => ({ rowId: getAttributeRowId(row), values: row }))
+    .filter(item => Number.isFinite(item.rowId));
+  if (!headers.length || !rows.length) {
+    alert("No attribute data to open.");
+    return;
+  }
+
+  const win = window.open("", "_blank", "width=1180,height=700,resizable=yes,scrollbars=yes");
+  if (!win) {
+    alert("Unable to open attribute table window.");
+    return;
+  }
+
+  const seed = JSON.stringify({
+    headers,
+    rows,
+    selectedIds: [...attributeState.selectedRowIds]
+  }).replace(/</g, "\\u003c");
+
+  win.document.write(`
+    <html>
+      <head>
+        <title>Attribute Table</title>
+        <style>
+          body { margin:0; font-family: Roboto, Arial, sans-serif; background:#0f1822; color:#e8f2fd; }
+          .bar { position:sticky; top:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px; background:#1a2938; border-bottom:1px solid #31495f; z-index:4; }
+          .bar button { border:1px solid #5a7ca1; background:#2a4258; color:#edf6ff; border-radius:8px; padding:6px 10px; cursor:pointer; }
+          .bar input[type=text] { min-width:220px; height:32px; border-radius:8px; border:1px solid #5a7ca1; background:#111a24; color:#eaf3fc; padding:0 10px; }
+          .bar label { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid #48647e; border-radius:8px; padding:5px 8px; background:#132130; }
+          .status { margin-left:auto; font-size:12px; color:#c8dcf1; }
+          .wrap { padding:10px; height:calc(100vh - 128px); overflow:auto; }
+          table { border-collapse:collapse; min-width:100%; width:max-content; background:#16212b; }
+          th, td { border:1px solid #31475b; padding:6px 8px; white-space:nowrap; font-size:12px; }
+          th { position:sticky; top:0; background:#26394a; text-align:left; }
+          th button { border:0; background:transparent; color:inherit; font:inherit; font-weight:700; cursor:pointer; padding:0; }
+          tbody tr { cursor:pointer; }
+          tbody tr:nth-child(even) { background:#192633; }
+          tbody tr.selected { background: rgba(84,176,255,0.22); }
+        </style>
+      </head>
+      <body>
+        <div class="bar">
+          <button onclick="window.close()">Close</button>
+          <input id="searchInput" type="text" placeholder="Filter records by any field..." />
+          <label><input id="selectedOnly" type="checkbox" /> Selected only</label>
+          <button id="selectVisibleBtn">Select Visible</button>
+          <button id="clearSelectedBtn">Clear Selection</button>
+          <button id="zoomSelectedBtn">Zoom to Selected</button>
+          <button id="exportCsvBtn">Export CSV</button>
+          <button id="prevBtn">Prev</button>
+          <button id="nextBtn">Next</button>
+          <span id="pageInfo">Page 1/1</span>
+          <span id="status" class="status">0 selected</span>
+        </div>
+        <div class="wrap">
+          <table id="table"></table>
+        </div>
+        <script>
+          const seed = ${seed};
+          const headers = seed.headers || [];
+          const rows = seed.rows || [];
+          let selectedSet = new Set(seed.selectedIds || []);
+          const state = { sortKey: null, sortDir: 1, filterText: "", selectedOnly: false, page: 1, pageSize: 300 };
+
+          const table = document.getElementById("table");
+          const pageInfo = document.getElementById("pageInfo");
+          const status = document.getElementById("status");
+          const prevBtn = document.getElementById("prevBtn");
+          const nextBtn = document.getElementById("nextBtn");
+          const searchInput = document.getElementById("searchInput");
+          const selectedOnly = document.getElementById("selectedOnly");
+          const selectVisibleBtn = document.getElementById("selectVisibleBtn");
+          const clearSelectedBtn = document.getElementById("clearSelectedBtn");
+          const zoomSelectedBtn = document.getElementById("zoomSelectedBtn");
+          const exportCsvBtn = document.getElementById("exportCsvBtn");
+
+          function setsEqual(a, b) {
+            if (a.size !== b.size) return false;
+            for (const value of a) {
+              if (!b.has(value)) return false;
+            }
+            return true;
+          }
+
+          function pullSelectionFromOpener() {
+            if (!window.opener || typeof window.opener.getAttributeSelectedRowIds !== "function") return false;
+            const ids = window.opener.getAttributeSelectedRowIds() || [];
+            const next = new Set(ids.map(v => Number(v)).filter(v => Number.isFinite(v)));
+            if (setsEqual(selectedSet, next)) return false;
+            selectedSet = next;
+            return true;
+          }
+
+          function pushSelectionToOpener() {
+            if (!window.opener || typeof window.opener.setAttributeSelectedRowIds !== "function") return;
+            window.opener.setAttributeSelectedRowIds([...selectedSet]);
+          }
+
+          function esc(v) {
+            return String(v ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          }
+
+          function getFilteredRows() {
+            const needle = (state.filterText || "").trim().toLowerCase();
+            let data = rows.slice();
+            if (needle) {
+              data = data.filter(item => headers.some(h => String(item.values?.[h] ?? "").toLowerCase().includes(needle)));
+            }
+            if (state.selectedOnly) {
+              data = data.filter(item => selectedSet.has(item.rowId));
+            }
+            if (state.sortKey) {
+              const key = state.sortKey;
+              const dir = state.sortDir;
+              data.sort((a, b) => {
+                const av = a.values?.[key];
+                const bv = b.values?.[key];
+                const an = Number(av);
+                const bn = Number(bv);
+                if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
+                return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+              });
+            }
+            return data;
+          }
+
+          function exportCsv(items) {
+            if (!items.length) return;
+            const csvEsc = (v) => {
+              const raw = String(v ?? "");
+              return /[",\\n]/.test(raw) ? ('"' + raw.replace(/"/g, '""') + '"') : raw;
+            };
+            const lines = [headers.map(csvEsc).join(",")];
+            items.forEach(item => lines.push(headers.map(h => csvEsc(item.values?.[h] ?? "")).join(",")));
+            const blob = new Blob([lines.join("\\n")], { type: "text/csv;charset=utf-8;" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "attribute-table.csv";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+          }
+
+          function render() {
+            const filtered = getFilteredRows();
+            const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
+            state.page = Math.max(1, Math.min(state.page, totalPages));
+            const start = (state.page - 1) * state.pageSize;
+            const pageRows = filtered.slice(start, start + state.pageSize);
+
+            const sortMarker = (key) => state.sortKey === key ? (state.sortDir > 0 ? " ▲" : " ▼") : "";
+            let html = "<thead><tr><th>Sel</th><th>#</th>";
+            headers.forEach(h => {
+              html += '<th><button type="button" data-sort="' + esc(h) + '">' + esc(h) + sortMarker(h) + "</button></th>";
+            });
+            html += "</tr></thead><tbody>";
+            pageRows.forEach((item, i) => {
+              const checked = selectedSet.has(item.rowId) ? " checked" : "";
+              html += '<tr data-row-id="' + item.rowId + '" class="' + (checked ? "selected" : "") + '">';
+              html += '<td><input type="checkbox" data-row-select="' + item.rowId + '"' + checked + "></td>";
+              html += "<td>" + (start + i + 1) + "</td>";
+              headers.forEach(h => {
+                html += "<td>" + esc(item.values?.[h] ?? "") + "</td>";
+              });
+              html += "</tr>";
+            });
+            html += "</tbody>";
+            table.innerHTML = html;
+
+            pageInfo.textContent = "Page " + state.page + "/" + totalPages;
+            status.textContent = selectedSet.size + " selected • " + filtered.length + " visible";
+            prevBtn.disabled = state.page <= 1;
+            nextBtn.disabled = state.page >= totalPages;
+
+            table.querySelectorAll("button[data-sort]").forEach(btn => {
+              btn.addEventListener("click", () => {
+                const key = btn.getAttribute("data-sort");
+                if (!key) return;
+                if (state.sortKey === key) state.sortDir *= -1;
+                else { state.sortKey = key; state.sortDir = 1; }
+                state.page = 1;
+                render();
+              });
+            });
+
+            table.querySelectorAll("input[data-row-select]").forEach(input => {
+              input.addEventListener("change", () => {
+                const rowId = Number(input.getAttribute("data-row-select"));
+                if (!Number.isFinite(rowId)) return;
+                if (input.checked) selectedSet.add(rowId);
+                else selectedSet.delete(rowId);
+                pushSelectionToOpener();
+                render();
+              });
+            });
+
+            table.querySelectorAll("tbody tr[data-row-id]").forEach(tr => {
+              tr.addEventListener("click", (e) => {
+                if (e.target.closest("input")) return;
+                const rowId = Number(tr.getAttribute("data-row-id"));
+                if (window.opener && Number.isFinite(rowId) && typeof window.opener.focusAttributeRowOnMap === "function") {
+                  window.opener.focusAttributeRowOnMap(rowId);
+                }
+              });
+            });
+          }
+
+          searchInput.addEventListener("input", () => { state.filterText = searchInput.value || ""; state.page = 1; render(); });
+          selectedOnly.addEventListener("change", () => {
+            pullSelectionFromOpener();
+            state.selectedOnly = !!selectedOnly.checked;
+            state.page = 1;
+            render();
+          });
+          prevBtn.addEventListener("click", () => { state.page = Math.max(1, state.page - 1); render(); });
+          nextBtn.addEventListener("click", () => { state.page += 1; render(); });
+          selectVisibleBtn.addEventListener("click", () => {
+            getFilteredRows().forEach(item => selectedSet.add(item.rowId));
+            pushSelectionToOpener();
+            render();
+          });
+          clearSelectedBtn.addEventListener("click", () => {
+            selectedSet.clear();
+            pushSelectionToOpener();
+            render();
+          });
+          zoomSelectedBtn.addEventListener("click", () => {
+            pullSelectionFromOpener();
+            const selectedIds = [...selectedSet];
+            if (!selectedIds.length) return;
+            if (window.opener && typeof window.opener.zoomToAttributeRowsOnMap === "function") {
+              const ok = window.opener.zoomToAttributeRowsOnMap(selectedIds);
+              if (ok) return;
+            }
+            if (window.opener && typeof window.opener.focusAttributeRowOnMap === "function") {
+              window.opener.focusAttributeRowOnMap(selectedIds[0]);
+            }
+          });
+          exportCsvBtn.addEventListener("click", () => exportCsv(getFilteredRows()));
+
+          window.addEventListener("focus", () => {
+            if (pullSelectionFromOpener()) render();
+          });
+          setInterval(() => {
+            const changed = pullSelectionFromOpener();
+            if (changed) render();
+          }, 500);
+
+          pullSelectionFromOpener();
+          render();
+        <\/script>
+      </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+async function prepareMappedWorkbookForUpload(buffer, fileName) {
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-  const rows = XLSX.utils.sheet_to_json(ws);
+  if (!rows.length) return { wb, rows };
+
+  const headerSet = new Set();
+  rows.slice(0, Math.min(rows.length, 25)).forEach(row => {
+    Object.keys(row || {}).forEach(k => {
+      if (k) headerSet.add(k);
+    });
+  });
+  const headers = [...headerSet];
+  const guess = buildColumnMappingGuess(headers);
+  const saved = loadSavedColumnMapping(headers) || {};
+  const initial = {};
+  COLUMN_MAPPING_FIELDS.forEach(field => {
+    const savedValue = saved[field.key];
+    initial[field.key] = headers.includes(savedValue) ? savedValue : (guess[field.key] || "");
+  });
+  const sampleByHeader = {};
+  headers.forEach(h => {
+    const row = rows.find(r => String(r?.[h] ?? "").trim() !== "");
+    sampleByHeader[h] = row ? row[h] : "";
+  });
+
+  const mapping = await openColumnMappingPrompt(headers, initial, fileName, sampleByHeader);
+  if (!mapping) return null;
+
+  applyColumnAliasesToRows(rows, mapping);
+  return { wb, rows };
+}
+
+// ================= PROCESS ROUTE EXCEL =================
+function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = null) {
+  const wb = preMappedWorkbook || XLSX.read(new Uint8Array(buffer), { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+
+  const rows = preMappedRows || XLSX.utils.sheet_to_json(ws);
 
   // store globally for saving later
   window._currentRows = rows;
   window._currentWorkbook = wb;
+  window._attributeHeaders = getAttributeHeaders(rows);
+  attributeState.page = 1;
+  attributeState.selectedRowIds.clear();
+  syncSelectedStopsHeaderCount(0);
+  attributeRowToMarker = new WeakMap();
+  attributeMarkerByRowId.clear();
+  rows.forEach((row, rowIndex) => attributeRowToId.set(row, rowIndex));
 
   // Clear previous map data
   Object.values(routeDayGroups).forEach(g => g.layers.forEach(l => map.removeLayer(l)));
@@ -1016,13 +2283,13 @@ function processExcelBuffer(buffer) {
 
   const routeSet = new Set();
 
-  rows.forEach(row => {
+  rows.forEach((row, rowIndex) => {
     const lat = Number(row.LATITUDE);
     const lon = Number(row.LONGITUDE);
-    const route = String(row.NEWROUTE);
-    const day = String(row.NEWDAY);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
-    if (!lat || !lon || !route || !day) return;
+    const route = String(row.NEWROUTE ?? "").trim() || "Unassigned";
+    const day = String(row.NEWDAY ?? "").trim() || "No Day";
 
     const key = `${route}|${day}`;
 
@@ -1070,6 +2337,9 @@ if (labelText) {
 
     // 🔥 CRITICAL: link marker to Excel row
     marker._rowRef = row;
+    marker._rowId = rowIndex;
+    attributeRowToMarker.set(row, marker);
+    attributeMarkerByRowId.set(rowIndex, marker);
     routeDayGroups[key].layers.push(marker);
     routeSet.add(route);
     globalBounds.extend([lat, lon]);
@@ -1078,6 +2348,8 @@ if (labelText) {
   buildRouteCheckboxes([...routeSet]);
   buildRouteDayLayerControls();
   applyFilters();
+  renderAttributeTable();
+  refreshAttributeStatus();
 
   if (globalBounds.isValid()) map.fitBounds(globalBounds);
 }
@@ -1091,26 +2363,13 @@ async function listFiles() {
 
   const ul = document.getElementById("savedFiles");
   ul.innerHTML = "";
+  const routeFiles = data.filter(file => !isRouteSummaryFileName(file.name));
+  const allFileNames = data.map(f => f.name);
+  cleanupSummaryAttachments(allFileNames);
 
-  const routeFiles = {};
-  const summaryFiles = {};
-
- // Separate route files and summary files
-data.forEach(file => {
-  const name = file.name.toLowerCase();
-
-  if (name.includes("routesummary")) {
-    summaryFiles[normalizeName(name)] = file.name;
-  } else {
-    routeFiles[normalizeName(name)] = file.name;
-  }
-});
-
-
-  // Build UI
-  Object.keys(routeFiles).forEach(key => {
-    const routeName = routeFiles[key];
-    const summaryName = summaryFiles[key];
+  routeFiles.forEach(file => {
+    const routeName = file.name;
+    const summaryName = resolveSummaryForRoute(routeName, data);
 
     const li = document.createElement("li");
 
@@ -1184,6 +2443,14 @@ openBtn.textContent = "Open Map";
   if (summaryName) toDelete.push(summaryName);
 
   await sb.storage.from(BUCKET).remove(toDelete);
+  removeRouteSummaryAttachment(routeName);
+  if (summaryName) {
+    const map = getSummaryAttachments();
+    Object.keys(map).forEach(routeKey => {
+      if (map[routeKey] === summaryName) delete map[routeKey];
+    });
+    setSummaryAttachments(map);
+  }
 
   alert("✅ File deleted successfully.");
   listFiles();
@@ -1203,6 +2470,11 @@ async function uploadFile(file) {
 
   try {
 
+    const fileBuffer = await file.arrayBuffer();
+    const mappedWorkbook = await prepareMappedWorkbookForUpload(fileBuffer, file.name);
+    if (!mappedWorkbook) {
+      return;
+    }
     showLoading("Uploading file...");
 
     const { error } = await sb.storage
@@ -1216,7 +2488,7 @@ async function uploadFile(file) {
     window._currentFilePath = file.name;
     setCurrentFileDisplay(window._currentFilePath);
 
-    processExcelBuffer(await file.arrayBuffer());
+    processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
     listFiles();
 
     hideLoading("Upload Complete ✅");
@@ -1225,6 +2497,49 @@ async function uploadFile(file) {
     console.error("UPLOAD ERROR:", error);
     hideLoading();
     alert("Upload failed: " + error.message);
+  }
+}
+
+async function uploadRouteSummaryAndAttach(file) {
+  if (!file) return;
+
+  try {
+    showLoading("Uploading route summary...");
+
+    const { error } = await sb.storage
+      .from(BUCKET)
+      .upload(file.name, file, { upsert: true });
+
+    if (error) throw error;
+
+    const { data: files, error: listErr } = await sb.storage.from(BUCKET).list();
+    if (listErr) throw listErr;
+
+    const routeFileNames = files
+      .filter(f => !isRouteSummaryFileName(f.name))
+      .map(f => f.name);
+
+    hideLoading();
+
+    if (!routeFileNames.length) {
+      alert("Summary uploaded, but no route files are saved yet. Upload a route file first, then attach this summary.");
+      listFiles();
+      return;
+    }
+
+    const selectedRoute = await openSummaryAttachModal(file.name, routeFileNames);
+    if (!selectedRoute) {
+      listFiles();
+      return;
+    }
+
+    setRouteSummaryAttachment(selectedRoute, file.name);
+    alert(`Attached ${file.name} to ${selectedRoute}.`);
+    listFiles();
+  } catch (error) {
+    console.error("SUMMARY UPLOAD ERROR:", error);
+    hideLoading();
+    alert("Route summary upload failed: " + error.message);
   }
 }
 
@@ -1335,32 +2650,13 @@ async function loadSummaryFor(routeFileName) {
     return;
   }
 
-  console.log("ALL FILES:", data.map(f => f.name));
-  console.log("ROUTE FILE CLICKED:", routeFileName);
-
-  const normalizedRoute = normalizeName(routeFileName);
-  console.log("NORMALIZED ROUTE:", normalizedRoute);
-
-  const summary = data.find(f => {
-    const lower = f.name.toLowerCase();
-    const normalizedSummary = normalizeName(f.name);
-
-    console.log("CHECKING:", f.name, "→", normalizedSummary);
-
-    return (
-      lower.includes("routesummary") ||
-      lower.includes("route summary")
-    ) && normalizedSummary === normalizedRoute;
-  });
-
-  console.log("FOUND SUMMARY:", summary);
-
-  if (!summary) {
+  const summaryName = resolveSummaryForRoute(routeFileName, data);
+  if (!summaryName) {
     document.getElementById("routeSummaryTable").textContent = "No summary available";
     return;
   }
 
-  const { data: urlData } = sb.storage.from(BUCKET).getPublicUrl(summary.name);
+  const { data: urlData } = sb.storage.from(BUCKET).getPublicUrl(summaryName);
   const r = await fetch(urlData.publicUrl);
 
   const wb = XLSX.read(new Uint8Array(await r.arrayBuffer()), { type: "array" });
@@ -1570,6 +2866,7 @@ if (clearBtn) {
     selectedLayerKey = null;
     // Remove polygon
     drawnLayer.clearLayers();
+    attributeState.selectedRowIds.clear();
 
     
 
@@ -1584,6 +2881,7 @@ if (clearBtn) {
 
     // 🔥 Force counter refresh everywhere (desktop + mobile)
     updateSelectionCount();
+    renderAttributeTable();
     updateUndoButtonState();
   };
 }
@@ -1595,10 +2893,246 @@ if (clearBtn) {
 
 
   
-// ===== FILE UPLOAD (DRAG + CLICK) =====
-const dropZone = document.getElementById("dropZone");
+// ===== IMPORT WIZARD + FILE UPLOAD =====
+const attributePanel = document.getElementById("attributeTablePanel");
+const attributeBtnDesktop = document.getElementById("attributeTableBtn");
+const attributeBtnMobile = document.getElementById("attributeTableBtnMobile");
+const attributeCloseBtn = document.getElementById("attributeDockCloseBtn");
+const attributePopoutBtn = document.getElementById("attributePopoutBtn");
+const attributeSearchInput = document.getElementById("attributeSearchInput");
+const attributeSelectedOnly = document.getElementById("attributeSelectedOnly");
+const attributeSelectVisibleBtn = document.getElementById("attributeSelectVisibleBtn");
+const attributeClearSelectionBtn = document.getElementById("attributeClearSelectionBtn");
+const attributeZoomSelectedBtn = document.getElementById("attributeZoomSelectedBtn");
+const attributeExportCsvBtn = document.getElementById("attributeExportCsvBtn");
+const attributePrevPageBtn = document.getElementById("attributePrevPageBtn");
+const attributeNextPageBtn = document.getElementById("attributeNextPageBtn");
+const attributeHeaderBar = attributePanel?.querySelector(".attribute-table-header");
+const attributeResizeHandles = attributePanel
+  ? [...attributePanel.querySelectorAll(".attribute-resize-handle[data-dir]")]
+  : [];
 
-// create hidden file input dynamically (so no HTML change needed)
+if (attributePanel) {
+  attributePanel.classList.add("closed");
+  attributePanel.classList.remove("collapsed");
+  const interaction = {
+    mode: null,
+    dir: "",
+    startX: 0,
+    startY: 0,
+    startLeft: 0,
+    startTop: 0,
+    startW: 0,
+    startH: 0,
+    popoutIntent: false
+  };
+
+  if (attributeHeaderBar) {
+    attributeHeaderBar.addEventListener("pointerdown", e => {
+      if (attributePanel.classList.contains("closed") || attributePanel.classList.contains("collapsed")) return;
+      if (e.target.closest("button, input, label")) return;
+      interaction.mode = "move";
+      interaction.startX = e.clientX;
+      interaction.startY = e.clientY;
+      interaction.startLeft = attributePanel.offsetLeft;
+      interaction.startTop = attributePanel.offsetTop;
+      interaction.startW = attributePanel.offsetWidth;
+      interaction.startH = attributePanel.offsetHeight;
+      interaction.popoutIntent = false;
+      document.body.style.userSelect = "none";
+      attributePanel.classList.add("dragging");
+      attributeHeaderBar.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    });
+  }
+
+  attributeResizeHandles.forEach(handle => {
+    handle.addEventListener("pointerdown", e => {
+      if (attributePanel.classList.contains("closed") || attributePanel.classList.contains("collapsed")) return;
+      interaction.mode = "resize";
+      interaction.dir = handle.dataset.dir || "se";
+      interaction.startX = e.clientX;
+      interaction.startY = e.clientY;
+      interaction.startLeft = attributePanel.offsetLeft;
+      interaction.startTop = attributePanel.offsetTop;
+      interaction.startW = attributePanel.offsetWidth;
+      interaction.startH = attributePanel.offsetHeight;
+      document.body.style.userSelect = "none";
+      handle.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    });
+  });
+
+  document.addEventListener("pointermove", e => {
+    if (!interaction.mode || attributePanel.classList.contains("closed")) return;
+    let left = interaction.startLeft;
+    let top = interaction.startTop;
+    let width = interaction.startW;
+    let height = interaction.startH;
+
+    const dx = e.clientX - interaction.startX;
+    const dy = e.clientY - interaction.startY;
+
+    if (interaction.mode === "move") {
+      const rawLeft = interaction.startLeft + dx;
+      const rawTop = interaction.startTop + dy;
+      const rawRight = rawLeft + interaction.startW;
+      const rawBottom = rawTop + interaction.startH;
+      const bounds = getAttributePanelBounds();
+      const detachMargin = 80;
+
+      interaction.popoutIntent =
+        rawLeft < bounds.left - detachMargin ||
+        rawTop < bounds.top - detachMargin ||
+        rawRight > bounds.right + detachMargin ||
+        rawBottom > bounds.bottom + detachMargin;
+
+      attributePanel.classList.toggle("detach-ready", interaction.popoutIntent);
+      left = rawLeft;
+      top = rawTop;
+    } else if (interaction.mode === "resize") {
+      // Keep resize smooth and direct while still slightly boosted.
+      const cornerDrag = interaction.dir.length === 2;
+      const speed = cornerDrag ? 1.35 : 1.2;
+      const sx = dx * speed;
+      const sy = dy * speed;
+
+      if (interaction.dir.includes("e")) {
+        width = interaction.startW + sx;
+      }
+      if (interaction.dir.includes("s")) {
+        height = interaction.startH + sy;
+      }
+      if (interaction.dir.includes("w")) {
+        width = interaction.startW - sx;
+        left = interaction.startLeft + sx;
+      }
+      if (interaction.dir.includes("n")) {
+        height = interaction.startH - sy;
+        top = interaction.startTop + sy;
+      }
+    }
+
+    if (interaction.mode === "move" && interaction.popoutIntent) {
+      // Let the panel follow the cursor outside bounds for intuitive "detach" feel.
+      attributePanel.style.left = `${Math.round(left)}px`;
+      attributePanel.style.top = `${Math.round(top)}px`;
+      attributePanel.style.width = `${Math.round(interaction.startW)}px`;
+      attributePanel.style.height = `${Math.round(interaction.startH)}px`;
+    } else {
+      const rect = clampAttributePanelRect(left, top, width, height);
+      applyAttributePanelRect(attributePanel, rect);
+    }
+  });
+
+  document.addEventListener("pointerup", () => {
+    if (!interaction.mode) return;
+    if (interaction.mode === "move" && interaction.popoutIntent) {
+      interaction.mode = null;
+      interaction.dir = "";
+      interaction.popoutIntent = false;
+      document.body.style.userSelect = "";
+      attributePanel.classList.remove("dragging", "detach-ready");
+      openAttributeTablePopout();
+      closeAttributePanel();
+      return;
+    }
+    if (interaction.mode === "move") {
+      snapAttributePanelToCorner(attributePanel);
+    }
+    interaction.mode = null;
+    interaction.dir = "";
+    interaction.popoutIntent = false;
+    document.body.style.userSelect = "";
+    attributePanel.classList.remove("dragging", "detach-ready");
+    saveAttributePanelRect(attributePanel);
+    refreshMapAfterOverlayChange();
+  });
+}
+
+const toggleAttributePanel = () => {
+  if (!attributePanel) return;
+  const isClosed = attributePanel.classList.contains("closed");
+  if (isClosed) {
+    openAttributePanel();
+    return;
+  }
+  closeAttributePanel();
+};
+
+attributeBtnDesktop?.addEventListener("click", toggleAttributePanel);
+attributeBtnMobile?.addEventListener("click", toggleAttributePanel);
+
+attributeCloseBtn?.addEventListener("click", () => {
+  if (!attributePanel) return;
+  attributePanel.classList.toggle("collapsed");
+  syncAttributePanelLayout();
+  refreshMapAfterOverlayChange();
+});
+
+attributePopoutBtn?.addEventListener("click", openAttributeTablePopout);
+
+attributeSearchInput?.addEventListener("input", () => {
+  attributeState.filterText = attributeSearchInput.value || "";
+  attributeState.page = 1;
+  renderAttributeTable();
+});
+
+attributeSelectedOnly?.addEventListener("change", () => {
+  attributeState.selectedOnly = !!attributeSelectedOnly.checked;
+  attributeState.page = 1;
+  renderAttributeTable();
+});
+
+attributeSelectVisibleBtn?.addEventListener("click", () => {
+  getFilteredAttributeRows().forEach(({ rowId }) => attributeState.selectedRowIds.add(rowId));
+  applyAttributeSelectionStyles();
+  syncSelectedStopsHeaderCount(attributeState.selectedRowIds.size);
+  renderAttributeTable();
+});
+
+attributeClearSelectionBtn?.addEventListener("click", () => {
+  attributeState.selectedRowIds.clear();
+  applyAttributeSelectionStyles();
+  syncSelectedStopsHeaderCount(0);
+  renderAttributeTable();
+});
+
+attributeZoomSelectedBtn?.addEventListener("click", zoomToSelectedAttributeRows);
+attributeExportCsvBtn?.addEventListener("click", exportAttributeVisibleRowsToCsv);
+attributePrevPageBtn?.addEventListener("click", () => {
+  attributeState.page = Math.max(1, attributeState.page - 1);
+  renderAttributeTable();
+});
+attributeNextPageBtn?.addEventListener("click", () => {
+  attributeState.page = attributeState.page + 1;
+  renderAttributeTable();
+});
+
+window.addEventListener("resize", () => {
+  syncAttributePanelLayout();
+  if (!attributePanel || attributePanel.classList.contains("closed")) return;
+  const rect = clampAttributePanelRect(
+    attributePanel.offsetLeft,
+    attributePanel.offsetTop,
+    attributePanel.offsetWidth,
+    attributePanel.offsetHeight
+  );
+  applyAttributePanelRect(attributePanel, rect);
+  saveAttributePanelRect(attributePanel);
+  refreshMapAfterOverlayChange();
+});
+syncAttributePanelLayout();
+renderAttributeTable();
+
+const importWizardBtn = document.getElementById("importWizardBtn");
+const importWizardBtnMobile = document.getElementById("importWizardBtnMobile");
+const importWizardModal = document.getElementById("importWizardModal");
+const importWizardRouteBtn = document.getElementById("importWizardRouteBtn");
+const importWizardSummaryBtn = document.getElementById("importWizardSummaryBtn");
+const importWizardClose = document.getElementById("importWizardClose");
+
+// create hidden file inputs dynamically (fallback)
 let fileInput = document.getElementById("fileInput");
 if (!fileInput) {
   fileInput = document.createElement("input");
@@ -1609,34 +3143,68 @@ if (!fileInput) {
   document.body.appendChild(fileInput);
 }
 
-// CLICK → open picker
-dropZone.addEventListener("click", () => fileInput.click());
+let summaryFileInput = document.getElementById("summaryFileInput");
+if (!summaryFileInput) {
+  summaryFileInput = document.createElement("input");
+  summaryFileInput.type = "file";
+  summaryFileInput.accept = ".xlsx,.xls,.csv";
+  summaryFileInput.id = "summaryFileInput";
+  summaryFileInput.hidden = true;
+  document.body.appendChild(summaryFileInput);
+}
+
+function closeImportWizardModal() {
+  if (importWizardModal) importWizardModal.style.display = "none";
+}
+
+if (importWizardBtn && importWizardModal) {
+  importWizardBtn.addEventListener("click", () => {
+    importWizardModal.style.display = "flex";
+  });
+}
+
+if (importWizardBtnMobile && importWizardModal) {
+  importWizardBtnMobile.addEventListener("click", () => {
+    importWizardModal.style.display = "flex";
+  });
+}
+
+if (importWizardClose) {
+  importWizardClose.addEventListener("click", closeImportWizardModal);
+}
+
+if (importWizardModal) {
+  importWizardModal.addEventListener("click", e => {
+    if (e.target === importWizardModal) closeImportWizardModal();
+  });
+}
+
+if (importWizardRouteBtn) {
+  importWizardRouteBtn.addEventListener("click", () => {
+    closeImportWizardModal();
+    fileInput.click();
+  });
+}
+
+if (importWizardSummaryBtn) {
+  importWizardSummaryBtn.addEventListener("click", () => {
+    closeImportWizardModal();
+    summaryFileInput.click();
+  });
+}
 
 // FILE SELECTED
 fileInput.addEventListener("change", e => {
   const file = e.target.files[0];
   if (file) uploadFile(file);
+  e.target.value = "";
 });
 
-// PREVENT browser opening file on drop
-["dragenter", "dragover", "dragleave", "drop"].forEach(evt => {
-  dropZone.addEventListener(evt, e => e.preventDefault());
+summaryFileInput.addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (file) uploadRouteSummaryAndAttach(file);
+  e.target.value = "";
 });
-
-["dragenter", "dragover"].forEach(evt => {
-  dropZone.addEventListener(evt, () => dropZone.classList.add("drag-active"));
-});
-
-["dragleave", "drop"].forEach(evt => {
-  dropZone.addEventListener(evt, () => dropZone.classList.remove("drag-active"));
-});
-
-// DROP → upload
-dropZone.addEventListener("drop", e => {
-  const file = e.dataTransfer.files[0];
-  if (file) uploadFile(file);
-});
-
 
 // ===== INITIAL MAP LAYER + USER LOCATION =====
 baseMaps.streets.addTo(map);
@@ -3176,6 +4744,10 @@ if (routesToggle && routesContent) {
 
   listFiles();
 }
+
+
+
+
 
 
 

@@ -1072,12 +1072,375 @@ if (layerVisibilityState.hasOwnProperty(key)) {
 }
 
 
-// ================= PROCESS ROUTE EXCEL =================
-function processExcelBuffer(buffer) {
+// ================= COLUMN MAPPING (UPLOAD) =================
+const COLUMN_MAPPING_FIELDS = [
+  { key: "LATITUDE", label: "Latitude", required: true },
+  { key: "LONGITUDE", label: "Longitude", required: true },
+  { key: "NEWROUTE", label: "Route Code", required: false },
+  { key: "NEWDAY", label: "Day", required: false },
+  { key: "del_status", label: "Delivery Status", required: false },
+  { key: "CSADR#", label: "Street Number", required: false },
+  { key: "CSSDIR", label: "Street Direction", required: false },
+  { key: "CSSTRT", label: "Street Name", required: false },
+  { key: "CSSFUX", label: "Street Suffix", required: false },
+  { key: "SIZE", label: "Container Size", required: false },
+  { key: "QTY", label: "Quantity", required: false },
+  { key: "BINNO", label: "Bin Number", required: false }
+];
+
+const COLUMN_MAPPING_ALIASES = {
+  LATITUDE: ["latitude", "lat", "y", "ycoord", "ycoordinate"],
+  LONGITUDE: ["longitude", "lon", "lng", "long", "x", "xcoord", "xcoordinate"],
+  NEWROUTE: ["newroute", "route", "routecode", "routeid", "rte"],
+  NEWDAY: ["newday", "day", "weekday", "serviceday"],
+  del_status: ["delstatus", "deliverystatus", "status", "delivered", "stopstatus"],
+  "CSADR#": ["csadr", "addressnumber", "streetnumber", "housenumber"],
+  CSSDIR: ["cssdir", "streetdir", "direction", "predir"],
+  CSSTRT: ["csstrt", "street", "streetname", "road"],
+  CSSFUX: ["cssfux", "streetsuffix", "suffix", "sfx"],
+  SIZE: ["size", "containersize", "binsize"],
+  QTY: ["qty", "quantity", "count"],
+  BINNO: ["binno", "bin", "binnumber", "containerid"]
+};
+
+function normalizeColumnName(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function getColumnMappingStorageKey(headers) {
+  const normalized = [...headers]
+    .map(normalizeColumnName)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  return `colmap:${APP_STORAGE_NS}:${normalized}`;
+}
+
+function loadSavedColumnMapping(headers) {
+  try {
+    const raw = localStorage.getItem(getColumnMappingStorageKey(headers));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveColumnMapping(headers, mapping) {
+  try {
+    localStorage.setItem(getColumnMappingStorageKey(headers), JSON.stringify(mapping || {}));
+  } catch (_) {
+    // Ignore storage failures.
+  }
+}
+
+function buildColumnMappingGuess(headers) {
+  const normalizedHeaders = headers.map(h => ({
+    raw: h,
+    norm: normalizeColumnName(h)
+  }));
+
+  const mapping = {};
+  const used = new Set();
+
+  const pickBest = field => {
+    const fieldNorm = normalizeColumnName(field.key);
+    const aliases = [field.key, ...(COLUMN_MAPPING_ALIASES[field.key] || [])]
+      .map(normalizeColumnName);
+
+    const scored = normalizedHeaders
+      .filter(h => !used.has(h.raw))
+      .map(h => {
+        let score = 0;
+        if (h.norm === fieldNorm) score = 100;
+        else if (aliases.includes(h.norm)) score = 90;
+        else if (aliases.some(a => a && (h.norm.includes(a) || a.includes(h.norm)))) score = 60;
+        return { header: h.raw, score };
+      })
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scored.length ? scored[0].header : "";
+  };
+
+  COLUMN_MAPPING_FIELDS.forEach(field => {
+    const picked = pickBest(field);
+    if (picked) used.add(picked);
+    mapping[field.key] = picked;
+  });
+
+  return mapping;
+}
+
+function ensureColumnMappingModal() {
+  let modal = document.getElementById("columnMappingModal");
+  if (modal) return modal;
+
+  modal = document.createElement("div");
+  modal.id = "columnMappingModal";
+  modal.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "background:rgba(10,14,20,0.68)",
+    "display:none",
+    "align-items:center",
+    "justify-content:center",
+    "z-index:12000",
+    "padding:18px"
+  ].join(";");
+
+  modal.innerHTML = `
+    <div style="width:min(680px,100%);max-height:86vh;overflow:auto;background:#172230;border:1px solid #32465c;border-radius:12px;padding:14px 14px 12px;color:#eef6ff;">
+      <div style="font-size:18px;font-weight:700;margin-bottom:6px;">Map Upload Columns</div>
+      <div id="columnMappingDesc" style="font-size:12px;color:#b7c9db;margin-bottom:12px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:10px;">
+        <button id="columnMappingSuggestBtn" type="button" class="primary-btn" style="background:#2a3a4d;color:#eaf4ff;">Use Suggested</button>
+      </div>
+      <div id="columnMappingRequiredTitle" style="font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#dff0ff;margin:0 0 8px;"></div>
+      <div id="columnMappingRequiredFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;margin-bottom:12px;"></div>
+      <div id="columnMappingOptionalTitle" style="font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#9eb6cc;margin:0 0 8px;">Optional Fields</div>
+      <div id="columnMappingOptionalFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;"></div>
+      <div id="columnMappingError" style="min-height:18px;color:#ffb4b4;font-size:12px;margin-top:8px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+        <button id="columnMappingCancelBtn" type="button" class="primary-btn" style="background:#3b4d62;color:#fff;">Cancel</button>
+        <button id="columnMappingApplyBtn" type="button" class="primary-btn">Apply Mapping</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function openColumnMappingPrompt(headers, initialMapping, fileName, sampleByHeader = {}) {
+  return new Promise(resolve => {
+    const modal = ensureColumnMappingModal();
+    const desc = modal.querySelector("#columnMappingDesc");
+    const requiredTitle = modal.querySelector("#columnMappingRequiredTitle");
+    const requiredBox = modal.querySelector("#columnMappingRequiredFields");
+    const optionalBox = modal.querySelector("#columnMappingOptionalFields");
+    const errorBox = modal.querySelector("#columnMappingError");
+    const suggestBtn = modal.querySelector("#columnMappingSuggestBtn");
+    const cancelBtn = modal.querySelector("#columnMappingCancelBtn");
+    const applyBtn = modal.querySelector("#columnMappingApplyBtn");
+
+    desc.textContent = `File: ${fileName || "Selected file"}. Only Latitude and Longitude are required. Missing optional fields will use smart defaults.`;
+    errorBox.textContent = "";
+    requiredBox.innerHTML = "";
+    optionalBox.innerHTML = "";
+
+    const selectByKey = {};
+    const sortedHeaders = [...headers].sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true })
+    );
+    const updateRequiredTitle = () => {
+      const missing = COLUMN_MAPPING_FIELDS
+        .filter(f => f.required)
+        .filter(f => !selectByKey[f.key]?.value).length;
+      requiredTitle.textContent = `Required Fields (${missing} missing)`;
+      requiredTitle.style.color = missing ? "#ffd6d6" : "#d6ffd8";
+    };
+
+    const renderField = (field, container) => {
+      const row = document.createElement("label");
+      row.style.display = "flex";
+      row.style.flexDirection = "column";
+      row.style.gap = "4px";
+      row.style.padding = "8px";
+      row.style.border = "1px solid #33485d";
+      row.style.borderRadius = "9px";
+      row.style.background = "rgba(255,255,255,0.03)";
+
+      const title = document.createElement("span");
+      title.textContent = `${field.label}${field.required ? " *" : ""}`;
+      title.style.fontSize = "12px";
+      title.style.color = field.required ? "#dff0ff" : "#b7c9db";
+
+      const select = document.createElement("select");
+      select.style.cssText = "height:32px;border-radius:8px;border:1px solid #3f566f;background:#0f1822;color:#eef6ff;padding:0 8px;";
+      select.dataset.key = field.key;
+
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = field.required ? "Select a column..." : "Not mapped";
+      select.appendChild(blank);
+
+      sortedHeaders.forEach(header => {
+        const opt = document.createElement("option");
+        opt.value = header;
+        opt.textContent = header;
+        select.appendChild(opt);
+      });
+
+      const expandedSize = Math.min(10, Math.max(4, sortedHeaders.length + 1));
+      const collapseSelect = () => {
+        select.size = 1;
+        select.style.height = "32px";
+        select.dataset.expanded = "0";
+      };
+      const expandSelect = () => {
+        select.size = expandedSize;
+        select.style.height = "auto";
+        select.dataset.expanded = "1";
+      };
+
+      collapseSelect();
+      if (window.innerWidth > 900) {
+        select.addEventListener("mousedown", e => {
+          // Keep the list attached to the field so it remains scrollable in-page.
+          e.preventDefault();
+          if (select.dataset.expanded === "1") collapseSelect();
+          else expandSelect();
+          select.focus();
+        });
+      }
+      select.addEventListener("blur", collapseSelect);
+
+      const sample = document.createElement("span");
+      sample.style.fontSize = "11px";
+      sample.style.color = "#9eb6cc";
+      sample.style.minHeight = "14px";
+
+      const setSample = () => {
+        const picked = select.value;
+        const value = picked ? sampleByHeader[picked] : "";
+        sample.textContent = picked
+          ? `Sample: ${String(value || "(blank)").slice(0, 80)}`
+          : "Sample: —";
+      };
+
+      select.value = initialMapping[field.key] || "";
+      select.addEventListener("change", () => {
+        setSample();
+        updateRequiredTitle();
+        collapseSelect();
+      });
+      setSample();
+
+      row.appendChild(title);
+      row.appendChild(select);
+      row.appendChild(sample);
+      container.appendChild(row);
+      selectByKey[field.key] = select;
+    };
+
+    COLUMN_MAPPING_FIELDS.filter(f => f.required).forEach(field => renderField(field, requiredBox));
+    COLUMN_MAPPING_FIELDS.filter(f => !f.required).forEach(field => renderField(field, optionalBox));
+    updateRequiredTitle();
+
+    suggestBtn.onclick = () => {
+      COLUMN_MAPPING_FIELDS.forEach(field => {
+        selectByKey[field.key].value = initialMapping[field.key] || "";
+        selectByKey[field.key].dispatchEvent(new Event("change"));
+      });
+      errorBox.textContent = "";
+    };
+
+    const close = value => {
+      modal.style.display = "none";
+      suggestBtn.onclick = null;
+      cancelBtn.onclick = null;
+      applyBtn.onclick = null;
+      resolve(value);
+    };
+
+    cancelBtn.onclick = () => close(null);
+    applyBtn.onclick = () => {
+      const mapping = {};
+      const selected = [];
+
+      for (const field of COLUMN_MAPPING_FIELDS) {
+        const value = selectByKey[field.key].value;
+        if (field.required && !value) {
+          errorBox.textContent = `Please map required field: ${field.label}.`;
+          return;
+        }
+        if (value) selected.push(value);
+        mapping[field.key] = value;
+      }
+
+      const dupes = selected.filter((v, i) => selected.indexOf(v) !== i);
+      if (dupes.length) {
+        errorBox.textContent = "Each source column can only be mapped once.";
+        return;
+      }
+
+      saveColumnMapping(headers, mapping);
+      close(mapping);
+    };
+
+    modal.style.display = "flex";
+  });
+}
+
+function applyColumnAliasesToRows(rows, mapping) {
+  if (!Array.isArray(rows)) return;
+  rows.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    COLUMN_MAPPING_FIELDS.forEach(field => {
+      const targetKey = field.key;
+      const sourceKey = mapping[targetKey];
+      if (!sourceKey || sourceKey === targetKey) return;
+      if (Object.prototype.hasOwnProperty.call(row, targetKey)) return;
+
+      Object.defineProperty(row, targetKey, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          return row[sourceKey];
+        },
+        set(value) {
+          row[sourceKey] = value;
+        }
+      });
+    });
+  });
+}
+
+async function prepareMappedWorkbookForUpload(buffer, fileName) {
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-  const rows = XLSX.utils.sheet_to_json(ws);
+  if (!rows.length) return { wb, rows };
+
+  const headerSet = new Set();
+  rows.slice(0, Math.min(rows.length, 25)).forEach(row => {
+    Object.keys(row || {}).forEach(k => {
+      if (k) headerSet.add(k);
+    });
+  });
+  const headers = [...headerSet];
+  const guess = buildColumnMappingGuess(headers);
+  const saved = loadSavedColumnMapping(headers) || {};
+  const initial = {};
+  COLUMN_MAPPING_FIELDS.forEach(field => {
+    const savedValue = saved[field.key];
+    initial[field.key] = headers.includes(savedValue) ? savedValue : (guess[field.key] || "");
+  });
+  const sampleByHeader = {};
+  headers.forEach(h => {
+    const row = rows.find(r => String(r?.[h] ?? "").trim() !== "");
+    sampleByHeader[h] = row ? row[h] : "";
+  });
+
+  const mapping = await openColumnMappingPrompt(headers, initial, fileName, sampleByHeader);
+  if (!mapping) return null;
+
+  applyColumnAliasesToRows(rows, mapping);
+  return { wb, rows };
+}
+
+// ================= PROCESS ROUTE EXCEL =================
+function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = null) {
+  const wb = preMappedWorkbook || XLSX.read(new Uint8Array(buffer), { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+
+  const rows = preMappedRows || XLSX.utils.sheet_to_json(ws);
 
   // store globally for saving later
   window._currentRows = rows;
@@ -1095,10 +1458,10 @@ function processExcelBuffer(buffer) {
   rows.forEach(row => {
     const lat = Number(row.LATITUDE);
     const lon = Number(row.LONGITUDE);
-    const route = String(row.NEWROUTE);
-    const day = String(row.NEWDAY);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
-    if (!lat || !lon || !route || !day) return;
+    const route = String(row.NEWROUTE ?? "").trim() || "Unassigned";
+    const day = String(row.NEWDAY ?? "").trim() || "No Day";
 
     let key;
 
@@ -1306,6 +1669,11 @@ async function uploadFile(file) {
 
   try {
 
+    const fileBuffer = await file.arrayBuffer();
+    const mappedWorkbook = await prepareMappedWorkbookForUpload(fileBuffer, file.name);
+    if (!mappedWorkbook) {
+      return;
+    }
     showLoading("Uploading file...");
 
     const { error } = await sb.storage
@@ -1319,7 +1687,7 @@ async function uploadFile(file) {
     window._currentFilePath = file.name;
     setCurrentFileDisplay(window._currentFilePath);
 
-    processExcelBuffer(await file.arrayBuffer());
+    processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
     listFiles();
 
     hideLoading("Upload Complete ✅");
@@ -3527,6 +3895,9 @@ document.getElementById("completeStopsBtnMobile")
   
   listFiles();
 }
+
+
+
 
 
 
