@@ -345,6 +345,22 @@ if (hardRefreshBtn) {
   });
 }
 
+function placeRefreshButton() {
+  const refreshBtn = document.getElementById("hardRefreshBtn");
+  const desktopTools = document.querySelector(".header-tools-desktop");
+  const mobileButtons = document.querySelector(".mobile-header-buttons");
+
+  if (!refreshBtn || !desktopTools || !mobileButtons) return;
+
+  if (window.innerWidth > 900) {
+    desktopTools.appendChild(refreshBtn);
+  } else {
+    mobileButtons.insertBefore(refreshBtn, mobileButtons.firstChild);
+  }
+}
+
+placeRefreshButton();
+window.addEventListener("resize", placeRefreshButton);
 
 //======
 
@@ -401,13 +417,10 @@ const canvasRenderer = L.canvas({ padding: 0.5 });
 
 // ===== BASE MAP LAYERS =====
 const baseMaps = {
-  streets: L.tileLayer(
-    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    {
-      maxZoom: 19,
+  streets: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
       maxNativeZoom: 19
-    }
-  ),
+    }),
 
   satellite: L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -883,7 +896,32 @@ function buildRouteDayLayerControls() {
   routeDayContainer.innerHTML = "";
   deliveredContainer.innerHTML = "";
 
-  Object.entries(routeDayGroups).forEach(([key, group]) => {
+  const daySortRank = value => {
+    const v = String(value ?? "").trim().toLowerCase();
+    const byName = {
+      "1": 1, mon: 1, monday: 1,
+      "2": 2, tue: 2, tues: 2, tuesday: 2,
+      "3": 3, wed: 3, wednesday: 3,
+      "4": 4, thu: 4, thur: 4, thurs: 4, thursday: 4,
+      "5": 5, fri: 5, friday: 5,
+      "6": 6, sat: 6, saturday: 6,
+      "7": 7, sun: 7, sunday: 7,
+      delivered: 99
+    };
+    if (Object.prototype.hasOwnProperty.call(byName, v)) return byName[v];
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 98;
+  };
+
+  const sortedRouteDayEntries = Object.entries(routeDayGroups).sort(([aKey], [bKey]) => {
+    const [aRoute = "", aDay = ""] = aKey.split("|");
+    const [bRoute = "", bDay = ""] = bKey.split("|");
+    const routeCmp = aRoute.localeCompare(bRoute, undefined, { numeric: true, sensitivity: "base" });
+    if (routeCmp !== 0) return routeCmp;
+    return daySortRank(aDay) - daySortRank(bDay);
+  });
+
+  sortedRouteDayEntries.forEach(([key, group]) => {
     const count = group.layers ? group.layers.length : 0;
     const [route, type] = key.split("|");
     const dayNameMap = {
@@ -3489,5 +3527,15 @@ document.getElementById("completeStopsBtnMobile")
   
   listFiles();
 }
+
+
+
+
+
+
+
+
+
+
 
 

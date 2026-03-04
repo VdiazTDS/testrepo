@@ -55,12 +55,12 @@
 
 
   <p>Periodically export a backend Excel backup (top-left download button)</p>
+  <div id="desktopSelectionHeader" class="desktop-selection-header"></div>
 
   <div class="mobile-header-buttons">
     <button id="hardRefreshBtn" class="primary-btn" title="Reload app data and clear cached view">Refresh App</button>
     <button id="mobileMenuBtn">☰ Menu</button>
     <button id="locateMeBtn" class="primary-btn">📍</button>
-    <button id="completeStopsBtnMobile" class="primary-btn">✔</button>
   </div>
 
 </header>
@@ -111,11 +111,6 @@
     
     
 <div class="filter-group">
-  <strong>Delivered</strong>
-  <div id="deliveredControls"></div>
-</div>
-
-<div class="filter-group">
   <div class="filter-header collapsible-header" id="routeDayToggle">
     <div class="routes-title">
       <span class="arrow">▶</span>
@@ -132,23 +127,6 @@
   </div>
 </div>
 
-    
-<div class="map-search-container">
-  <input 
-    type="text" 
-    id="mapSearchInput" 
-    placeholder="Search by address or number"
-  />
-  <button id="mapSearchBtn">Search</button>
-</div>
-<div id="searchResultsPanel" class="search-results hidden">
-  <div class="search-results-header">
-    Search Results
-    <button id="clearSearchResults">Clear</button>
-  </div>
-  <div id="searchResultsList"></div>
-</div>
-    
   <div class="filter-group">
 
   <div class="filter-header collapsible-header" id="routesToggle">
@@ -192,30 +170,23 @@
       
     </div>
 
+<div class="map-search-container">
+  <input 
+    type="text" 
+    id="mapSearchInput" 
+    placeholder="Search by address or number"
+  />
+  <button id="mapSearchBtn">Search</button>
+</div>
+<div id="searchResultsPanel" class="search-results hidden">
+  <div class="search-results-header">
+    Search Results
+    <button id="clearSearchResults">Clear</button>
+  </div>
+  <div id="searchResultsList"></div>
+</div>
 
-    
-
-
-
-
-
-
-    
-    <div class="filter-group">
-      <div class="filter-header collapsible-header" id="statsToggle">
-        <div class="routes-title">
-          <span class="arrow">▶</span>
-          <strong>Statistics</strong>
-        </div>
-      </div>
-      <div id="statsContent" class="collapsible-content collapsed">
-        <ul id="statsList"></ul>
-      </div>
-    </div>
-   
-
-
-    <button id="resetMapBtn" class="primary-btn" aria-label="Reset map and clear selections">
+<button id="resetMapBtn" class="primary-btn" aria-label="Reset map and clear selections">
       <span class="reset-map-icon" aria-hidden="true"></span>
       <span class="reset-map-copy">
         <span class="reset-map-title">Reset Map</span>
@@ -249,7 +220,7 @@
 <div id="selectionBox">
 
 
-  <strong>Selected Stops:</strong>
+  <strong id="selectedStopsLabel">Selected Stops:</strong>
   <span id="selectionCount">0</span>
 
   <button id="clearSelectionBtn" class="primary-btn">
@@ -258,19 +229,10 @@
   
   <div id="desktopLocateContainer"></div>
   
-  <button id="completeStopsBtn" class="primary-btn">
-  Complete Stops
-</button>
-
 <label class="street-toggle-label">
   <input type="checkbox" id="streetLabelToggle">
   Street Labels
 </label>
-
-  
-   <button id="undoDeliveredBtn" class="primary-btn undo-btn">
-  Undo Delivered
-</button>
 
 
 
@@ -362,6 +324,10 @@
 </div>
 </body>
 </html>
+
+
+
+
 
 
 

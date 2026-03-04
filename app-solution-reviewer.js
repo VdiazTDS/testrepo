@@ -3,6 +3,7 @@ window.addEventListener("error", e => {
 });
 
 let layerVisibilityState = {};
+let selectedLayerKey = null;
 
 // ================= SUPABASE CONFIG =================
 // Connection info for cloud file storage
@@ -345,6 +346,22 @@ if (hardRefreshBtn) {
   });
 }
 
+function placeRefreshButton() {
+  const refreshBtn = document.getElementById("hardRefreshBtn");
+  const desktopTools = document.querySelector(".header-tools-desktop");
+  const mobileButtons = document.querySelector(".mobile-header-buttons");
+
+  if (!refreshBtn || !desktopTools || !mobileButtons) return;
+
+  if (window.innerWidth > 900) {
+    desktopTools.appendChild(refreshBtn);
+  } else {
+    mobileButtons.insertBefore(refreshBtn, mobileButtons.firstChild);
+  }
+}
+
+placeRefreshButton();
+window.addEventListener("resize", placeRefreshButton);
 
 //======
 
@@ -401,13 +418,10 @@ const canvasRenderer = L.canvas({ padding: 0.5 });
 
 // ===== BASE MAP LAYERS =====
 const baseMaps = {
-  streets: L.tileLayer(
-    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    {
-      maxZoom: 19,
+  streets: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
       maxNativeZoom: 19
-    }
-  ),
+    }),
 
   satellite: L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -461,11 +475,12 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
 
    const latlng = L.latLng(base.lat, base.lon);
 
-   if (
-     polygon &&
-     polygon.getBounds().contains(latlng) &&
-     map.hasLayer(marker)
-   ) {
+   const isLayerSelectMode = !!selectedLayerKey;
+   const selectedByLayer = isLayerSelectMode && key === selectedLayerKey;
+   const selectedByPolygon =
+     !isLayerSelectMode && polygon && polygon.getBounds().contains(latlng);
+
+   if ((selectedByLayer || selectedByPolygon) && map.hasLayer(marker)) {
      // highlight selected marker
      marker.setStyle?.({ color: "#ffff00", fillColor: "#ffff00" });
 
@@ -490,6 +505,7 @@ document.getElementById("selectionCount").textContent = count;
 
 // ===== WHEN POLYGON IS DRAWN =====
 map.on(L.Draw.Event.CREATED, e => {
+  selectedLayerKey = null;
   drawnLayer.clearLayers();
   drawnLayer.addLayer(e.layer);
   updateSelectionCount();
@@ -514,8 +530,15 @@ document.getElementById("baseMapSelect").addEventListener("change", e => {
 
 
 // ================= MAP SYMBOL SETTINGS =================
-const colors = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#1abc9c"];
 const shapes = ["circle","square","triangle","diamond"];
+const MARKER_SIZE_STEPS = [
+  [7, 1.5],
+  [9, 2.2],
+  [11, 3.0],
+  [13, 3.6],
+  [15, 4.4],
+  [Infinity, 5.2]
+];
 
 const symbolMap = {};        // stores symbol for each route/day combo
 const routeDayGroups = {};   // stores map markers grouped by route/day
@@ -558,7 +581,7 @@ window.highlightRouteDayOnMap = function(routeValue, dayValue) {
   Object.keys(routeDayGroups).forEach(key => {
     if (matchingKey) return;
     const [kRoute, kDay] = key.split("|");
-    if (!kRoute || !kDay || kDay === "Delivered") return;
+    if (!kRoute || !kDay) return;
     if (String(kRoute).trim() !== routeToken) return;
 
     const keyDayToken = normalizeDayToken(kDay);
@@ -631,9 +654,11 @@ function dayName(n) {
 // Assign a unique color/shape to each route/day
 function getSymbol(key) {
   if (!symbolMap[key]) {
+    // Generate a distinct color per route+day using golden-angle hue stepping.
+    const hue = Math.round((symbolIndex * 137.508) % 360);
     symbolMap[key] = {
-      color: colors[symbolIndex % colors.length],
-      shape: shapes[Math.floor(symbolIndex / colors.length) % shapes.length]
+      color: `hsl(${hue} 80% 52%)`,
+      shape: shapes[symbolIndex % shapes.length]
     };
     symbolIndex++;
   }
@@ -642,19 +667,9 @@ function getSymbol(key) {
 
 
   function getMarkerPixelSize() {
+  // Same size for all routes at a given zoom level, but smaller when zoomed out.
   const z = map.getZoom();
-
-  const steps = [
-    [5, 0.03],     // almost invisible when fully zoomed out
-    [7, 0.08],
-    [9, 0.2],
-    [11, 0.6],
-    [13, 1.5],
-    [15, 3.5],
-    [Infinity, 6]
-  ];
-
-  return steps.find(([max]) => z <= max)[1];
+  return MARKER_SIZE_STEPS.find(([max]) => z <= max)[1];
 }
 
 
@@ -809,46 +824,12 @@ function applyFilters() {
   const routeCheckboxes = [...document.querySelectorAll("#routeCheckboxes input")];
   const dayCheckboxes   = [...document.querySelectorAll("#dayCheckboxes input")];
 
-  let routes = routeCheckboxes.filter(i => i.checked).map(i => i.value);
+  const routes = routeCheckboxes.filter(i => i.checked).map(i => i.value);
   const days = dayCheckboxes.filter(i => i.checked).map(i => i.value);
 
-  // 🔥 PREVENT route + delivered from both being active
-  const activeRoutes = new Set(routes);
-
-  activeRoutes.forEach(route => {
-
-    if (route.endsWith("|Delivered")) {
-
-      const baseRoute = route.replace("|Delivered", "");
-
-      if (activeRoutes.has(baseRoute)) {
-        const baseCheckbox = routeCheckboxes.find(cb => cb.value === baseRoute);
-        if (baseCheckbox) baseCheckbox.checked = false;
-        activeRoutes.delete(baseRoute);
-      }
-
-    } else {
-
-      const deliveredRoute = route + "|Delivered";
-
-      if (activeRoutes.has(deliveredRoute)) {
-        const deliveredCheckbox = routeCheckboxes.find(cb => cb.value === deliveredRoute);
-        if (deliveredCheckbox) deliveredCheckbox.checked = false;
-        activeRoutes.delete(deliveredRoute);
-      }
-
-    }
-
-  });
-
-  routes = Array.from(activeRoutes);
-
-  // 🔥 Now apply visibility
   Object.entries(routeDayGroups).forEach(([key, group]) => {
     const [r, d] = key.split("|");
-
     const show = routes.includes(r) && days.includes(d);
-
     group.layers.forEach(l => show ? l.addTo(map) : map.removeLayer(l));
   });
 
@@ -860,6 +841,7 @@ function applyFilters() {
 // ================= ROUTE STATISTICS =================
 function updateStats() {
   const list = document.getElementById("statsList");
+  if (!list) return;
   list.innerHTML = "";
 
   Object.entries(routeDayGroups).forEach(([key, group]) => {
@@ -872,115 +854,105 @@ function updateStats() {
     list.appendChild(li);
   });
 }
+
+function selectEntireLayer(key) {
+  const group = routeDayGroups[key];
+  if (!group || !group.layers || !group.layers.length) return;
+
+  layerVisibilityState[key] = true;
+  const layerCheckbox = document.querySelector(`input[data-key="${key}"]`);
+  if (layerCheckbox) layerCheckbox.checked = true;
+
+  const bounds = L.latLngBounds();
+  group.layers.forEach(marker => {
+    map.addLayer(marker);
+    const ll = getLayerLatLng(marker);
+    if (ll) bounds.extend(ll);
+  });
+
+  if (!bounds.isValid()) return;
+
+  selectedLayerKey = key;
+  drawnLayer.clearLayers();
+
+  updateSelectionCount();
+  updateUndoButtonState();
+  map.fitBounds(bounds, { padding: [30, 30], maxZoom: 16 });
+}
   // ===== BUILD ROUTE + DAY LAYER CHECKBOXES =====
 // ===== BUILD ROUTE + DAY LAYER CHECKBOXES =====
 function buildRouteDayLayerControls() {
   const routeDayContainer = document.getElementById("routeDayLayers");
-  const deliveredContainer = document.getElementById("deliveredControls");
-
-  if (!routeDayContainer || !deliveredContainer) return;
+  if (!routeDayContainer) return;
 
   routeDayContainer.innerHTML = "";
-  deliveredContainer.innerHTML = "";
 
-  Object.entries(routeDayGroups).forEach(([key, group]) => {
+  const daySortRank = value => {
+    const v = String(value ?? "").trim().toLowerCase();
+    const byName = {
+      "1": 1, mon: 1, monday: 1,
+      "2": 2, tue: 2, tues: 2, tuesday: 2,
+      "3": 3, wed: 3, wednesday: 3,
+      "4": 4, thu: 4, thur: 4, thurs: 4, thursday: 4,
+      "5": 5, fri: 5, friday: 5,
+      "6": 6, sat: 6, saturday: 6,
+      "7": 7, sun: 7, sunday: 7,
+      delivered: 99
+    };
+    if (Object.prototype.hasOwnProperty.call(byName, v)) return byName[v];
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 98;
+  };
+
+  const sortedRouteDayEntries = Object.entries(routeDayGroups).sort(([aKey], [bKey]) => {
+    const [aRoute = "", aDay = ""] = aKey.split("|");
+    const [bRoute = "", bDay = ""] = bKey.split("|");
+    const routeCmp = aRoute.localeCompare(bRoute, undefined, { numeric: true, sensitivity: "base" });
+    if (routeCmp !== 0) return routeCmp;
+    return daySortRank(aDay) - daySortRank(bDay);
+  });
+
+  sortedRouteDayEntries.forEach(([key, group]) => {
     const count = group.layers ? group.layers.length : 0;
     const [route, type] = key.split("|");
     const dayNameMap = {
-  1: "Monday",
-  2: "Tuesday",
-  3: "Wednesday",
-  4: "Thursday",
-  5: "Friday",
-  6: "Saturday",
-  7: "Sunday"
-};
+      1: "Monday",
+      2: "Tuesday",
+      3: "Wednesday",
+      4: "Thursday",
+      5: "Friday",
+      6: "Saturday",
+      7: "Sunday"
+    };
 
-    // === ROW WRAPPER ===
-const wrapper = document.createElement("div");
-wrapper.className = "layer-item";
+    const wrapper = document.createElement("div");
+    wrapper.className = "layer-item";
 
-
-  
-    // === CHECKBOX ===
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.dataset.key = key;
 
-    // Default state on load:
-// Route + Day = checked
-// Delivered = unchecked
+    if (layerVisibilityState.hasOwnProperty(key)) {
+      checkbox.checked = layerVisibilityState[key];
+    } else {
+      checkbox.checked = true;
+      layerVisibilityState[key] = true;
+    }
 
-if (layerVisibilityState.hasOwnProperty(key)) {
-  checkbox.checked = layerVisibilityState[key];
-} else {
-  if (type === "Delivered") {
-    checkbox.checked = false;
-    layerVisibilityState[key] = false;
-  } else {
-    checkbox.checked = true;
-    layerVisibilityState[key] = true;
-  }
-}
-
-    // Apply visibility immediately
     routeDayGroups[key].layers.forEach(marker => {
-      if (checkbox.checked) {
-        map.addLayer(marker);
-      } else {
-        map.removeLayer(marker);
-      }
+      if (checkbox.checked) map.addLayer(marker);
+      else map.removeLayer(marker);
     });
 
-    // Toggle behavior
     checkbox.addEventListener("change", () => {
+      layerVisibilityState[key] = checkbox.checked;
+      routeDayGroups[key].layers.forEach(marker => {
+        if (checkbox.checked) map.addLayer(marker);
+        else map.removeLayer(marker);
+      });
+    });
 
-  layerVisibilityState[key] = checkbox.checked;
-
-  const [route, type] = key.split("|");
-
-  // 🚫 Prevent Route + Delivered both visible
-  Object.keys(routeDayGroups).forEach(otherKey => {
-
-    const [otherRoute, otherType] = otherKey.split("|");
-
-    if (
-      otherRoute === route &&
-      otherKey !== key &&
-      (
-        (type === "Delivered" && otherType !== "Delivered") ||
-        (type !== "Delivered" && otherType === "Delivered")
-      )
-    ) {
-      // uncheck the conflicting layer
-      layerVisibilityState[otherKey] = false;
-
-      const otherCheckbox =
-        document.querySelector(`input[data-key="${otherKey}"]`);
-
-      if (otherCheckbox) otherCheckbox.checked = false;
-
-      routeDayGroups[otherKey].layers.forEach(m =>
-        map.removeLayer(m)
-      );
-    }
-  });
-
-  // Apply this checkbox visibility
-  routeDayGroups[key].layers.forEach(marker => {
-    if (checkbox.checked) {
-      map.addLayer(marker);
-    } else {
-      map.removeLayer(marker);
-    }
-  });
-
-});
-
-
-    // === SYMBOL PREVIEW ===
     const symbol = getSymbol(key);
-
     const preview = document.createElement("span");
     preview.className = "layer-preview";
     preview.style.background = symbol.color;
@@ -1001,35 +973,25 @@ if (layerVisibilityState.hasOwnProperty(key)) {
       preview.style.transform = "rotate(45deg)";
     }
 
-    // === LABEL ===
     const labelText = document.createElement("span");
-   if (type !== "Delivered") {
-  const dayName = dayNameMap[type] || type;
- if (type !== "Delivered") {
-  const dayName = dayNameMap[type] || type;
-  labelText.textContent = `Route ${route} - ${dayName} (${count})`;
-} else {
-  labelText.textContent = `Route ${route} - Delivered (${count})`;
-}
+    const dayName = dayNameMap[type] || type;
+    labelText.textContent = `Route ${route} - ${dayName} (${count})`;
 
-} else {
-  labelText.textContent = `Route ${route} - Delivered (${count})`;
-}
+    const selectBtn = document.createElement("button");
+    selectBtn.type = "button";
+    selectBtn.className = "mini-btn";
+    selectBtn.textContent = "Select";
+    selectBtn.addEventListener("click", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      selectEntireLayer(key);
+    });
 
-
-
-    // === BUILD ROW ===
     wrapper.appendChild(checkbox);
     wrapper.appendChild(preview);
     wrapper.appendChild(labelText);
-    
-
-    // === Decide which container ===
-    if (type === "Delivered") {
-      deliveredContainer.appendChild(wrapper);
-    } else {
-      routeDayContainer.appendChild(wrapper);
-    }
+    wrapper.appendChild(selectBtn);
+    routeDayContainer.appendChild(wrapper);
   });
 }
 
@@ -1062,17 +1024,7 @@ function processExcelBuffer(buffer) {
 
     if (!lat || !lon || !route || !day) return;
 
-    let key;
-
-const status = String(row.del_status || "")
-  .trim()
-  .toLowerCase();
-
-if (status === "delivered") {
-  key = `${route}|Delivered`;
-} else {
-  key = `${route}|${day}`;
-}
+    const key = `${route}|${day}`;
 
 
     const symbol = getSymbol(key);
@@ -1087,16 +1039,11 @@ const fullAddress = [
   row["CSSFUX"] || ""
 ].join(" ").replace(/\s+/g, " ").trim();
 
-// Build popup content
+// Solution Reviewer popup: route + day only.
 const popupContent = `
   <div style="font-size:14px; line-height:1.4;">
-    <div style="font-weight:bold; font-size:15px; margin-bottom:6px;">
-      ${fullAddress || "Address not available"}
-    </div>
-
-    <div><strong>Container Size:</strong> ${row["SIZE"] || "-"}</div>
-    <div><strong>Quantity:</strong> ${row["QTY"] || "-"}</div>
-    <div><strong>Bin #:</strong> ${row["BINNO"] || "-"}</div>
+    <div><strong>Route:</strong> ${route || "-"}</div>
+    <div><strong>Day:</strong> ${dayName(day) || day || "-"}</div>
   </div>
 `;
 
@@ -1123,18 +1070,6 @@ if (labelText) {
 
     // 🔥 CRITICAL: link marker to Excel row
     marker._rowRef = row;
-
-  // ✅ Bright green delivered styling (SAFE + NORMALIZED)
-if (status === "delivered") {
-  marker.setStyle?.({
-    color: "#00FF00",
-    fillColor: "#00FF00",
-    fillOpacity: 1,
-    opacity: 1
-  });
-}
-
-    
     routeDayGroups[key].layers.push(marker);
     routeSet.add(route);
     globalBounds.extend([lat, lon]);
@@ -1522,79 +1457,34 @@ function toggleSummary() {
 // ===== PLACE LOCATE BUTTON BASED ON SCREEN SIZE =====
 function placeLocateButton() {
   const locateBtn = document.getElementById("locateMeBtn");
-  const completeBtn = document.getElementById("completeStopsBtn");
-  const headerContainer = document.querySelector(".mobile-header-buttons");
+    const headerContainer = document.querySelector(".mobile-header-buttons");
   const desktopContainer = document.getElementById("desktopLocateContainer");
-  const undoBtn = document.getElementById("undoDeliveredBtn");
-  const streetToggle = document.getElementById("streetLabelToggle");
+    const streetToggle = document.getElementById("streetLabelToggle");
 
-  if (!locateBtn || !completeBtn || !headerContainer || !desktopContainer) return;
+  if (!locateBtn || !headerContainer || !desktopContainer) return;
 
   if (window.innerWidth <= 900) {
     // 📱 MOBILE
     headerContainer.appendChild(locateBtn);
-    headerContainer.appendChild(completeBtn);
-    if (undoBtn) headerContainer.appendChild(undoBtn);
 
     if (streetToggle) {
       headerContainer.appendChild(streetToggle.parentElement);
     }
 
-    completeBtn.textContent = "✔";
-
   } else {
     // 🖥 DESKTOP
     desktopContainer.appendChild(locateBtn);
-    desktopContainer.appendChild(completeBtn);
-    if (undoBtn) desktopContainer.appendChild(undoBtn);
 
     if (streetToggle) {
       desktopContainer.appendChild(streetToggle.parentElement);
     }
-
-    completeBtn.textContent = "Complete Stops";
   }
 }
 
 //undo button state
 function updateUndoButtonState() {
-  const undoBtn = document.getElementById("undoDeliveredBtn");
-  if (!undoBtn) return;
-
-  const polygon = drawnLayer.getLayers()[0];
-  if (!polygon) {
-    undoBtn.classList.remove("pulse");
-    return;
-  }
-
-  let hasDeliveredInSelection = false;
-
-  Object.entries(routeDayGroups).forEach(([key, group]) => {
-
-    if (!key.endsWith("|Delivered")) return;
-
-    group.layers.forEach(marker => {
-
-      if (!map.hasLayer(marker)) return;
-
-      const pos = marker.getLatLng();
-
-      if (
-        polygon.getBounds().contains(pos) &&
-        marker._rowRef &&
-        String(marker._rowRef.del_status || "").trim().toLowerCase() === "delivered"
-      ) {
-        hasDeliveredInSelection = true;
-      }
-
-    });
-  });
-
-  if (hasDeliveredInSelection) {
-    undoBtn.classList.add("pulse");
-  } else {
-    undoBtn.classList.remove("pulse");
-  }
+  // Solution Reviewer does not use undo state.
+  return;
 }
 
 
@@ -1613,14 +1503,11 @@ function initApp() { //begining of initApp======================================
 const selectionBox = document.getElementById("selectionBox");
 const toggleSelectionBtn = document.getElementById("toggleSelectionBtn");
 const clearBtn = document.getElementById("clearSelectionBtn");
+const selectedStopsLabel = document.getElementById("selectedStopsLabel");
+const selectionCountNode = document.getElementById("selectionCount");
+const desktopSelectionHeader = document.getElementById("desktopSelectionHeader");
 const pageHeader = document.querySelector("header");
 
-// ===== COMPLETE STOPS BUTTON =====
-const completeBtnDesktop = document.getElementById("completeStopsBtn");
-const completeBtnMobile  = document.getElementById("completeStopsBtnMobile");
-
-
-  
 // Toggle sidebar open/closed
 if (selectionBox && toggleSelectionBtn) {
   toggleSelectionBtn.onclick = () => {
@@ -1646,12 +1533,41 @@ function syncSelectionBoxTop() {
   if (toggleSelectionBtn) toggleSelectionBtn.style.top = `${topOffset + 8}px`;
 }
 
+function placeDesktopSelectionControls() {
+  if (
+    !selectionBox ||
+    !clearBtn ||
+    !selectedStopsLabel ||
+    !selectionCountNode ||
+    !desktopSelectionHeader
+  ) return;
+
+  const desktopLocateContainer = document.getElementById("desktopLocateContainer");
+
+  if (window.innerWidth > 900) {
+    desktopSelectionHeader.appendChild(selectedStopsLabel);
+    desktopSelectionHeader.appendChild(selectionCountNode);
+    desktopSelectionHeader.appendChild(clearBtn);
+  } else {
+    selectionBox.insertBefore(selectedStopsLabel, selectionBox.firstChild);
+    selectionBox.insertBefore(selectionCountNode, selectedStopsLabel.nextSibling);
+    if (desktopLocateContainer) {
+      selectionBox.insertBefore(clearBtn, desktopLocateContainer);
+    } else {
+      selectionBox.appendChild(clearBtn);
+    }
+  }
+}
+
 syncSelectionBoxTop();
+placeDesktopSelectionControls();
 window.addEventListener("resize", syncSelectionBoxTop);
+window.addEventListener("resize", placeDesktopSelectionControls);
 
 // Clear selection button (ALWAYS ACTIVE)
 if (clearBtn) {
   clearBtn.onclick = () => {
+    selectedLayerKey = null;
     // Remove polygon
     drawnLayer.clearLayers();
 
@@ -2743,7 +2659,6 @@ if (resetBtn) {
 
     // 5. Reset counters & stats
     document.getElementById("selectionCount").textContent = "0";
-    document.getElementById("statsList").innerHTML = "";
 
     // 6. Clear route/day checkbox UI
     document.getElementById("routeCheckboxes").innerHTML = "";
@@ -3165,208 +3080,8 @@ async function saveWorkbookToCloud() {
 }
 
 
-// ================= COMPLETE STOPS + SAVE TO CLOUD =================
-async function completeStops() {
-  if (!window._currentRows || !window._currentWorkbook || !window._currentFilePath) {
-    alert("No Excel file loaded.");
-    return;
-  }
-
-  const polygon = drawnLayer.getLayers()[0];
-  if (!polygon) {
-    alert("Draw a selection first.");
-    return;
-  }
-
-  let completedCount = 0;
- 
-
-
-  // find markers inside polygon
-  // 🔥 ONLY process NON-Delivered layers
-Object.entries(routeDayGroups).forEach(([key, group]) => {
-
-  if (key.endsWith("|Delivered")) return;
-  if (!layerVisibilityState[key]) return; // 🔥 ONLY active layer
-
-  group.layers.slice().forEach(marker => {
-
-    const pos = marker.getLatLng();
-
-    if (polygon.getBounds().contains(pos) && marker._rowRef) {
-
-      const row = marker._rowRef;
-
-      row.del_status = "Delivered";
-
-      routeDayGroups[key].layers =
-        routeDayGroups[key].layers.filter(l => l !== marker);
-
-      const deliveredKey = `${row.NEWROUTE}|Delivered`;
-
-      if (!routeDayGroups[deliveredKey]) {
-        routeDayGroups[deliveredKey] = { layers: [] };
-      }
-
-      marker.setStyle?.({
-        color: "#00FF00",
-        fillColor: "#00FF00",
-        fillOpacity: 1,
-        opacity: 1
-      });
-
-      routeDayGroups[deliveredKey].layers.push(marker);
-
-      completedCount++;
-    }
-
-  });
-
-});
-
-
-  if (completedCount === 0) {
-    alert("No stops inside selection.");
-    return;
-  }
-
-  // rewrite worksheet from updated rows
-  const saved = await saveWorkbookToCloud();
-
-if (!saved) {
-  alert("❌ Cloud save failed. Excel file was NOT updated.");
-  return;
-}
-
-// 🔥 remove selection polygon after completion
-drawnLayer.clearLayers();
-  // Save current checkbox states
-document.querySelectorAll("#routeDayLayers input[type='checkbox']")
-  .forEach(cb => {
-    const key = cb.dataset.key;
-    if (key) layerVisibilityState[key] = cb.checked;
-  });
-
-document.querySelectorAll("#deliveredControls input[type='checkbox']")
-  .forEach(cb => {
-    const key = cb.dataset.key;
-    if (key) layerVisibilityState[key] = cb.checked;
-  });
-
-buildRouteDayLayerControls(); // refresh UI
-updateUndoButtonState();
-
-// 🔥 CLEAR selection + counter AFTER UI rebuild
-// 🔥 CLEAR polygon
-if (drawnLayer) {
-  drawnLayer.clearLayers();
-}
-
-// 🔥 Recalculate + restore marker styling properly
-updateSelectionCount();
-updateUndoButtonState();
-
-alert(`${completedCount} stop(s) marked Delivered and saved.`);
-
-
-}
-////////undo delivered stops
-async function undoDelivered() {
-
-  const confirmed = confirm("Are you sure you want to undo Delivered stops inside the selected area?");
-  if (!confirmed) return;
-
-  if (!window._currentRows || !window._currentWorkbook || !window._currentFilePath) {
-    alert("No Excel file loaded.");
-    return;
-  }
-
-
-  const polygon = drawnLayer.getLayers()[0];
-  if (!polygon) {
-    alert("Draw a selection first.");
-    return;
-  }
-
-  let undoCount = 0;
-
-  // 🔥 ONLY loop Delivered groups
-  Object.entries(routeDayGroups).forEach(([key, group]) => {
-
-    if (!key.endsWith("|Delivered")) return;  // HARD FILTER
-
-    group.layers.slice().forEach(marker => {
-
-      const pos = marker.getLatLng();
-
-      // must be inside selection AND actually marked Delivered
-      if (
-        polygon.getBounds().contains(pos) &&
-        marker._rowRef &&
-        String(marker._rowRef.del_status || "").trim().toLowerCase() === "delivered"
-      ) {
-
-        const row = marker._rowRef;
-
-        // remove Delivered from Excel data
-        row.del_status = "";
-
-        // remove marker from Delivered layer
-        routeDayGroups[key].layers =
-          routeDayGroups[key].layers.filter(l => l !== marker);
-
-      // restore original route/day layer
-const originalKey = `${row.NEWROUTE}|${row.NEWDAY}`;
-
-if (!routeDayGroups[originalKey]) {
-  routeDayGroups[originalKey] = { layers: [] };
-}
-
-const symbol = getSymbol(originalKey);
-
-marker.setStyle?.({
-  color: symbol.color,
-  fillColor: symbol.color,
-  fillOpacity: 0.95,
-  opacity: 1
-});
-
-routeDayGroups[originalKey].layers.push(marker);
-
-undoCount++;
-              }
-    });
-  });
-
-  if (undoCount === 0) {
-    alert("No Delivered stops inside selection.");
-    return;
-  }
-
-  // Rewrite Excel sheet
- const saved = await saveWorkbookToCloud();
-
-if (!saved) {
-  alert("❌ Cloud save failed. Excel file was NOT updated.");
-  return;
-}
-
-
-// 🔥 CLEAR polygon
-if (drawnLayer) {
-  drawnLayer.clearLayers();
-}
-
-// 🔥 Recalculate selection state + restore styling
-updateSelectionCount();
-updateUndoButtonState();
-
-buildRouteDayLayerControls();
-
-alert(`${undoCount} stop(s) restored.`);
-
-}
- // ================= LOADING OVERLAY =================
+// Solution Reviewer intentionally excludes complete/undo workflows.
+// ================= LOADING OVERLAY =================
 window.showLoading = function(message) {
   const loader = document.getElementById("loadingOverlay");
   if (!loader) return;
@@ -3436,21 +3151,6 @@ if (daysToggle && daysContent) {
   });
 }
 
-// ===== STATS COLLAPSIBLE =====
-const statsToggle = document.getElementById("statsToggle");
-const statsContent = document.getElementById("statsContent");
-
-if (statsToggle && statsContent) {
-
-  // Closed by default
-  statsContent.classList.add("collapsed");
-
-  statsToggle.addEventListener("click", () => {
-    const isCollapsed = statsContent.classList.toggle("collapsed");
-    statsToggle.classList.toggle("open", !isCollapsed);
-  });
-}
-//////////
   // ===== ROUTES COLLAPSIBLE =====
 const routesToggle = document.getElementById("routesToggle");
 const routesContent = document.getElementById("routesContent");
@@ -3474,20 +3174,22 @@ if (routesToggle && routesContent) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
-// ================= COMPLETE BUTTON EVENTS =================
-document.getElementById("completeStopsBtn")
-  ?.addEventListener("click", completeStops);
-
-document.getElementById("completeStopsBtnMobile")
-  ?.addEventListener("click", completeStops);
-//undo delivered stops button event
-  document.getElementById("undoDeliveredBtn")
-  ?.addEventListener("click", undoDelivered);
-
-
-
-  
   listFiles();
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

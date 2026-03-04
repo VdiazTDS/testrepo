@@ -3572,3 +3572,255 @@ body.sun-mode #resetMapBtn .reset-map-title,
 body.sun-mode #resetMapBtn .reset-map-subtitle {
   color: #ffffff !important;
 }
+
+/* ===== DESKTOP: PLACE REFRESH UNDER OTHER APPS ===== */
+@media (min-width: 901px) {
+  .header-tools-desktop {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .header-tools-desktop #toolsMenuBtn,
+  .header-tools-desktop #hardRefreshBtn {
+    width: 100%;
+  }
+
+  .header-tools-desktop #hardRefreshBtn {
+    min-height: 34px;
+    padding: 6px 10px;
+    font-size: 12px;
+    margin: 0;
+  }
+}
+
+/* ===== DESKTOP HEADER TOOLS TUNE: KEEP OTHER APPS ONSCREEN + CLEAN REFRESH ICON ===== */
+@media (min-width: 901px) {
+  .header-tools-desktop {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+
+  .header-tools-desktop #toolsMenuBtn,
+  .header-tools-desktop #hardRefreshBtn {
+    width: auto !important;
+    min-width: 130px;
+  }
+
+  .header-tools-desktop #hardRefreshBtn::before {
+    display: none !important;
+    content: none !important;
+  }
+
+  .header-tools-desktop #hardRefreshBtn {
+    padding-left: 10px !important;
+  }
+}
+
+/* ===== FINAL FIX: HEADER TOOLS POSITION + REFRESH ICON REMOVAL ===== */
+#hardRefreshBtn::before {
+  display: none !important;
+  content: none !important;
+}
+
+@media (min-width: 901px) {
+  .title-with-tools {
+    display: flex !important;
+    align-items: flex-start !important;
+    gap: 10px !important;
+  }
+
+  .header-tools-desktop {
+    position: static !important;
+    top: auto !important;
+    right: auto !important;
+    transform: none !important;
+    margin-top: 0 !important;
+  }
+}
+
+/* ===== FINAL DESKTOP POSITION: OTHER APPS + REFRESH AT TOP-RIGHT ===== */
+@media (min-width: 901px) {
+  .header-top {
+    position: relative !important;
+  }
+
+  .header-tools-desktop {
+    position: absolute !important;
+    top: 4px !important;
+    right: 10px !important;
+    transform: none !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 6px !important;
+    z-index: 7000 !important;
+  }
+
+  .header-tools-desktop #toolsMenuBtn,
+  .header-tools-desktop #hardRefreshBtn {
+    width: auto !important;
+    min-width: 132px !important;
+    margin: 0 !important;
+  }
+}
+
+/* ===== FINAL DESKTOP HEADER FLOW: KEEP OTHER APPS + REFRESH INSIDE HEADER ===== */
+@media (min-width: 901px) {
+  .header-top {
+    position: relative !important;
+  }
+
+  .title-with-tools {
+    width: 100% !important;
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  .header-tools-desktop {
+    position: static !important;
+    top: auto !important;
+    right: auto !important;
+    transform: none !important;
+    margin-top: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 6px !important;
+    z-index: auto !important;
+  }
+
+  .header-tools-desktop #toolsMenuBtn,
+  .header-tools-desktop #hardRefreshBtn {
+    width: auto !important;
+    min-width: 132px !important;
+    margin: 0 !important;
+  }
+}
+
+/* ===== FINAL DESKTOP ALIGNMENT: CENTER TITLE + PIN TOOLS TOP-RIGHT ===== */
+@media (min-width: 901px) {
+  .header-top {
+    position: relative !important;
+  }
+
+  .title-with-tools {
+    width: 100% !important;
+    position: relative !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding-right: 0 !important;
+    gap: 0 !important;
+  }
+
+  .title-with-tools h1 {
+    margin: 0 auto !important;
+    text-align: center !important;
+    max-width: calc(100% - 300px) !important;
+  }
+
+  .header-tools-desktop {
+    position: absolute !important;
+    top: 2px !important;
+    right: 10px !important;
+    transform: none !important;
+    margin: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 6px !important;
+    z-index: 7000 !important;
+  }
+
+  .header-tools-desktop #toolsMenuBtn,
+  .header-tools-desktop #hardRefreshBtn {
+    width: auto !important;
+    min-width: 132px !important;
+    margin: 0 !important;
+  }
+}
+
+/* ===== FINAL DESKTOP SIZE/POSITION: SMALL TOOLS TOP-RIGHT ===== */
+@media (min-width: 901px) {
+  .header-top {
+    position: relative !important;
+  }
+
+  .header-tools-desktop {
+    position: absolute !important;
+    top: 2px !important;
+    right: 8px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 4px !important;
+    z-index: 7000 !important;
+  }
+
+  .header-tools-desktop #toolsMenuBtn,
+  .header-tools-desktop #hardRefreshBtn {
+    min-width: 108px !important;
+    padding: 5px 9px !important;
+    font-size: 11px !important;
+    line-height: 1.15 !important;
+    border-radius: 8px !important;
+    margin: 0 !important;
+  }
+
+  .header-tools-desktop #hardRefreshBtn::before {
+    display: none !important;
+    content: none !important;
+  }
+
+  .title-with-tools h1 {
+    max-width: calc(100% - 240px) !important;
+  }
+}
+
+/* ===== FINAL DESKTOP PIN: FORCE TO HEADER TOP-RIGHT ===== */
+@media (min-width: 901px) {
+  .header-top {
+    position: relative !important;
+  }
+
+  .header-top .title-with-tools {
+    position: static !important;
+    flex: 1 1 auto !important;
+    width: auto !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+  }
+
+  .header-top .header-tools-desktop {
+    position: absolute !important;
+    top: 2px !important;
+    right: 8px !important;
+    left: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    margin: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 4px !important;
+    z-index: 9999 !important;
+  }
+
+  .header-top .header-tools-desktop #toolsMenuBtn,
+  .header-top .header-tools-desktop #hardRefreshBtn {
+    min-width: 108px !important;
+    padding: 5px 9px !important;
+    font-size: 11px !important;
+    line-height: 1.15 !important;
+    border-radius: 8px !important;
+    margin: 0 !important;
+  }
+}
