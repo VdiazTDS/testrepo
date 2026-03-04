@@ -3548,3 +3548,27 @@ body.sun-mode .dropzone-browse {
     font-size: 10px !important;
   }
 }
+
+/* ===== DESKTOP SIDEBAR SAFETY LOCK =====
+   Prevent mobile/fixed sidebar styles from affecting desktop after map interactions. */
+@media (min-width: 901px) {
+  .app-container > .sidebar {
+    position: relative !important;
+    top: auto !important;
+    left: auto !important;
+    bottom: auto !important;
+    height: 100% !important;
+    max-height: none !important;
+    transform: none !important;
+    padding-top: 10px !important;
+    overflow-y: auto !important;
+  }
+}
+
+/* ===== SUN MODE FINAL: WHITE TEXT FOR OPEN SAVED FILES + RESET MAP COPY ===== */
+body.sun-mode #openFileManagerBtn .file-manager-title,
+body.sun-mode #openFileManagerBtn .file-manager-subtitle,
+body.sun-mode #resetMapBtn .reset-map-title,
+body.sun-mode #resetMapBtn .reset-map-subtitle {
+  color: #ffffff !important;
+}

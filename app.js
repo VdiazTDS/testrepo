@@ -1277,8 +1277,7 @@ async function uploadFile(file) {
 }
 
 // ================= ROUTE SUMMARY DISPLAY =================
-function showRouteSummary(rows, headers)
- {
+function showRouteSummary(rows, headers) {
   const tableBox = document.getElementById("routeSummaryTable");
   const panel = document.getElementById("bottomSummary");
   const btn = document.getElementById("summaryToggleBtn");
@@ -1294,14 +1293,10 @@ function showRouteSummary(rows, headers)
     return;
   }
 
-  // ✅ Get headers EXACTLY in Excel order
-  
-
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const tbody = document.createElement("tbody");
 
-  // ===== HEADER ROW =====
   const headerRow = document.createElement("tr");
   headers.forEach(h => {
     const th = document.createElement("th");
@@ -1310,16 +1305,13 @@ function showRouteSummary(rows, headers)
   });
   thead.appendChild(headerRow);
 
-  // ===== DATA ROWS =====
   rows.forEach(r => {
     const tr = document.createElement("tr");
-
     headers.forEach(h => {
       const td = document.createElement("td");
       td.textContent = r[h] ?? "";
       tr.appendChild(td);
     });
-
     tbody.appendChild(tr);
   });
 
@@ -1327,34 +1319,45 @@ function showRouteSummary(rows, headers)
   table.appendChild(tbody);
   tableBox.appendChild(table);
 
-// AUTO-OPEN + FORCE VISIBLE HEIGHT
-const savedHeight = localStorage.getItem("summaryHeight");
+  const savedHeight = Number(localStorage.getItem("summaryHeight"));
+  const defaultHeight = window.innerWidth <= 900 ? 300 : 250;
+  const targetHeight =
+    Number.isFinite(savedHeight) && savedHeight > 60 ? savedHeight : defaultHeight;
 
-// Always prepare a usable expanded height
-const defaultHeight = window.innerWidth <= 900 ? 300 : 250;
-panel.style.height = (savedHeight && savedHeight > 60 ? savedHeight : defaultHeight) + "px";
-
-// Only auto-open on desktop
-if (window.innerWidth > 900) {
+  // Always show summary immediately after loading.
   panel.classList.remove("collapsed");
-  btn.textContent = "▼";
+  btn.textContent = "\u25BC";
+  panel.style.height = `${targetHeight}px`;
+
+  // iOS standalone occasionally needs a repaint after dynamic table injection.
+  if (window.innerWidth <= 900) {
+    requestAnimationFrame(() => {
+      panel.style.height = `${targetHeight + 1}px`;
+      requestAnimationFrame(() => {
+        panel.style.height = `${targetHeight}px`;
+      });
+    });
+  }
 }
-
-
-}
-
 function autoCollapseSidebarsForSummary() {
   const appContainer = document.querySelector(".app-container");
   const toggleSidebarBtn = document.getElementById("toggleSidebarBtn");
   const sidebar = document.querySelector(".sidebar");
   const overlay = document.querySelector(".mobile-overlay");
   const mobileMenuBtn = document.getElementById("mobileMenuBtn");
+  const isMobile = window.innerWidth <= 900;
 
   const selectionBox = document.getElementById("selectionBox");
   const toggleSelectionBtn = document.getElementById("toggleSelectionBtn");
 
   // Left sidebar: collapse desktop and close mobile drawer.
-  if (appContainer) appContainer.classList.add("collapsed");
+  if (appContainer) {
+    if (isMobile) {
+      appContainer.classList.remove("collapsed");
+    } else {
+      appContainer.classList.add("collapsed");
+    }
+  }
   if (toggleSidebarBtn) toggleSidebarBtn.setAttribute("aria-expanded", "false");
   if (sidebar) sidebar.classList.remove("open");
   if (overlay) overlay.classList.remove("show");
@@ -1752,24 +1755,50 @@ const overlay = document.querySelector(".mobile-overlay");
 
 function syncMobileSidebarLayout() {
   if (!sidebar || !pageHeader) return;
+  const isMobile = window.innerWidth <= 900;
 
-  if (window.innerWidth <= 900) {
-    const headerHeight = Math.ceil(pageHeader.getBoundingClientRect().height);
-    sidebar.style.top = `${headerHeight}px`;
-    sidebar.style.height = `calc(100dvh - ${headerHeight}px)`;
+  if (isMobile) {
+    if (appContainer) appContainer.style.height = "";
+    const headerRect = pageHeader.getBoundingClientRect();
+    const headerHeight = Math.ceil(headerRect.height);
+    const headerBottom = Math.ceil(headerRect.bottom);
+    const topOffset = Math.max(headerHeight, headerBottom, 0);
+
+    sidebar.style.top = `${topOffset}px`;
+    sidebar.style.height = `calc(100dvh - ${topOffset}px)`;
+    if (overlay) overlay.style.top = `${topOffset}px`;
+    sidebar.dataset.mobileLayoutApplied = "1";
   } else {
+    // Desktop: lock app shell to live header height so sidebar can't drift under header.
+    const headerHeight = Math.ceil(pageHeader.getBoundingClientRect().height);
+    if (appContainer) appContainer.style.height = `calc(100dvh - ${headerHeight}px)`;
     sidebar.style.top = "";
-    sidebar.style.height = "";
+    sidebar.style.height = "100%";
+    if (overlay) overlay.style.top = "";
+    delete sidebar.dataset.mobileLayoutApplied;
   }
 }
 
 syncMobileSidebarLayout();
 window.addEventListener("resize", syncMobileSidebarLayout);
+window.addEventListener("scroll", syncMobileSidebarLayout, { passive: true });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", syncMobileSidebarLayout);
+  window.visualViewport.addEventListener("scroll", syncMobileSidebarLayout);
+}
+if (map && typeof map.on === "function") {
+  map.on("click zoomend moveend", () => {
+    requestAnimationFrame(syncMobileSidebarLayout);
+  });
+}
 
 if (mobileMenuBtn && sidebar && overlay) {
 
   mobileMenuBtn.addEventListener("click", () => {
     syncMobileSidebarLayout();
+    if (window.innerWidth <= 900 && appContainer) {
+      appContainer.classList.remove("collapsed");
+    }
     const open = sidebar.classList.toggle("open");
 
     mobileMenuBtn.textContent = open ? "✕" : "☰";
@@ -1890,6 +1919,10 @@ if (toggleBtn) {
 
   // ===== POP-OUT SUMMARY WINDOW =====
   const popoutBtn = document.getElementById("popoutSummaryBtn");
+  const isStandaloneApp =
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.navigator.standalone === true;
+  const useSameWindowForSummary = isStandaloneApp && window.innerWidth <= 900;
 
   if (popoutBtn) {
     popoutBtn.onclick = () => {
@@ -1900,7 +1933,14 @@ if (toggleBtn) {
         return;
       }
 
-      const win = window.open("", "_blank", "width=900,height=600,resizable=yes,scrollbars=yes");
+      const mapUrl = window.location.href;
+      const win = useSameWindowForSummary
+        ? window
+        : window.open("", "_blank", "width=900,height=600,resizable=yes,scrollbars=yes");
+      if (!win) {
+        alert("Unable to open summary window.");
+        return;
+      }
 
       win.document.write(`
         <html>
@@ -1940,6 +1980,7 @@ if (toggleBtn) {
                 padding: 12px 14px;
                 border-bottom: 1px solid var(--line);
                 background: linear-gradient(180deg, #f9fcff 0%, #eef5fc 100%);
+                gap: 10px;
               }
               .summary-title {
                 margin: 0;
@@ -1951,6 +1992,17 @@ if (toggleBtn) {
                 font-size: 12px;
                 color: var(--muted);
               }
+              .summary-back-btn {
+                border: 1px solid #b8cbdd;
+                background: #ffffff;
+                color: var(--text);
+                border-radius: 10px;
+                padding: 8px 10px;
+                font-size: 12px;
+                font-weight: 600;
+                cursor: pointer;
+              }
+              .summary-back-btn:hover { background: #f2f8ff; }
               .summary-table-wrap {
                 max-height: calc(100vh - 140px);
                 overflow: auto;
@@ -1991,6 +2043,7 @@ if (toggleBtn) {
           <body>
             <div class="summary-shell">
               <div class="summary-header">
+                <button class="summary-back-btn" onclick="returnToMap()">← Back to Map</button>
                 <h2 class="summary-title">Route Summary</h2>
                 <span class="summary-note">Scroll to view all columns and rows</span>
               </div>
@@ -1998,6 +2051,18 @@ if (toggleBtn) {
                 ${tableHTML}
               </div>
             </div>
+            <script>
+              function returnToMap() {
+                try {
+                  if (window.opener && !window.opener.closed) {
+                    window.opener.focus();
+                    window.close();
+                    return;
+                  }
+                } catch (e) {}
+                window.location.href = ${JSON.stringify(mapUrl)};
+              }
+            </script>
           </body>
         </html>
       `);
@@ -2266,7 +2331,10 @@ if (toggleBtn) {
         `)
         .join("");
 
-      const win = window.open("", "_blank", "width=1080,height=760,resizable=yes,scrollbars=yes");
+      const mapUrl = window.location.href;
+      const win = useSameWindowForSummary
+        ? window
+        : window.open("", "_blank", "width=1080,height=760,resizable=yes,scrollbars=yes");
       if (!win) return;
 
       win.document.write(`
@@ -2279,8 +2347,11 @@ if (toggleBtn) {
               body { margin:0; padding:18px; font-family:"Segoe UI",Roboto,Arial,sans-serif; background:radial-gradient(circle at 10% 0%, #eaf2fb 0%, var(--bg) 45%); color:var(--text); }
               .shell { max-width:1200px; margin:0 auto; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:0 14px 30px rgba(16,42,68,.12); overflow:hidden; }
               .head { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#f9fcff 0%,#eef5fc 100%); }
+              .head-left { display:flex; align-items:center; gap:10px; }
               .title { margin:0; font-size:18px; font-weight:700; }
               .meta { font-size:12px; color:var(--muted); }
+              .summary-back-btn { border:1px solid #b8cbdd; background:#fff; color:var(--text); border-radius:10px; padding:8px 10px; font-size:12px; font-weight:600; cursor:pointer; }
+              .summary-back-btn:hover { background:#f2f8ff; }
               .grid { display:grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap:10px; padding:12px; border-bottom:1px solid var(--line); }
               .card { border:1px solid var(--line); border-radius:10px; padding:10px; background:#fbfdff; }
               .card-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
@@ -2334,7 +2405,10 @@ if (toggleBtn) {
           <body>
             <div class="shell">
               <div class="head">
-                <h2 class="title">Route Summary Visualization</h2>
+                <div class="head-left">
+                  <button class="summary-back-btn" onclick="returnToMap()">← Back to Map</button>
+                  <h2 class="title">Route Summary Visualization</h2>
+                </div>
                 <span class="meta">Rows: ${rows.length.toLocaleString()} | Columns: ${headers.length.toLocaleString()}</span>
               </div>
               <div class="grid">
@@ -2424,6 +2498,17 @@ if (toggleBtn) {
               </div>
             </div>
             <script>
+              function returnToMap() {
+                try {
+                  if (window.opener && !window.opener.closed) {
+                    window.opener.focus();
+                    window.close();
+                    return;
+                  }
+                } catch (e) {}
+                window.location.href = ${JSON.stringify(mapUrl)};
+              }
+
               (() => {
                 const data = ${scatterDataJson};
                 const host = document.getElementById("stopsMilesScatterHost");
@@ -3387,3 +3472,4 @@ document.getElementById("completeStopsBtnMobile")
   
   listFiles();
 }
+
