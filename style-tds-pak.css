@@ -18,6 +18,7 @@ header {
   text-align: center;
   padding: 10px;
   border-bottom: 1px solid #333;
+  position: relative;
 }
 
 header h1 {
@@ -31,6 +32,39 @@ header p {
   margin: 2px 0 5px;
   font-size: 14px;
   color: #bbb;
+}
+
+.street-segments-loadbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+  z-index: 12;
+}
+
+.street-segments-loadbar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -35%;
+  width: 35%;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(56, 182, 255, 0.12) 0%, #38b6ff 45%, rgba(56, 182, 255, 0.12) 100%);
+  animation: streetLoadSweep 1s linear infinite;
+}
+
+.street-segments-loadbar.active {
+  opacity: 1;
+}
+
+@keyframes streetLoadSweep {
+  0% { left: -35%; }
+  100% { left: 100%; }
 }
 
 

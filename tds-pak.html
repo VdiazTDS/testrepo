@@ -81,6 +81,7 @@
   </div>
   <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
   <input type="file" id="summaryFileInput" accept=".xlsx,.xls,.csv" hidden>
+  <div id="streetSegmentsLoadBar" class="street-segments-loadbar" aria-hidden="true"></div>
 
 </header>
 
@@ -121,7 +122,7 @@
     </div>
     <label class="map-network-toggle">
       <input type="checkbox" id="streetNetworkToggle" />
-      Street Network Overlay
+      Street Segments
     </label>
 
 
@@ -268,7 +269,7 @@
     <div class="attribute-resize-hint">Drag header to move, snap to corners, or drag far out to pop out</div>
     <span class="attribute-title">Attribute Table</span>
     <button id="attributePopoutBtn" class="primary-btn" type="button">Pop Out</button>
-    <button id="attributeDockCloseBtn" class="primary-btn collapse-btn" type="button">Hide</button>
+    <button id="attributeDockCloseBtn" class="primary-btn collapse-btn" type="button">Close</button>
   </div>
   <div class="attribute-toolbar">
     <input id="attributeSearchInput" type="text" placeholder="Filter records by any field..." />

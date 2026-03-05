@@ -580,7 +580,7 @@ setCurrentFileDisplay(window._currentFilePath);
 
 // ================= MAP SETUP =================
 // Create Leaflet map
-const map = L.map("map").setView([31.0, -99.0], 6);
+const map = L.map("map", { preferCanvas: true }).setView([31.0, -99.0], 6);
 // Shared Canvas renderer for high-performance drawing
 const canvasRenderer = L.canvas({ padding: 0.5 });
 
@@ -615,49 +615,147 @@ const satelliteLabelsLayer = L.tileLayer(
     opacity: 1
   }
 );
-const streetNetworkOverlayLayer = L.tileLayer(
-  "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
-  {
-    maxZoom: 20,
-    maxNativeZoom: 19,
-    opacity: 0.82
-  }
-);
+const streetAttributeLayerGroup = L.layerGroup();
 
 function syncStreetNetworkOverlay() {
   const toggle = document.getElementById("streetNetworkToggle");
-  if (!toggle) return;
-  const enabled = !!toggle.checked;
+  const enabled = !!toggle && !!toggle.checked;
   if (enabled) {
-    if (!map.hasLayer(streetNetworkOverlayLayer)) {
-      streetNetworkOverlayLayer.addTo(map);
+    if (!map.hasLayer(streetAttributeLayerGroup)) {
+      streetAttributeLayerGroup.addTo(map);
     } else {
-      // Keep overlay above the basemap after map-view changes.
-      streetNetworkOverlayLayer.bringToFront?.();
+      streetAttributeLayerGroup.bringToFront?.();
     }
   } else {
-    map.removeLayer(streetNetworkOverlayLayer);
+    map.removeLayer(streetAttributeLayerGroup);
+    pendingStreetReload = false;
+    if (streetAutoLoadTimer) {
+      clearTimeout(streetAutoLoadTimer);
+      streetAutoLoadTimer = null;
+    }
+    setStreetLoadBarVisible(false);
   }
 }
 
 function initStreetNetworkToggle() {
   const toggle = document.getElementById("streetNetworkToggle");
   if (!toggle) return;
-  toggle.checked = storageGet("streetNetworkOverlay") === "on";
-  toggle.addEventListener("change", () => {
-    storageSet("streetNetworkOverlay", toggle.checked ? "on" : "off");
+  toggle.checked = false;
+  storageSet("streetSegmentsVisible", "off");
+  toggle.addEventListener("change", async () => {
+    storageSet("streetSegmentsVisible", toggle.checked ? "on" : "off");
     syncStreetNetworkOverlay();
+    if (toggle.checked && !streetAttributeById.size && !streetLoadInFlight) {
+      await loadStreetAttributesForCurrentView();
+    }
   });
   syncStreetNetworkOverlay();
+  if (toggle.checked && !streetAttributeById.size && !streetLoadInFlight) {
+    loadStreetAttributesForCurrentView().catch(() => {});
+  }
 }
 
 let attributeTableMode = "records";
 let streetAttributesRows = [];
 const streetAttributeSelectedIds = new Set();
 const streetAttributeById = new Map();
-const streetAttributeLayerGroup = L.layerGroup();
 let streetLoadInFlight = false;
 let lastStreetLoadAt = 0;
+let streetAutoLoadTimer = null;
+let pendingStreetReload = false;
+let streetLoadBarHideTimer = null;
+const STREET_MAX_LOAD_SPAN = 1.6;
+
+function isStreetLoadableView() {
+  return true;
+}
+
+function getStreetLoadBoundsForView(bounds) {
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+  const spanLat = Math.abs(north - south);
+  const spanLng = Math.abs(east - west);
+
+  if (spanLat <= STREET_MAX_LOAD_SPAN && spanLng <= STREET_MAX_LOAD_SPAN) {
+    return { south, west, north, east, wasClamped: false, spanLat, spanLng };
+  }
+
+  const c = bounds.getCenter();
+  const halfLat = Math.min(spanLat, STREET_MAX_LOAD_SPAN) / 2;
+  const halfLng = Math.min(spanLng, STREET_MAX_LOAD_SPAN) / 2;
+  return {
+    south: c.lat - halfLat,
+    west: c.lng - halfLng,
+    north: c.lat + halfLat,
+    east: c.lng + halfLng,
+    wasClamped: true,
+    spanLat,
+    spanLng
+  };
+}
+
+function hasStreetSegmentsInView() {
+  const view = map.getBounds();
+  let found = false;
+  streetAttributeLayerGroup.eachLayer(layer => {
+    if (found) return;
+    if (typeof layer.getBounds === "function" && layer.getBounds().intersects(view)) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+function maybeAutoLoadStreetSegments() {
+  const toggle = document.getElementById("streetNetworkToggle");
+  if (!toggle || !toggle.checked) return;
+  if (streetLoadInFlight) {
+    pendingStreetReload = true;
+    setStreetLoadBarVisible(true);
+    return;
+  }
+  const elapsed = Date.now() - lastStreetLoadAt;
+  if (elapsed < 900) {
+    if (streetAutoLoadTimer) clearTimeout(streetAutoLoadTimer);
+    setStreetLoadBarVisible(true);
+    const wait = Math.max(120, 900 - elapsed);
+    streetAutoLoadTimer = setTimeout(() => {
+      if (!streetLoadInFlight) {
+        loadStreetAttributesForCurrentView().catch(() => {});
+      } else {
+        pendingStreetReload = true;
+        setStreetLoadBarVisible(true);
+      }
+    }, wait);
+    return;
+  }
+
+  if (streetAutoLoadTimer) clearTimeout(streetAutoLoadTimer);
+  setStreetLoadBarVisible(true);
+  streetAutoLoadTimer = setTimeout(() => {
+    if (!streetLoadInFlight) {
+      loadStreetAttributesForCurrentView().catch(() => {});
+    }
+  }, 140);
+}
+
+function setStreetLoadBarVisible(visible) {
+  const bar = document.getElementById("streetSegmentsLoadBar");
+  if (!bar) return;
+  if (streetLoadBarHideTimer) {
+    clearTimeout(streetLoadBarHideTimer);
+    streetLoadBarHideTimer = null;
+  }
+  if (visible) {
+    bar.classList.add("active");
+    return;
+  }
+  streetLoadBarHideTimer = setTimeout(() => {
+    bar.classList.remove("active");
+  }, 180);
+}
 
 function updateStreetLoadStatus(message = "", isError = false) {
   const node = document.getElementById("streetLoadStatus");
@@ -682,13 +780,8 @@ function setAttributeTableMode(mode) {
   attrBtn?.classList.toggle("active", attributeTableMode === "records");
   attrBtnMobile?.classList.toggle("active", attributeTableMode === "records");
 
-  if (attributeTableMode === "streets") {
-    if (!map.hasLayer(streetAttributeLayerGroup)) streetAttributeLayerGroup.addTo(map);
-    updateStreetLoadStatus("Loading street segments...");
-  } else {
-    map.removeLayer(streetAttributeLayerGroup);
-    updateStreetLoadStatus("");
-  }
+  if (attributeTableMode === "streets") updateStreetLoadStatus("Loading street segments...");
+  else updateStreetLoadStatus("");
 }
 
 function setStreetSegmentStyle(entry, selected) {
@@ -853,13 +946,28 @@ const OVERPASS_ENDPOINTS = [
   "https://overpass.kumi.systems/api/interpreter",
   "https://lz4.overpass-api.de/api/interpreter"
 ];
+const STREET_TILE_CACHE_TTL_MS = 5 * 60 * 1000;
+const OVERPASS_BASE_COOLDOWN_MS = 60 * 1000;
+const OVERPASS_MAX_COOLDOWN_MS = 5 * 60 * 1000;
+const OVERPASS_ENDPOINT_TIMEOUT_MS = 9000;
+const streetTileCache = new Map();
+let overpassCooldownUntil = 0;
+let overpass429Count = 0;
+
+function makeStreetTileKey(tile) {
+  return [tile.south, tile.west, tile.north, tile.east].map(v => Number(v).toFixed(5)).join("|");
+}
 
 async function fetchOverpassJsonWithFallback(queryText) {
+  if (Date.now() < overpassCooldownUntil) {
+    const waitSec = Math.ceil((overpassCooldownUntil - Date.now()) / 1000);
+    throw new Error(`Overpass cooling down (${waitSec}s remaining)`);
+  }
   const errors = [];
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 28000);
+    const timeoutId = setTimeout(() => controller.abort(), OVERPASS_ENDPOINT_TIMEOUT_MS);
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -870,9 +978,21 @@ async function fetchOverpassJsonWithFallback(queryText) {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
+        if (response.status === 429) {
+          overpass429Count += 1;
+          const cooldownMs = Math.min(
+            OVERPASS_BASE_COOLDOWN_MS * Math.pow(2, Math.max(0, overpass429Count - 1)),
+            OVERPASS_MAX_COOLDOWN_MS
+          );
+          overpassCooldownUntil = Date.now() + cooldownMs;
+          errors.push(`${endpoint} -> HTTP ${response.status}`);
+          break;
+        }
         errors.push(`${endpoint} -> HTTP ${response.status}`);
         continue;
       }
+      overpass429Count = 0;
+      overpassCooldownUntil = 0;
 
       return await response.json();
     } catch (err) {
@@ -893,9 +1013,7 @@ function buildStreetTileBounds(south, west, north, east) {
   let grid = 1;
   if (area > 0.02) grid = 2;
   if (area > 0.06) grid = 3;
-  if (area > 0.12) grid = 4;
-  if (area > 0.20) grid = 5;
-  if (area > 0.30) grid = 6;
+  if (area > 0.12) grid = 3;
 
   const latStep = spanLat / grid;
   const lngStep = spanLng / grid;
@@ -929,10 +1047,44 @@ out geom tags;
 }
 
 async function fetchStreetElementsFromOsmApi(tile) {
+  return await fetchStreetElementsFromOsmApiRecursive(tile, 0);
+}
+
+function splitStreetTile(tile) {
+  const midLat = (tile.south + tile.north) / 2;
+  const midLng = (tile.west + tile.east) / 2;
+  return [
+    { south: tile.south, west: tile.west, north: midLat, east: midLng },
+    { south: tile.south, west: midLng, north: midLat, east: tile.east },
+    { south: midLat, west: tile.west, north: tile.north, east: midLng },
+    { south: midLat, west: midLng, north: tile.north, east: tile.east }
+  ];
+}
+
+async function fetchStreetElementsFromOsmApiRecursive(tile, depth = 0) {
   const bbox = `${tile.west},${tile.south},${tile.east},${tile.north}`;
   const url = `https://api.openstreetmap.org/api/0.6/map?bbox=${encodeURIComponent(bbox)}`;
   const response = await fetch(url, { method: "GET" });
-  if (!response.ok) throw new Error(`OSM API HTTP ${response.status}`);
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => "")).trim().slice(0, 180);
+    const canSplit = (response.status === 400 || response.status === 413 || response.status === 429 || response.status === 509) && depth < 4;
+    if (canSplit) {
+      const chunks = splitStreetTile(tile);
+      const merged = new Map();
+      for (let i = 0; i < chunks.length; i++) {
+        const list = await fetchStreetElementsFromOsmApiRecursive(chunks[i], depth + 1);
+        list.forEach(e => {
+          if (!e || !Number.isFinite(Number(e.id))) return;
+          merged.set(Number(e.id), e);
+        });
+        if (i < chunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      return [...merged.values()];
+    }
+    throw new Error(`OSM API HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
 
   const xmlText = await response.text();
   const doc = new DOMParser().parseFromString(xmlText, "application/xml");
@@ -979,13 +1131,23 @@ async function fetchStreetElementsFromOsmApi(tile) {
 }
 
 async function fetchStreetElementsForTile(tile) {
-  const query = buildStreetOverpassQuery(tile);
+  const key = makeStreetTileKey(tile);
+  const cached = streetTileCache.get(key);
+  if (cached && (Date.now() - cached.ts) < STREET_TILE_CACHE_TTL_MS) {
+    return cached.elements;
+  }
+
   try {
+    // OSM API is generally faster/more predictable for this workflow.
+    const elements = await fetchStreetElementsFromOsmApi(tile);
+    streetTileCache.set(key, { ts: Date.now(), elements });
+    return elements;
+  } catch (osmErr) {
+    const query = buildStreetOverpassQuery(tile);
     const data = await fetchOverpassJsonWithFallback(query);
-    return data.elements || [];
-  } catch (overpassErr) {
-    console.warn("Overpass failed for tile, trying OSM API fallback:", overpassErr?.message || overpassErr);
-    return await fetchStreetElementsFromOsmApi(tile);
+    const elements = data.elements || [];
+    streetTileCache.set(key, { ts: Date.now(), elements });
+    return elements;
   }
 }
 
@@ -993,39 +1155,79 @@ async function collectStreetElementsForBounds(south, west, north, east) {
   const tiles = buildStreetTileBounds(south, west, north, east);
   const mergedById = new Map();
   const tileErrors = [];
+  const hw = Number(navigator.hardwareConcurrency || 4);
+  const saveData = !!(navigator.connection && navigator.connection.saveData);
+  const concurrency = saveData
+    ? 3
+    : Math.max(3, Math.min(10, Math.floor(hw * 1.5)));
 
-  for (let i = 0; i < tiles.length; i++) {
-    try {
-      const elements = await fetchStreetElementsForTile(tiles[i]);
-      elements.forEach(e => {
-        if (!e || e.type !== "way" || !e.tags?.highway || !Array.isArray(e.geom) || e.geom.length < 2) return;
-        mergedById.set(e.id, e);
-      });
-    } catch (tileErr) {
-      tileErrors.push(`tile ${i + 1}/${tiles.length}: ${tileErr?.message || tileErr}`);
-    }
-    if (i < tiles.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 90));
-    }
+  for (let i = 0; i < tiles.length; i += concurrency) {
+    const batch = tiles.slice(i, i + concurrency);
+    await Promise.all(batch.map(async (tile, idx) => {
+      const tileIndex = i + idx;
+      try {
+        const elements = await fetchStreetElementsForTile(tile);
+        let changed = false;
+        elements.forEach(e => {
+          if (!e || e.type !== "way" || !e.tags?.highway || !Array.isArray(e.geom) || e.geom.length < 2) return;
+          mergedById.set(e.id, e);
+          if (upsertStreetElement(e)) changed = true;
+        });
+        if (changed) {
+          syncStreetNetworkOverlay();
+        }
+      } catch (tileErr) {
+        tileErrors.push(`tile ${tileIndex + 1}/${tiles.length}: ${tileErr?.message || tileErr}`);
+      }
+    }));
+    updateStreetLoadStatus(`Loading street segments... ${streetAttributeById.size} loaded`);
   }
 
   return { mergedById, tileErrors, tilesCount: tiles.length };
 }
 
+function upsertStreetElement(e) {
+  const id = Number(e?.id);
+  if (!Number.isFinite(id) || !Array.isArray(e.geom) || e.geom.length < 2) return false;
+  const latlngs = e.geom.map(g => [g.lat, g.lon]);
+  const row = {
+    id,
+    name: e.tags?.name || "",
+    highway: e.tags?.highway || "",
+    ref: e.tags?.ref || "",
+    maxspeed: e.tags?.maxspeed || "",
+    lanes: e.tags?.lanes || "",
+    surface: e.tags?.surface || "",
+    oneway: e.tags?.oneway || ""
+  };
+  const existing = streetAttributeById.get(id);
+  if (existing?.layer) {
+    existing.row = row;
+    if (typeof existing.layer.setLatLngs === "function") existing.layer.setLatLngs(latlngs);
+    return false;
+  }
+  const layer = L.polyline(latlngs, {
+    color: "#4ea2f5",
+    weight: 3,
+    opacity: 0.65,
+    renderer: canvasRenderer,
+    smoothFactor: 1.2
+  });
+  layer.on("click", () => {
+    if (attributeTableMode !== "streets") return;
+    toggleStreetSegmentSelection(id, null, true);
+  });
+  streetAttributeLayerGroup.addLayer(layer);
+  streetAttributeById.set(id, { id, row, layer });
+  return true;
+}
+
 async function loadStreetAttributesForCurrentView() {
   if (streetLoadInFlight) {
+    pendingStreetReload = true;
     updateStreetLoadStatus("Street attributes are already loading...", false);
     return;
   }
-  const now = Date.now();
-  if (now - lastStreetLoadAt < 8000) {
-    const waitMs = 8000 - (now - lastStreetLoadAt);
-    updateStreetLoadStatus(`Please wait ${Math.ceil(waitMs / 1000)}s before reloading (provider rate limit).`, true);
-    return;
-  }
-  streetLoadInFlight = true;
-  lastStreetLoadAt = now;
-
   const b = map.getBounds();
   const south = b.getSouth();
   const west = b.getWest();
@@ -1033,17 +1235,19 @@ async function loadStreetAttributesForCurrentView() {
   const east = b.getEast();
   const spanLat = Math.abs(north - south);
   const spanLng = Math.abs(east - west);
-  if (spanLat > 0.55 || spanLng > 0.55) {
-    streetAttributesRows = [];
-    streetAttributeLayerGroup.clearLayers();
-    streetAttributeById.clear();
-    streetAttributeSelectedIds.clear();
-    if (attributeTableMode === "streets") renderAttributeTable();
+  if (spanLat > 1.6 || spanLng > 1.6) {
     updateStreetLoadStatus("Zoom in more before loading street segments.", true);
-    alert("Zoom in more before loading street segments.");
-    streetLoadInFlight = false;
     return;
   }
+  const now = Date.now();
+  if (now - lastStreetLoadAt < 900) {
+    const waitMs = 900 - (now - lastStreetLoadAt);
+    updateStreetLoadStatus(`Please wait ${Math.ceil(waitMs / 1000)}s before reloading (provider rate limit).`, true);
+    return;
+  }
+  streetLoadInFlight = true;
+  setStreetLoadBarVisible(true);
+  lastStreetLoadAt = now;
 
   try {
     updateStreetLoadStatus("Loading street segments...");
@@ -1072,11 +1276,6 @@ async function loadStreetAttributesForCurrentView() {
     }
 
     if (!mergedById.size) {
-      streetAttributesRows = [];
-      streetAttributeLayerGroup.clearLayers();
-      streetAttributeById.clear();
-      streetAttributeSelectedIds.clear();
-      if (attributeTableMode === "streets") renderAttributeTable();
       const detail = tileErrors.length
         ? ` No segments returned. ${tileErrors.length}/${tilesCount} tiles failed.`
         : " No segments returned for this view after retry.";
@@ -1084,48 +1283,24 @@ async function loadStreetAttributesForCurrentView() {
       return;
     }
 
-    streetAttributeLayerGroup.clearLayers();
-    streetAttributeById.clear();
-    streetAttributeSelectedIds.clear();
-
-    const rows = [];
+    let addedCount = 0;
     [...mergedById.values()].forEach(e => {
-      const id = Number(e.id);
-      const latlngs = e.geom.map(g => [g.lat, g.lon]);
-      const row = {
-        id,
-        name: e.tags.name || "",
-        highway: e.tags.highway || "",
-        ref: e.tags.ref || "",
-        maxspeed: e.tags.maxspeed || "",
-        lanes: e.tags.lanes || "",
-        surface: e.tags.surface || "",
-        oneway: e.tags.oneway || ""
-      };
-      const layer = L.polyline(latlngs, { color: "#4ea2f5", weight: 3, opacity: 0.65 });
-      layer.on("click", () => {
-        if (attributeTableMode !== "streets") return;
-        toggleStreetSegmentSelection(id, null, true);
-      });
-      streetAttributeLayerGroup.addLayer(layer);
-      streetAttributeById.set(id, { id, row, layer });
-      rows.push(row);
+      if (upsertStreetElement(e)) addedCount += 1;
     });
-    streetAttributesRows = rows;
-    if (attributeTableMode === "streets") {
-      if (!map.hasLayer(streetAttributeLayerGroup)) streetAttributeLayerGroup.addTo(map);
-      applyStreetSelectionStyles();
-      renderAttributeTable();
-    }
-    if (rows.length === 0) {
+    streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
+    syncStreetNetworkOverlay();
+    if (attributeTableMode === "streets") renderAttributeTable();
+    applyStreetSelectionStyles();
+    const totalCount = streetAttributeById.size;
+    if (!totalCount) {
       updateStreetLoadStatus("No street segments returned for current view.", true);
     } else if (tileErrors.length) {
-      updateStreetLoadStatus(`Loaded ${rows.length} segments (${tileErrors.length} tile failures).`, false);
+      updateStreetLoadStatus(`Loaded ${addedCount} new segments (${totalCount} total, ${tileErrors.length} tile failures).`, false);
       console.warn(`Street attributes loaded with partial tile failures (${tileErrors.length}).`, tileErrors);
     } else if (retriedWithExpandedBounds) {
-      updateStreetLoadStatus(`Loaded ${rows.length} street segments (expanded area retry).`, false);
+      updateStreetLoadStatus(`Loaded ${addedCount} new street segments (${totalCount} total, expanded area retry).`, false);
     } else {
-      updateStreetLoadStatus(`Loaded ${rows.length} street segments.`, false);
+      updateStreetLoadStatus(`Loaded ${addedCount} new street segments (${totalCount} total).`, false);
     }
   } catch (err) {
     console.error("STREET ATTRIBUTES LOAD ERROR:", err);
@@ -1133,6 +1308,13 @@ async function loadStreetAttributesForCurrentView() {
     alert(`Unable to load street attributes.\n\nData providers are currently busy or rate-limited.\nTry zooming in more (smaller area) and run Street Attributes again.\n\nDetails: ${err.message}`);
   } finally {
     streetLoadInFlight = false;
+    setStreetLoadBarVisible(false);
+    if (pendingStreetReload) {
+      pendingStreetReload = false;
+      setTimeout(() => {
+        maybeAutoLoadStreetSegments();
+      }, 120);
+    }
   }
 }
 
@@ -3664,8 +3846,13 @@ const toggleAttributePanel = () => {
 
 const openStreetAttributesPanel = async () => {
   if (!attributePanel) return;
-  setAttributeTableMode("streets");
   const isClosed = attributePanel.classList.contains("closed");
+  // Toggle close when Street Attributes is already the active open panel.
+  if (!isClosed && attributeTableMode === "streets") {
+    closeAttributePanel();
+    return;
+  }
+  setAttributeTableMode("streets");
   if (isClosed) openAttributePanel();
   await loadStreetAttributesForCurrentView();
   renderAttributeTable();
@@ -3678,9 +3865,7 @@ attributeBtnMobile?.addEventListener("click", toggleAttributePanel);
 
 attributeCloseBtn?.addEventListener("click", () => {
   if (!attributePanel) return;
-  attributePanel.classList.toggle("collapsed");
-  syncAttributePanelLayout();
-  refreshMapAfterOverlayChange();
+  closeAttributePanel();
 });
 
 attributePopoutBtn?.addEventListener("click", openAttributeTablePopout);
@@ -3919,6 +4104,9 @@ if (window.visualViewport) {
 if (map && typeof map.on === "function") {
   map.on("click zoomend moveend", () => {
     requestAnimationFrame(syncMobileSidebarLayout);
+  });
+  map.on("zoomend moveend", () => {
+    maybeAutoLoadStreetSegments();
   });
 }
 
