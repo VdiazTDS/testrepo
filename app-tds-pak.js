@@ -3,6 +3,7 @@ window.addEventListener("error", e => {
 });
 
 let layerVisibilityState = {};
+let selectedLayerKey = null;
 
 // ================= SUPABASE CONFIG =================
 // Connection info for cloud file storage
@@ -15,10 +16,25 @@ window._currentWorkbook = null;
 window._currentFilePath = null;
 window._summaryRows = [];
 window._summaryHeaders = [];
+window._attributeHeaders = [];
 
 window.streetLabelsEnabled = false;
+const attributeRowToId = new WeakMap();
+let attributeRowToMarker = new WeakMap();
+const attributeMarkerByRowId = new Map();
+const attributeState = {
+  sortKey: null,
+  sortDir: 1,
+  filterText: "",
+  selectedOnly: false,
+  page: 1,
+  pageSize: 300,
+  selectedRowIds: new Set(),
+  lastVisibleRows: []
+};
 const APP_STORAGE_NS = (() => {
   const path = (window.location.pathname || "").toLowerCase();
+  if (path.endsWith("/tds-pak.html") || path.endsWith("tds-pak.html")) return "tds-pak";
   if (path.endsWith("/sales-polygon-viewer.html") || path.endsWith("sales-polygon-viewer.html")) return "sales-polygon-viewer";
   if (path.endsWith("/solution-reviewer.html") || path.endsWith("solution-reviewer.html")) return "solution-reviewer";
   return "cart-delivery";
@@ -383,6 +399,159 @@ function normalizeName(name) {
     .trim();
 }
 
+function isRouteSummaryFileName(fileName) {
+  const lower = String(fileName || "").toLowerCase();
+  return lower.includes("routesummary") || lower.includes("route summary");
+}
+
+const SUMMARY_ATTACH_STORAGE_KEY = storageKey("summaryAttachments");
+
+function getSummaryAttachments() {
+  try {
+    const raw = localStorage.getItem(SUMMARY_ATTACH_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function setSummaryAttachments(map) {
+  localStorage.setItem(SUMMARY_ATTACH_STORAGE_KEY, JSON.stringify(map || {}));
+}
+
+function setRouteSummaryAttachment(routeFileName, summaryFileName) {
+  const map = getSummaryAttachments();
+  Object.keys(map).forEach(routeKey => {
+    if (map[routeKey] === summaryFileName) delete map[routeKey];
+  });
+  map[routeFileName] = summaryFileName;
+  setSummaryAttachments(map);
+}
+
+function removeRouteSummaryAttachment(routeFileName) {
+  const map = getSummaryAttachments();
+  delete map[routeFileName];
+  setSummaryAttachments(map);
+}
+
+function cleanupSummaryAttachments(existingFileNames) {
+  const existing = new Set(existingFileNames || []);
+  const map = getSummaryAttachments();
+  let dirty = false;
+
+  Object.entries(map).forEach(([routeName, summaryName]) => {
+    if (!existing.has(routeName) || !existing.has(summaryName)) {
+      delete map[routeName];
+      dirty = true;
+    }
+  });
+
+  if (dirty) setSummaryAttachments(map);
+  return map;
+}
+
+function resolveSummaryForRoute(routeFileName, filesList) {
+  const fileNames = (filesList || []).map(f => f.name);
+  const attachmentMap = cleanupSummaryAttachments(fileNames);
+  const attachedSummary = attachmentMap[routeFileName];
+
+  if (attachedSummary && fileNames.includes(attachedSummary)) {
+    return attachedSummary;
+  }
+
+  const normalizedRoute = normalizeName(routeFileName);
+  const fallback = (filesList || []).find(f => {
+    if (!isRouteSummaryFileName(f.name)) return false;
+    return normalizeName(f.name) === normalizedRoute;
+  });
+
+  return fallback ? fallback.name : null;
+}
+
+function openSummaryAttachModal(summaryFileName, routeFileNames) {
+  return new Promise(resolve => {
+    const modal = document.getElementById("summaryAttachModal");
+    const text = document.getElementById("summaryAttachModalText");
+    const selectedLabel = document.getElementById("summaryAttachSelectedRoute");
+    const searchInput = document.getElementById("summaryAttachSearch");
+    const listBox = document.getElementById("summaryAttachList");
+    const cancelBtn = document.getElementById("summaryAttachCancel");
+    const confirmBtn = document.getElementById("summaryAttachConfirm");
+
+    if (!modal || !text || !selectedLabel || !searchInput || !listBox || !cancelBtn || !confirmBtn) {
+      resolve(null);
+      return;
+    }
+
+    text.textContent = `Choose which saved route file should attach to: ${summaryFileName}`;
+    let selectedRoute = null;
+    const sortedRoutes = routeFileNames
+      .slice()
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+
+    const setSelected = routeName => {
+      selectedRoute = routeName;
+      selectedLabel.textContent = routeName || "None";
+      confirmBtn.disabled = !routeName;
+      [...listBox.querySelectorAll(".attach-route-item")].forEach(btn => {
+        btn.classList.toggle("selected", btn.dataset.routeName === routeName);
+      });
+    };
+
+    const renderList = filterText => {
+      const needle = String(filterText || "").trim().toLowerCase();
+      listBox.innerHTML = "";
+      const shown = sortedRoutes.filter(name => name.toLowerCase().includes(needle));
+
+      if (!shown.length) {
+        const empty = document.createElement("div");
+        empty.className = "attach-route-empty";
+        empty.textContent = "No matching route files.";
+        listBox.appendChild(empty);
+        return;
+      }
+
+      shown.forEach(routeName => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "attach-route-item";
+        btn.dataset.routeName = routeName;
+        btn.textContent = routeName;
+        btn.addEventListener("click", () => setSelected(routeName));
+        listBox.appendChild(btn);
+      });
+
+      if (selectedRoute && shown.includes(selectedRoute)) {
+        setSelected(selectedRoute);
+      } else if (!selectedRoute) {
+        setSelected(shown[0]);
+      } else {
+        confirmBtn.disabled = true;
+      }
+    };
+
+    searchInput.value = "";
+    selectedLabel.textContent = "None";
+    confirmBtn.disabled = true;
+    renderList("");
+    searchInput.oninput = () => renderList(searchInput.value);
+
+    const close = value => {
+      modal.style.display = "none";
+      searchInput.oninput = null;
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+      resolve(value);
+    };
+
+    cancelBtn.onclick = () => close(null);
+    confirmBtn.onclick = () => close(selectedRoute || null);
+    modal.style.display = "flex";
+    searchInput.focus();
+  });
+}
+
 // Prevent recursive growth like "..._Downloaded_<ts>_Downloaded_<ts>".
 function getDownloadBaseName(filePath) {
   const rawName = (filePath || "Export").replace(/\.[^/.]+$/, "");
@@ -422,6 +591,12 @@ const baseMaps = {
       maxZoom: 20,
       maxNativeZoom: 19
     }),
+  freeStreets: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 20,
+      maxNativeZoom: 19,
+      subdomains: ["a", "b", "c"],
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }),
 
   satellite: L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -440,6 +615,540 @@ const satelliteLabelsLayer = L.tileLayer(
     opacity: 1
   }
 );
+const streetNetworkOverlayLayer = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+  {
+    maxZoom: 20,
+    maxNativeZoom: 19,
+    opacity: 0.82
+  }
+);
+
+function syncStreetNetworkOverlay() {
+  const toggle = document.getElementById("streetNetworkToggle");
+  if (!toggle) return;
+  const enabled = !!toggle.checked;
+  if (enabled) {
+    if (!map.hasLayer(streetNetworkOverlayLayer)) {
+      streetNetworkOverlayLayer.addTo(map);
+    } else {
+      // Keep overlay above the basemap after map-view changes.
+      streetNetworkOverlayLayer.bringToFront?.();
+    }
+  } else {
+    map.removeLayer(streetNetworkOverlayLayer);
+  }
+}
+
+function initStreetNetworkToggle() {
+  const toggle = document.getElementById("streetNetworkToggle");
+  if (!toggle) return;
+  toggle.checked = storageGet("streetNetworkOverlay") === "on";
+  toggle.addEventListener("change", () => {
+    storageSet("streetNetworkOverlay", toggle.checked ? "on" : "off");
+    syncStreetNetworkOverlay();
+  });
+  syncStreetNetworkOverlay();
+}
+
+let attributeTableMode = "records";
+let streetAttributesRows = [];
+const streetAttributeSelectedIds = new Set();
+const streetAttributeById = new Map();
+const streetAttributeLayerGroup = L.layerGroup();
+let streetLoadInFlight = false;
+let lastStreetLoadAt = 0;
+
+function updateStreetLoadStatus(message = "", isError = false) {
+  const node = document.getElementById("streetLoadStatus");
+  if (!node) return;
+  const show = attributeTableMode === "streets" && !!String(message || "").trim();
+  node.textContent = message || "";
+  node.classList.toggle("show", show);
+  node.classList.toggle("error", !!(show && isError));
+}
+
+function setAttributeTableMode(mode) {
+  attributeTableMode = mode === "streets" ? "streets" : "records";
+  const title = document.querySelector(".attribute-title");
+  const streetBtn = document.getElementById("streetAttributesBtn");
+  const streetBtnMobile = document.getElementById("streetAttributesBtnMobile");
+  const attrBtn = document.getElementById("attributeTableBtn");
+  const attrBtnMobile = document.getElementById("attributeTableBtnMobile");
+
+  if (title) title.textContent = attributeTableMode === "streets" ? "Street Attributes" : "Attribute Table";
+  streetBtn?.classList.toggle("active", attributeTableMode === "streets");
+  streetBtnMobile?.classList.toggle("active", attributeTableMode === "streets");
+  attrBtn?.classList.toggle("active", attributeTableMode === "records");
+  attrBtnMobile?.classList.toggle("active", attributeTableMode === "records");
+
+  if (attributeTableMode === "streets") {
+    if (!map.hasLayer(streetAttributeLayerGroup)) streetAttributeLayerGroup.addTo(map);
+    updateStreetLoadStatus("Loading street segments...");
+  } else {
+    map.removeLayer(streetAttributeLayerGroup);
+    updateStreetLoadStatus("");
+  }
+}
+
+function setStreetSegmentStyle(entry, selected) {
+  if (!entry?.layer) return;
+  entry.layer.setStyle(
+    selected
+      ? { color: "#ffe066", weight: 5, opacity: 0.96 }
+      : { color: "#4ea2f5", weight: 3, opacity: 0.65 }
+  );
+}
+
+function applyStreetSelectionStyles() {
+  streetAttributeById.forEach(entry => {
+    setStreetSegmentStyle(entry, streetAttributeSelectedIds.has(entry.id));
+  });
+}
+
+function toggleStreetSegmentSelection(id, selected = null, rerender = true) {
+  const wayId = Number(id);
+  if (!Number.isFinite(wayId)) return;
+  const shouldSelect = selected === null ? !streetAttributeSelectedIds.has(wayId) : !!selected;
+  if (shouldSelect) streetAttributeSelectedIds.add(wayId);
+  else streetAttributeSelectedIds.delete(wayId);
+  const entry = streetAttributeById.get(wayId);
+  setStreetSegmentStyle(entry, streetAttributeSelectedIds.has(wayId));
+  if (rerender && attributeTableMode === "streets") renderAttributeTable();
+}
+
+function getFilteredStreetAttributeRows() {
+  const needle = String(attributeState.filterText || "").trim().toLowerCase();
+  let rows = Array.from(streetAttributeSelectedIds)
+    .map(id => streetAttributeById.get(id)?.row)
+    .filter(Boolean);
+  if (needle) {
+    rows = rows.filter(r =>
+      Object.values(r).some(v => String(v ?? "").toLowerCase().includes(needle))
+    );
+  }
+  if (attributeState.sortKey) {
+    const key = attributeState.sortKey;
+    const dir = attributeState.sortDir;
+    rows.sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+      const an = Number(av);
+      const bn = Number(bv);
+      if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
+      return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+    });
+  }
+  return rows;
+}
+
+function renderStreetAttributeTable() {
+  const table = document.getElementById("attributeTableGrid");
+  const empty = document.getElementById("attributeTableEmpty");
+  const pageInfo = document.getElementById("attributePageInfo");
+  const prevBtn = document.getElementById("attributePrevPageBtn");
+  const nextBtn = document.getElementById("attributeNextPageBtn");
+  const status = document.getElementById("attributeStatus");
+  if (!table || !empty) return;
+
+  if (!streetAttributeById.size) {
+    table.innerHTML = "";
+    empty.textContent = "No street data loaded. Click Street Attributes again after zooming in.";
+    empty.style.display = "block";
+    if (pageInfo) pageInfo.textContent = "Page 1/1";
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    if (status) status.textContent = `${streetAttributeSelectedIds.size} selected`;
+    return;
+  }
+
+  const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+  const labels = {
+    id: "Way ID",
+    name: "Road Name",
+    highway: "Class",
+    ref: "Ref",
+    maxspeed: "Max Speed",
+    lanes: "Lanes",
+    surface: "Surface",
+    oneway: "One Way"
+  };
+  const rows = getFilteredStreetAttributeRows();
+  attributeState.lastVisibleRows = rows.map(r => ({ row: r, rowId: r.id }));
+  const totalPages = Math.max(1, Math.ceil(rows.length / attributeState.pageSize));
+  if (attributeState.page > totalPages) attributeState.page = totalPages;
+  if (attributeState.page < 1) attributeState.page = 1;
+  const pageStart = (attributeState.page - 1) * attributeState.pageSize;
+  const pageRows = rows.slice(pageStart, pageStart + attributeState.pageSize);
+
+  if (pageInfo) pageInfo.textContent = `Page ${attributeState.page}/${totalPages}`;
+  if (prevBtn) prevBtn.disabled = attributeState.page <= 1;
+  if (nextBtn) nextBtn.disabled = attributeState.page >= totalPages;
+  if (status) status.textContent = `${streetAttributeSelectedIds.size} selected • ${rows.length} visible`;
+
+  if (!rows.length) {
+    table.innerHTML = "";
+    empty.textContent = "No selected street segments. Click street lines on the map to add them here.";
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+
+  const sortIndicator = key => (attributeState.sortKey === key ? (attributeState.sortDir > 0 ? " ▲" : " ▼") : "");
+  let html = "<thead><tr><th>Sel</th><th>#</th>";
+  headers.forEach(h => {
+    html += `<th><button type="button" data-sort="${h}">${labels[h]}${sortIndicator(h)}</button></th>`;
+  });
+  html += "</tr></thead><tbody>";
+
+  pageRows.forEach((row, idx) => {
+    const checked = streetAttributeSelectedIds.has(row.id) ? " checked" : "";
+    html += `<tr data-row-id="${row.id}" class="${checked ? "selected" : ""}">`;
+    html += `<td><input type="checkbox" data-row-select="${row.id}"${checked}></td>`;
+    html += `<td>${pageStart + idx + 1}</td>`;
+    headers.forEach(h => {
+      const value = row[h];
+      html += `<td>${String(value ?? "-").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</td>`;
+    });
+    html += "</tr>";
+  });
+  html += "</tbody>";
+  table.innerHTML = html;
+
+  table.querySelectorAll("button[data-sort]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      const key = e.currentTarget.getAttribute("data-sort");
+      if (!key) return;
+      if (attributeState.sortKey === key) attributeState.sortDir *= -1;
+      else {
+        attributeState.sortKey = key;
+        attributeState.sortDir = 1;
+      }
+      attributeState.page = 1;
+      renderAttributeTable();
+    });
+  });
+
+  table.querySelectorAll("input[data-row-select]").forEach(input => {
+    input.addEventListener("change", e => {
+      const rowId = Number(e.currentTarget.getAttribute("data-row-select"));
+      toggleStreetSegmentSelection(rowId, e.currentTarget.checked, true);
+    });
+  });
+
+  table.querySelectorAll("tbody tr").forEach(tr => {
+    tr.addEventListener("click", e => {
+      if (e.target.closest("input")) return;
+      const id = Number(tr.getAttribute("data-row-id"));
+      const entry = streetAttributeById.get(id);
+      if (entry?.layer) {
+        map.fitBounds(entry.layer.getBounds().pad(0.35));
+      }
+    });
+  });
+}
+
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://lz4.overpass-api.de/api/interpreter"
+];
+
+async function fetchOverpassJsonWithFallback(queryText) {
+  const errors = [];
+
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 28000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: queryText,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        errors.push(`${endpoint} -> HTTP ${response.status}`);
+        continue;
+      }
+
+      return await response.json();
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const message = err?.name === "AbortError" ? "timeout" : (err?.message || "request failed");
+      errors.push(`${endpoint} -> ${message}`);
+    }
+  }
+
+  throw new Error(`All Overpass endpoints failed: ${errors.join(" | ")}`);
+}
+
+function buildStreetTileBounds(south, west, north, east) {
+  const spanLat = Math.abs(north - south);
+  const spanLng = Math.abs(east - west);
+  const area = spanLat * spanLng;
+
+  let grid = 1;
+  if (area > 0.02) grid = 2;
+  if (area > 0.06) grid = 3;
+  if (area > 0.12) grid = 4;
+  if (area > 0.20) grid = 5;
+  if (area > 0.30) grid = 6;
+
+  const latStep = spanLat / grid;
+  const lngStep = spanLng / grid;
+  const tiles = [];
+
+  for (let r = 0; r < grid; r++) {
+    for (let c = 0; c < grid; c++) {
+      const s = south + (r * latStep);
+      const n = r === grid - 1 ? north : (south + ((r + 1) * latStep));
+      const w = west + (c * lngStep);
+      const e = c === grid - 1 ? east : (west + ((c + 1) * lngStep));
+      tiles.push({ south: s, west: w, north: n, east: e });
+    }
+  }
+
+  return tiles;
+}
+
+function buildStreetOverpassQuery(tile) {
+  const s = tile.south;
+  const w = tile.west;
+  const n = tile.north;
+  const e = tile.east;
+  return `
+[out:json][timeout:20];
+(
+  way["highway"](${s},${w},${n},${e});
+);
+out geom tags;
+`;
+}
+
+async function fetchStreetElementsFromOsmApi(tile) {
+  const bbox = `${tile.west},${tile.south},${tile.east},${tile.north}`;
+  const url = `https://api.openstreetmap.org/api/0.6/map?bbox=${encodeURIComponent(bbox)}`;
+  const response = await fetch(url, { method: "GET" });
+  if (!response.ok) throw new Error(`OSM API HTTP ${response.status}`);
+
+  const xmlText = await response.text();
+  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (doc.querySelector("parsererror")) {
+    throw new Error("OSM API XML parse error");
+  }
+
+  const nodeMap = new Map();
+  doc.querySelectorAll("node").forEach(node => {
+    const id = Number(node.getAttribute("id"));
+    const lat = Number(node.getAttribute("lat"));
+    const lon = Number(node.getAttribute("lon"));
+    if (Number.isFinite(id) && Number.isFinite(lat) && Number.isFinite(lon)) {
+      nodeMap.set(id, { lat, lon });
+    }
+  });
+
+  const elements = [];
+  doc.querySelectorAll("way").forEach(way => {
+    const id = Number(way.getAttribute("id"));
+    if (!Number.isFinite(id)) return;
+
+    const tags = {};
+    way.querySelectorAll("tag").forEach(tag => {
+      const k = tag.getAttribute("k");
+      const v = tag.getAttribute("v");
+      if (k) tags[k] = v || "";
+    });
+
+    if (!tags.highway) return;
+
+    const geom = [];
+    way.querySelectorAll("nd").forEach(nd => {
+      const ref = Number(nd.getAttribute("ref"));
+      const point = nodeMap.get(ref);
+      if (point) geom.push({ lat: point.lat, lon: point.lon });
+    });
+
+    if (geom.length < 2) return;
+    elements.push({ type: "way", id, tags, geom });
+  });
+
+  return elements;
+}
+
+async function fetchStreetElementsForTile(tile) {
+  const query = buildStreetOverpassQuery(tile);
+  try {
+    const data = await fetchOverpassJsonWithFallback(query);
+    return data.elements || [];
+  } catch (overpassErr) {
+    console.warn("Overpass failed for tile, trying OSM API fallback:", overpassErr?.message || overpassErr);
+    return await fetchStreetElementsFromOsmApi(tile);
+  }
+}
+
+async function collectStreetElementsForBounds(south, west, north, east) {
+  const tiles = buildStreetTileBounds(south, west, north, east);
+  const mergedById = new Map();
+  const tileErrors = [];
+
+  for (let i = 0; i < tiles.length; i++) {
+    try {
+      const elements = await fetchStreetElementsForTile(tiles[i]);
+      elements.forEach(e => {
+        if (!e || e.type !== "way" || !e.tags?.highway || !Array.isArray(e.geom) || e.geom.length < 2) return;
+        mergedById.set(e.id, e);
+      });
+    } catch (tileErr) {
+      tileErrors.push(`tile ${i + 1}/${tiles.length}: ${tileErr?.message || tileErr}`);
+    }
+    if (i < tiles.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 90));
+    }
+  }
+
+  return { mergedById, tileErrors, tilesCount: tiles.length };
+}
+
+async function loadStreetAttributesForCurrentView() {
+  if (streetLoadInFlight) {
+    updateStreetLoadStatus("Street attributes are already loading...", false);
+    return;
+  }
+  const now = Date.now();
+  if (now - lastStreetLoadAt < 8000) {
+    const waitMs = 8000 - (now - lastStreetLoadAt);
+    updateStreetLoadStatus(`Please wait ${Math.ceil(waitMs / 1000)}s before reloading (provider rate limit).`, true);
+    return;
+  }
+  streetLoadInFlight = true;
+  lastStreetLoadAt = now;
+
+  const b = map.getBounds();
+  const south = b.getSouth();
+  const west = b.getWest();
+  const north = b.getNorth();
+  const east = b.getEast();
+  const spanLat = Math.abs(north - south);
+  const spanLng = Math.abs(east - west);
+  if (spanLat > 0.55 || spanLng > 0.55) {
+    streetAttributesRows = [];
+    streetAttributeLayerGroup.clearLayers();
+    streetAttributeById.clear();
+    streetAttributeSelectedIds.clear();
+    if (attributeTableMode === "streets") renderAttributeTable();
+    updateStreetLoadStatus("Zoom in more before loading street segments.", true);
+    alert("Zoom in more before loading street segments.");
+    streetLoadInFlight = false;
+    return;
+  }
+
+  try {
+    updateStreetLoadStatus("Loading street segments...");
+    let {
+      mergedById,
+      tileErrors,
+      tilesCount
+    } = await collectStreetElementsForBounds(south, west, north, east);
+
+    // Retry once with a slightly larger bbox to handle sparse/tile-edge results.
+    let retriedWithExpandedBounds = false;
+    if (!mergedById.size) {
+      retriedWithExpandedBounds = true;
+      updateStreetLoadStatus("No segments found. Retrying with expanded area...");
+      const padLat = Math.max(spanLat * 0.16, 0.0035);
+      const padLng = Math.max(spanLng * 0.16, 0.0035);
+      const retryResult = await collectStreetElementsForBounds(
+        south - padLat,
+        west - padLng,
+        north + padLat,
+        east + padLng
+      );
+      mergedById = retryResult.mergedById;
+      tileErrors = tileErrors.concat(retryResult.tileErrors);
+      tilesCount += retryResult.tilesCount;
+    }
+
+    if (!mergedById.size) {
+      streetAttributesRows = [];
+      streetAttributeLayerGroup.clearLayers();
+      streetAttributeById.clear();
+      streetAttributeSelectedIds.clear();
+      if (attributeTableMode === "streets") renderAttributeTable();
+      const detail = tileErrors.length
+        ? ` No segments returned. ${tileErrors.length}/${tilesCount} tiles failed.`
+        : " No segments returned for this view after retry.";
+      updateStreetLoadStatus(`Street load completed with no data.${detail}`, true);
+      return;
+    }
+
+    streetAttributeLayerGroup.clearLayers();
+    streetAttributeById.clear();
+    streetAttributeSelectedIds.clear();
+
+    const rows = [];
+    [...mergedById.values()].forEach(e => {
+      const id = Number(e.id);
+      const latlngs = e.geom.map(g => [g.lat, g.lon]);
+      const row = {
+        id,
+        name: e.tags.name || "",
+        highway: e.tags.highway || "",
+        ref: e.tags.ref || "",
+        maxspeed: e.tags.maxspeed || "",
+        lanes: e.tags.lanes || "",
+        surface: e.tags.surface || "",
+        oneway: e.tags.oneway || ""
+      };
+      const layer = L.polyline(latlngs, { color: "#4ea2f5", weight: 3, opacity: 0.65 });
+      layer.on("click", () => {
+        if (attributeTableMode !== "streets") return;
+        toggleStreetSegmentSelection(id, null, true);
+      });
+      streetAttributeLayerGroup.addLayer(layer);
+      streetAttributeById.set(id, { id, row, layer });
+      rows.push(row);
+    });
+    streetAttributesRows = rows;
+    if (attributeTableMode === "streets") {
+      if (!map.hasLayer(streetAttributeLayerGroup)) streetAttributeLayerGroup.addTo(map);
+      applyStreetSelectionStyles();
+      renderAttributeTable();
+    }
+    if (rows.length === 0) {
+      updateStreetLoadStatus("No street segments returned for current view.", true);
+    } else if (tileErrors.length) {
+      updateStreetLoadStatus(`Loaded ${rows.length} segments (${tileErrors.length} tile failures).`, false);
+      console.warn(`Street attributes loaded with partial tile failures (${tileErrors.length}).`, tileErrors);
+    } else if (retriedWithExpandedBounds) {
+      updateStreetLoadStatus(`Loaded ${rows.length} street segments (expanded area retry).`, false);
+    } else {
+      updateStreetLoadStatus(`Loaded ${rows.length} street segments.`, false);
+    }
+  } catch (err) {
+    console.error("STREET ATTRIBUTES LOAD ERROR:", err);
+    updateStreetLoadStatus("Unable to load street segments from providers.", true);
+    alert(`Unable to load street attributes.\n\nData providers are currently busy or rate-limited.\nTry zooming in more (smaller area) and run Street Attributes again.\n\nDetails: ${err.message}`);
+  } finally {
+    streetLoadInFlight = false;
+  }
+}
+
+function zoomToSelectedStreetSegments() {
+  if (!streetAttributeSelectedIds.size) {
+    alert("No selected street segments.");
+    return;
+  }
+  const bounds = L.latLngBounds();
+  streetAttributeSelectedIds.forEach(id => {
+    const entry = streetAttributeById.get(id);
+    if (entry?.layer) bounds.extend(entry.layer.getBounds());
+  });
+  if (!bounds.isValid()) return;
+  map.fitBounds(bounds.pad(0.18));
+}
 
 // ================= POLYGON SELECT =================
 
@@ -467,6 +1176,7 @@ map.addControl(drawControl);
 function updateSelectionCount() {
 const polygon = drawnLayer.getLayers()[0];
 let count = 0;
+const nextSelectedRowIds = new Set();
 
 Object.entries(routeDayGroups).forEach(([key, group]) => {
  group.layers.forEach(marker => {
@@ -475,14 +1185,18 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
 
    const latlng = L.latLng(base.lat, base.lon);
 
-   if (
-     polygon &&
-     polygon.getBounds().contains(latlng) &&
-     map.hasLayer(marker)
-   ) {
+   const isLayerSelectMode = !!selectedLayerKey;
+   const selectedByLayer = isLayerSelectMode && key === selectedLayerKey;
+   const selectedByPolygon =
+     !isLayerSelectMode && polygon && polygon.getBounds().contains(latlng);
+
+   if ((selectedByLayer || selectedByPolygon) && map.hasLayer(marker)) {
      // highlight selected marker
      marker.setStyle?.({ color: "#ffff00", fillColor: "#ffff00" });
 
+     if (Number.isFinite(marker._rowId)) {
+       nextSelectedRowIds.add(marker._rowId);
+     }
      count++; // ✅ only counting here
    } else {
      // restore original color
@@ -492,7 +1206,15 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
  });
 });
 
-document.getElementById("selectionCount").textContent = count;
+const prev = attributeState.selectedRowIds;
+const changed =
+  prev.size !== nextSelectedRowIds.size ||
+  [...prev].some(id => !nextSelectedRowIds.has(id));
+
+attributeState.selectedRowIds = nextSelectedRowIds;
+syncSelectedStopsHeaderCount(count);
+refreshAttributeStatus();
+if (changed) renderAttributeTable();
 }
 
 
@@ -504,6 +1226,7 @@ document.getElementById("selectionCount").textContent = count;
 
 // ===== WHEN POLYGON IS DRAWN =====
 map.on(L.Draw.Event.CREATED, e => {
+  selectedLayerKey = null;
   drawnLayer.clearLayers();
   drawnLayer.addLayer(e.layer);
   updateSelectionCount();
@@ -524,12 +1247,20 @@ document.getElementById("baseMapSelect").addEventListener("change", e => {
   if (selected === "satellite" && map.getZoom() >= 15) {
     satelliteLabelsLayer.addTo(map);
   }
+  syncStreetNetworkOverlay();
 });
 
 
 // ================= MAP SYMBOL SETTINGS =================
-const colors = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#1abc9c"];
 const shapes = ["circle","square","triangle","diamond"];
+const MARKER_SIZE_STEPS = [
+  [7, 1.5],
+  [9, 2.2],
+  [11, 3.0],
+  [13, 3.6],
+  [15, 4.4],
+  [Infinity, 5.2]
+];
 
 const symbolMap = {};        // stores symbol for each route/day combo
 const routeDayGroups = {};   // stores map markers grouped by route/day
@@ -572,7 +1303,7 @@ window.highlightRouteDayOnMap = function(routeValue, dayValue) {
   Object.keys(routeDayGroups).forEach(key => {
     if (matchingKey) return;
     const [kRoute, kDay] = key.split("|");
-    if (!kRoute || !kDay || kDay === "Delivered") return;
+    if (!kRoute || !kDay) return;
     if (String(kRoute).trim() !== routeToken) return;
 
     const keyDayToken = normalizeDayToken(kDay);
@@ -645,9 +1376,11 @@ function dayName(n) {
 // Assign a unique color/shape to each route/day
 function getSymbol(key) {
   if (!symbolMap[key]) {
+    // Generate a distinct color per route+day using golden-angle hue stepping.
+    const hue = Math.round((symbolIndex * 137.508) % 360);
     symbolMap[key] = {
-      color: colors[symbolIndex % colors.length],
-      shape: shapes[Math.floor(symbolIndex / colors.length) % shapes.length]
+      color: `hsl(${hue} 80% 52%)`,
+      shape: shapes[symbolIndex % shapes.length]
     };
     symbolIndex++;
   }
@@ -656,19 +1389,9 @@ function getSymbol(key) {
 
 
   function getMarkerPixelSize() {
+  // Same size for all routes at a given zoom level, but smaller when zoomed out.
   const z = map.getZoom();
-
-  const steps = [
-    [5, 0.03],     // almost invisible when fully zoomed out
-    [7, 0.08],
-    [9, 0.2],
-    [11, 0.6],
-    [13, 1.5],
-    [15, 3.5],
-    [Infinity, 6]
-  ];
-
-  return steps.find(([max]) => z <= max)[1];
+  return MARKER_SIZE_STEPS.find(([max]) => z <= max)[1];
 }
 
 
@@ -823,49 +1546,16 @@ function applyFilters() {
   const routeCheckboxes = [...document.querySelectorAll("#routeCheckboxes input")];
   const dayCheckboxes   = [...document.querySelectorAll("#dayCheckboxes input")];
 
-  let routes = routeCheckboxes.filter(i => i.checked).map(i => i.value);
+  const routes = routeCheckboxes.filter(i => i.checked).map(i => i.value);
   const days = dayCheckboxes.filter(i => i.checked).map(i => i.value);
 
-  // 🔥 PREVENT route + delivered from both being active
-  const activeRoutes = new Set(routes);
-
-  activeRoutes.forEach(route => {
-
-    if (route.endsWith("|Delivered")) {
-
-      const baseRoute = route.replace("|Delivered", "");
-
-      if (activeRoutes.has(baseRoute)) {
-        const baseCheckbox = routeCheckboxes.find(cb => cb.value === baseRoute);
-        if (baseCheckbox) baseCheckbox.checked = false;
-        activeRoutes.delete(baseRoute);
-      }
-
-    } else {
-
-      const deliveredRoute = route + "|Delivered";
-
-      if (activeRoutes.has(deliveredRoute)) {
-        const deliveredCheckbox = routeCheckboxes.find(cb => cb.value === deliveredRoute);
-        if (deliveredCheckbox) deliveredCheckbox.checked = false;
-        activeRoutes.delete(deliveredRoute);
-      }
-
-    }
-
-  });
-
-  routes = Array.from(activeRoutes);
-
-  // 🔥 Now apply visibility
   Object.entries(routeDayGroups).forEach(([key, group]) => {
     const [r, d] = key.split("|");
-
     const show = routes.includes(r) && days.includes(d);
-
     group.layers.forEach(l => show ? l.addTo(map) : map.removeLayer(l));
   });
 
+  updateSelectionCount();
   updateStats();
 }
 
@@ -874,6 +1564,7 @@ function applyFilters() {
 // ================= ROUTE STATISTICS =================
 function updateStats() {
   const list = document.getElementById("statsList");
+  if (!list) return;
   list.innerHTML = "";
 
   Object.entries(routeDayGroups).forEach(([key, group]) => {
@@ -886,16 +1577,38 @@ function updateStats() {
     list.appendChild(li);
   });
 }
+
+function selectEntireLayer(key) {
+  const group = routeDayGroups[key];
+  if (!group || !group.layers || !group.layers.length) return;
+
+  layerVisibilityState[key] = true;
+  const layerCheckbox = document.querySelector(`input[data-key="${key}"]`);
+  if (layerCheckbox) layerCheckbox.checked = true;
+
+  const bounds = L.latLngBounds();
+  group.layers.forEach(marker => {
+    map.addLayer(marker);
+    const ll = getLayerLatLng(marker);
+    if (ll) bounds.extend(ll);
+  });
+
+  if (!bounds.isValid()) return;
+
+  selectedLayerKey = key;
+  drawnLayer.clearLayers();
+
+  updateSelectionCount();
+  updateUndoButtonState();
+  map.fitBounds(bounds, { padding: [30, 30], maxZoom: 16 });
+}
   // ===== BUILD ROUTE + DAY LAYER CHECKBOXES =====
 // ===== BUILD ROUTE + DAY LAYER CHECKBOXES =====
 function buildRouteDayLayerControls() {
   const routeDayContainer = document.getElementById("routeDayLayers");
-  const deliveredContainer = document.getElementById("deliveredControls");
-
-  if (!routeDayContainer || !deliveredContainer) return;
+  if (!routeDayContainer) return;
 
   routeDayContainer.innerHTML = "";
-  deliveredContainer.innerHTML = "";
 
   const daySortRank = value => {
     const v = String(value ?? "").trim().toLowerCase();
@@ -926,100 +1639,43 @@ function buildRouteDayLayerControls() {
     const count = group.layers ? group.layers.length : 0;
     const [route, type] = key.split("|");
     const dayNameMap = {
-  1: "Monday",
-  2: "Tuesday",
-  3: "Wednesday",
-  4: "Thursday",
-  5: "Friday",
-  6: "Saturday",
-  7: "Sunday"
-};
+      1: "Monday",
+      2: "Tuesday",
+      3: "Wednesday",
+      4: "Thursday",
+      5: "Friday",
+      6: "Saturday",
+      7: "Sunday"
+    };
 
-    // === ROW WRAPPER ===
-const wrapper = document.createElement("div");
-wrapper.className = "layer-item";
+    const wrapper = document.createElement("div");
+    wrapper.className = "layer-item";
 
-
-  
-    // === CHECKBOX ===
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.dataset.key = key;
 
-    // Default state on load:
-// Route + Day = checked
-// Delivered = unchecked
+    if (layerVisibilityState.hasOwnProperty(key)) {
+      checkbox.checked = layerVisibilityState[key];
+    } else {
+      checkbox.checked = true;
+      layerVisibilityState[key] = true;
+    }
 
-if (layerVisibilityState.hasOwnProperty(key)) {
-  checkbox.checked = layerVisibilityState[key];
-} else {
-  if (type === "Delivered") {
-    checkbox.checked = false;
-    layerVisibilityState[key] = false;
-  } else {
-    checkbox.checked = true;
-    layerVisibilityState[key] = true;
-  }
-}
-
-    // Apply visibility immediately
     routeDayGroups[key].layers.forEach(marker => {
-      if (checkbox.checked) {
-        map.addLayer(marker);
-      } else {
-        map.removeLayer(marker);
-      }
+      if (checkbox.checked) map.addLayer(marker);
+      else map.removeLayer(marker);
     });
 
-    // Toggle behavior
     checkbox.addEventListener("change", () => {
+      layerVisibilityState[key] = checkbox.checked;
+      routeDayGroups[key].layers.forEach(marker => {
+        if (checkbox.checked) map.addLayer(marker);
+        else map.removeLayer(marker);
+      });
+    });
 
-  layerVisibilityState[key] = checkbox.checked;
-
-  const [route, type] = key.split("|");
-
-  // 🚫 Prevent Route + Delivered both visible
-  Object.keys(routeDayGroups).forEach(otherKey => {
-
-    const [otherRoute, otherType] = otherKey.split("|");
-
-    if (
-      otherRoute === route &&
-      otherKey !== key &&
-      (
-        (type === "Delivered" && otherType !== "Delivered") ||
-        (type !== "Delivered" && otherType === "Delivered")
-      )
-    ) {
-      // uncheck the conflicting layer
-      layerVisibilityState[otherKey] = false;
-
-      const otherCheckbox =
-        document.querySelector(`input[data-key="${otherKey}"]`);
-
-      if (otherCheckbox) otherCheckbox.checked = false;
-
-      routeDayGroups[otherKey].layers.forEach(m =>
-        map.removeLayer(m)
-      );
-    }
-  });
-
-  // Apply this checkbox visibility
-  routeDayGroups[key].layers.forEach(marker => {
-    if (checkbox.checked) {
-      map.addLayer(marker);
-    } else {
-      map.removeLayer(marker);
-    }
-  });
-
-});
-
-
-    // === SYMBOL PREVIEW ===
     const symbol = getSymbol(key);
-
     const preview = document.createElement("span");
     preview.className = "layer-preview";
     preview.style.background = symbol.color;
@@ -1040,35 +1696,25 @@ if (layerVisibilityState.hasOwnProperty(key)) {
       preview.style.transform = "rotate(45deg)";
     }
 
-    // === LABEL ===
     const labelText = document.createElement("span");
-   if (type !== "Delivered") {
-  const dayName = dayNameMap[type] || type;
- if (type !== "Delivered") {
-  const dayName = dayNameMap[type] || type;
-  labelText.textContent = `Route ${route} - ${dayName} (${count})`;
-} else {
-  labelText.textContent = `Route ${route} - Delivered (${count})`;
-}
+    const dayName = dayNameMap[type] || type;
+    labelText.textContent = `Route ${route} - ${dayName} (${count})`;
 
-} else {
-  labelText.textContent = `Route ${route} - Delivered (${count})`;
-}
+    const selectBtn = document.createElement("button");
+    selectBtn.type = "button";
+    selectBtn.className = "mini-btn";
+    selectBtn.textContent = "Select";
+    selectBtn.addEventListener("click", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      selectEntireLayer(key);
+    });
 
-
-
-    // === BUILD ROW ===
     wrapper.appendChild(checkbox);
     wrapper.appendChild(preview);
     wrapper.appendChild(labelText);
-    
-
-    // === Decide which container ===
-    if (type === "Delivered") {
-      deliveredContainer.appendChild(wrapper);
-    } else {
-      routeDayContainer.appendChild(wrapper);
-    }
+    wrapper.appendChild(selectBtn);
+    routeDayContainer.appendChild(wrapper);
   });
 }
 
@@ -1402,6 +2048,771 @@ function applyColumnAliasesToRows(rows, mapping) {
   });
 }
 
+function getAttributeHeaders(rows) {
+  const seen = new Set();
+  (rows || []).forEach(row => {
+    Object.keys(row || {}).forEach(key => {
+      if (key && !seen.has(key)) seen.add(key);
+    });
+  });
+  return [...seen];
+}
+
+function getAttributeRowId(row) {
+  return attributeRowToId.get(row);
+}
+
+function getAttributeMarker(rowId) {
+  return attributeMarkerByRowId.get(rowId) || null;
+}
+
+function refreshAttributeStatus() {
+  const status = document.getElementById("attributeStatus");
+  if (!status) return;
+  const selectedCount = attributeTableMode === "streets"
+    ? streetAttributeSelectedIds.size
+    : attributeState.selectedRowIds.size;
+  const visibleCount = attributeState.lastVisibleRows.length;
+  status.textContent = `${selectedCount} selected • ${visibleCount} visible`;
+}
+
+function syncSelectedStopsHeaderCount(count) {
+  const countNode = document.getElementById("selectionCount");
+  if (countNode) countNode.textContent = String(Math.max(0, Number(count) || 0));
+  const mobileBtn = document.getElementById("mobileSelectionBtn");
+  if (mobileBtn) mobileBtn.textContent = `Selected: ${countNode?.textContent || "0"}`;
+}
+
+function applyAttributeSelectionStyles() {
+  attributeMarkerByRowId.forEach((marker, rowId) => {
+    if (!marker || !marker._base?.symbol) return;
+    const baseColor = marker._base.symbol.color;
+    const selected = attributeState.selectedRowIds.has(rowId);
+    const color = selected ? "#ffe066" : baseColor;
+    marker.setStyle?.({
+      color,
+      fillColor: color,
+      fillOpacity: selected ? 1 : 0.95
+    });
+  });
+}
+
+function setAttributeRowSelected(rowId, selected, rerender = true) {
+  if (!Number.isFinite(rowId)) return;
+  if (selected) {
+    attributeState.selectedRowIds.add(rowId);
+  } else {
+    attributeState.selectedRowIds.delete(rowId);
+  }
+  applyAttributeSelectionStyles();
+  refreshAttributeStatus();
+  syncSelectedStopsHeaderCount(attributeState.selectedRowIds.size);
+  if (rerender) renderAttributeTable();
+}
+
+window.focusAttributeRowOnMap = function(rowId) {
+  const marker = getAttributeMarker(Number(rowId));
+  if (!marker) return;
+  const latlng = getLayerLatLng(marker);
+  if (!latlng) return;
+  map.setView(latlng, Math.max(map.getZoom(), 16), { animate: true });
+  marker.openPopup?.();
+};
+
+window.getAttributeSelectedRowIds = function() {
+  return [...attributeState.selectedRowIds];
+};
+
+window.setAttributeSelectedRowIds = function(rowIds) {
+  const ids = Array.isArray(rowIds) ? rowIds : [];
+  const next = new Set(
+    ids
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v))
+  );
+  const prev = attributeState.selectedRowIds;
+  const changed =
+    prev.size !== next.size ||
+    [...prev].some(id => !next.has(id));
+
+  if (!changed) return false;
+  attributeState.selectedRowIds = next;
+  applyAttributeSelectionStyles();
+  refreshAttributeStatus();
+  syncSelectedStopsHeaderCount(next.size);
+  renderAttributeTable();
+  return true;
+};
+
+window.zoomToAttributeRowsOnMap = function(rowIds) {
+  const ids = Array.isArray(rowIds) ? rowIds : [];
+  if (!ids.length) return false;
+  const bounds = L.latLngBounds();
+  ids.forEach(id => {
+    const marker = getAttributeMarker(Number(id));
+    const latlng = getLayerLatLng(marker);
+    if (latlng) bounds.extend(latlng);
+  });
+  if (!bounds.isValid()) return false;
+  map.fitBounds(bounds.pad(0.18));
+  return true;
+};
+
+function getFilteredAttributeRows() {
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const headers = window._attributeHeaders || [];
+  const needle = attributeState.filterText.trim().toLowerCase();
+
+  let data = rows
+    .map(row => ({ row, rowId: getAttributeRowId(row) }))
+    .filter(item => Number.isFinite(item.rowId));
+
+  if (needle) {
+    data = data.filter(({ row }) =>
+      headers.some(h => String(row?.[h] ?? "").toLowerCase().includes(needle))
+    );
+  }
+
+  if (attributeState.selectedOnly) {
+    data = data.filter(({ rowId }) => attributeState.selectedRowIds.has(rowId));
+  }
+
+  if (attributeState.sortKey) {
+    const key = attributeState.sortKey;
+    const dir = attributeState.sortDir;
+    data.sort((a, b) => {
+      const av = a.row?.[key];
+      const bv = b.row?.[key];
+      const an = Number(av);
+      const bn = Number(bv);
+      if (Number.isFinite(an) && Number.isFinite(bn)) {
+        return (an - bn) * dir;
+      }
+      return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+    });
+  }
+
+  attributeState.lastVisibleRows = data;
+  return data;
+}
+
+function renderAttributeTable() {
+  if (attributeTableMode === "streets") {
+    renderStreetAttributeTable();
+    return;
+  }
+  const table = document.getElementById("attributeTableGrid");
+  const empty = document.getElementById("attributeTableEmpty");
+  const pageInfo = document.getElementById("attributePageInfo");
+  const prevBtn = document.getElementById("attributePrevPageBtn");
+  const nextBtn = document.getElementById("attributeNextPageBtn");
+  if (!table || !empty) return;
+
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const headers = window._attributeHeaders || [];
+
+  if (!rows.length || !headers.length) {
+    table.innerHTML = "";
+    empty.style.display = "block";
+    if (pageInfo) pageInfo.textContent = "Page 1/1";
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    refreshAttributeStatus();
+    return;
+  }
+
+  const visibleRows = getFilteredAttributeRows();
+  const totalRows = visibleRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / attributeState.pageSize));
+  if (attributeState.page > totalPages) attributeState.page = totalPages;
+  if (attributeState.page < 1) attributeState.page = 1;
+  const pageStart = (attributeState.page - 1) * attributeState.pageSize;
+  const pageRows = visibleRows.slice(pageStart, pageStart + attributeState.pageSize);
+
+  if (pageInfo) pageInfo.textContent = `Page ${attributeState.page}/${totalPages}`;
+  if (prevBtn) prevBtn.disabled = attributeState.page <= 1;
+  if (nextBtn) nextBtn.disabled = attributeState.page >= totalPages;
+
+  empty.style.display = visibleRows.length ? "none" : "block";
+  if (!visibleRows.length) {
+    table.innerHTML = "";
+    if (pageInfo) pageInfo.textContent = "Page 1/1";
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    refreshAttributeStatus();
+    return;
+  }
+
+  const sortIndicator = (key) => {
+    if (attributeState.sortKey !== key) return "";
+    return attributeState.sortDir > 0 ? " ▲" : " ▼";
+  };
+
+  let html = "<thead><tr><th>Sel</th><th>#</th>";
+  headers.forEach(h => {
+    html += `<th><button type="button" data-sort="${h.replace(/"/g, "&quot;")}">${h}${sortIndicator(h)}</button></th>`;
+  });
+  html += "</tr></thead><tbody>";
+
+  pageRows.forEach(({ row, rowId }, idx) => {
+    const checked = attributeState.selectedRowIds.has(rowId) ? " checked" : "";
+    html += `<tr data-row-id="${rowId}" class="${checked ? "selected" : ""}">`;
+    html += `<td><input type="checkbox" data-row-select="${rowId}"${checked}></td>`;
+    html += `<td>${pageStart + idx + 1}</td>`;
+    headers.forEach(h => {
+      const value = row?.[h];
+      html += `<td>${String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</td>`;
+    });
+    html += "</tr>";
+  });
+  html += "</tbody>";
+  table.innerHTML = html;
+
+  table.querySelectorAll("button[data-sort]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      const key = e.currentTarget.getAttribute("data-sort");
+      if (!key) return;
+      if (attributeState.sortKey === key) {
+        attributeState.sortDir = attributeState.sortDir * -1;
+      } else {
+        attributeState.sortKey = key;
+        attributeState.sortDir = 1;
+      }
+      attributeState.page = 1;
+      renderAttributeTable();
+    });
+  });
+
+  table.querySelectorAll("input[data-row-select]").forEach(input => {
+    input.addEventListener("change", e => {
+      const rowId = Number(e.currentTarget.getAttribute("data-row-select"));
+      setAttributeRowSelected(rowId, e.currentTarget.checked, true);
+    });
+  });
+
+  table.querySelectorAll("tbody tr").forEach(tr => {
+    tr.addEventListener("click", e => {
+      if (e.target.closest("input")) return;
+      const rowId = Number(tr.getAttribute("data-row-id"));
+      if (!Number.isFinite(rowId)) return;
+      window.focusAttributeRowOnMap(rowId);
+    });
+  });
+
+  refreshAttributeStatus();
+}
+
+function exportAttributeVisibleRowsToCsv() {
+  if (attributeTableMode === "streets") {
+    const rows = getFilteredStreetAttributeRows();
+    if (!rows.length) {
+      alert("No street attributes to export.");
+      return;
+    }
+    const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+    const esc = (v) => {
+      const raw = String(v ?? "");
+      if (/[\",\\n]/.test(raw)) return `\"${raw.replace(/\"/g, '\"\"')}\"`;
+      return raw;
+    };
+    const lines = [headers.join(",")];
+    rows.forEach(r => lines.push(headers.map(h => esc(r[h] ?? "")).join(",")));
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "street-attributes.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return;
+  }
+  const headers = window._attributeHeaders || [];
+  const rows = getFilteredAttributeRows();
+  if (!rows.length || !headers.length) {
+    alert("No attribute rows to export.");
+    return;
+  }
+
+  const esc = (v) => {
+    const raw = String(v ?? "");
+    if (/[",\n]/.test(raw)) return `"${raw.replace(/"/g, "\"\"")}"`;
+    return raw;
+  };
+
+  const lines = [];
+  lines.push(headers.map(esc).join(","));
+  rows.forEach(({ row }) => {
+    lines.push(headers.map(h => esc(row?.[h] ?? "")).join(","));
+  });
+
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "attribute-table.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getAttributePanelBounds() {
+  const mapEl = document.getElementById("map");
+  const header = document.querySelector("header");
+  const selectionBox = document.getElementById("selectionBox");
+  const summary = document.getElementById("bottomSummary");
+
+  const mapRect = mapEl?.getBoundingClientRect?.() || {
+    left: 8,
+    top: 84,
+    right: window.innerWidth - 8,
+    bottom: window.innerHeight - 8
+  };
+
+  const headerBottom = Math.ceil(header?.getBoundingClientRect?.().bottom || 84);
+  let left = Math.max(8, Math.ceil(mapRect.left) + 8);
+  let top = Math.max(headerBottom + 8, Math.ceil(mapRect.top) + 8);
+  let right = Math.min(window.innerWidth - 8, Math.ceil(mapRect.right) - 8);
+  let bottom = Math.min(window.innerHeight - 8, Math.ceil(mapRect.bottom) - 8);
+
+  if (window.innerWidth > 900 && selectionBox && !selectionBox.classList.contains("collapsed")) {
+    const selRect = selectionBox.getBoundingClientRect();
+    right = Math.min(right, Math.floor(selRect.left) - 8);
+  }
+
+  if (summary && !summary.classList.contains("collapsed")) {
+    const sumRect = summary.getBoundingClientRect();
+    bottom = Math.min(bottom, Math.floor(sumRect.top) - 8);
+  }
+
+  return { left, top, right, bottom };
+}
+
+function clampAttributePanelRect(left, top, width, height) {
+  const bounds = getAttributePanelBounds();
+  const minWidth = window.innerWidth > 900 ? 420 : 320;
+  const minHeight = 220;
+  const maxWidth = Math.max(minWidth, bounds.right - bounds.left);
+  const maxHeight = Math.max(minHeight, bounds.bottom - bounds.top);
+
+  const safeWidth = Math.max(minWidth, Math.min(maxWidth, Number(width) || minWidth));
+  const safeHeight = Math.max(minHeight, Math.min(maxHeight, Number(height) || minHeight));
+  const safeLeft = Math.max(bounds.left, Math.min(bounds.right - safeWidth, Number(left) || bounds.left));
+  const safeTop = Math.max(bounds.top, Math.min(bounds.bottom - safeHeight, Number(top) || bounds.top));
+
+  return { left: safeLeft, top: safeTop, width: safeWidth, height: safeHeight, bounds };
+}
+
+function applyAttributePanelRect(panel, rect) {
+  if (!panel || !rect) return;
+  panel.style.left = `${Math.round(rect.left)}px`;
+  panel.style.top = `${Math.round(rect.top)}px`;
+  panel.style.width = `${Math.round(rect.width)}px`;
+  panel.style.height = `${Math.round(rect.height)}px`;
+}
+
+function saveAttributePanelRect(panel) {
+  if (!panel) return;
+  storageSet("attributePanelLeft", Math.round(panel.offsetLeft));
+  storageSet("attributePanelTop", Math.round(panel.offsetTop));
+  storageSet("attributePanelWidth", Math.round(panel.offsetWidth));
+  storageSet("attributePanelHeight", Math.round(panel.offsetHeight));
+}
+
+function refreshMapAfterOverlayChange() {
+  if (!map || typeof map.invalidateSize !== "function") return;
+  requestAnimationFrame(() => {
+    try { map.invalidateSize({ pan: false }); } catch (_) {}
+  });
+  setTimeout(() => {
+    try { map.invalidateSize({ pan: false }); } catch (_) {}
+  }, 120);
+}
+
+function snapAttributePanelToCorner(panel) {
+  if (!panel) return;
+  const rect = clampAttributePanelRect(panel.offsetLeft, panel.offsetTop, panel.offsetWidth, panel.offsetHeight);
+  const threshold = 72;
+  const corners = [
+    { left: rect.bounds.left, top: rect.bounds.top }, // top-left
+    { left: rect.bounds.right - rect.width, top: rect.bounds.top }, // top-right
+    { left: rect.bounds.left, top: rect.bounds.bottom - rect.height }, // bottom-left
+    { left: rect.bounds.right - rect.width, top: rect.bounds.bottom - rect.height } // bottom-right
+  ];
+
+  let closest = null;
+  let minDist = Infinity;
+  corners.forEach(corner => {
+    const dx = rect.left - corner.left;
+    const dy = rect.top - corner.top;
+    const dist = Math.hypot(dx, dy);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = corner;
+    }
+  });
+
+  if (closest && minDist <= threshold) {
+    applyAttributePanelRect(panel, { ...rect, left: closest.left, top: closest.top });
+    return true;
+  }
+  return false;
+}
+
+function syncAttributePanelLayout() {
+  const panel = document.getElementById("attributeTablePanel");
+  const btnDesktop = document.getElementById("attributeTableBtn");
+  const btnMobile = document.getElementById("attributeTableBtnMobile");
+  const collapseBtn = document.getElementById("attributeDockCloseBtn");
+  if (!panel) return;
+
+  const isClosed = panel.classList.contains("closed");
+  const isCollapsed = panel.classList.contains("collapsed");
+  panel.setAttribute("aria-hidden", isClosed ? "true" : "false");
+  panel.inert = !!isClosed;
+
+  const label = isClosed ? "Attribute Table" : "Hide Table";
+  if (btnDesktop) btnDesktop.querySelector("span:last-child").textContent = label;
+  if (btnMobile) btnMobile.textContent = isClosed ? "Table" : "Close Table";
+  if (collapseBtn) collapseBtn.textContent = isCollapsed ? "Show" : "Hide";
+}
+
+function openAttributePanel() {
+  const panel = document.getElementById("attributeTablePanel");
+  if (!panel) return;
+  panel.classList.remove("closed", "collapsed");
+  const bounds = getAttributePanelBounds();
+  const savedW = Number(storageGet("attributePanelWidth"));
+  const savedH = Number(storageGet("attributePanelHeight"));
+  const savedL = Number(storageGet("attributePanelLeft"));
+  const savedT = Number(storageGet("attributePanelTop"));
+
+  const defaultWidth = Math.min(980, Math.max(420, bounds.right - bounds.left - 120));
+  const defaultHeight = Math.min(520, Math.max(240, bounds.bottom - bounds.top - 60));
+  const defaultLeft = bounds.left + 16;
+  const defaultTop = bounds.top + 8;
+
+  const rect = clampAttributePanelRect(
+    Number.isFinite(savedL) ? savedL : defaultLeft,
+    Number.isFinite(savedT) ? savedT : defaultTop,
+    Number.isFinite(savedW) ? savedW : defaultWidth,
+    Number.isFinite(savedH) ? savedH : defaultHeight
+  );
+  applyAttributePanelRect(panel, rect);
+  syncAttributePanelLayout();
+  renderAttributeTable();
+  refreshMapAfterOverlayChange();
+}
+
+function closeAttributePanel() {
+  const panel = document.getElementById("attributeTablePanel");
+  if (!panel) return;
+  const active = document.activeElement;
+  if (active && panel.contains(active)) {
+    const fallback =
+      attributeTableMode === "streets"
+        ? (document.getElementById("streetAttributesBtn") || document.getElementById("streetAttributesBtnMobile"))
+        : (document.getElementById("attributeTableBtn") || document.getElementById("attributeTableBtnMobile"));
+    if (fallback && typeof fallback.focus === "function") fallback.focus();
+    if (active && typeof active.blur === "function") active.blur();
+  }
+  panel.classList.add("closed");
+  if (attributeTableMode === "streets") {
+    map.removeLayer(streetAttributeLayerGroup);
+  }
+  syncAttributePanelLayout();
+  refreshMapAfterOverlayChange();
+}
+
+function zoomToSelectedAttributeRows() {
+  if (!attributeState.selectedRowIds.size) {
+    alert("No selected rows.");
+    return;
+  }
+  const bounds = L.latLngBounds();
+  attributeState.selectedRowIds.forEach(rowId => {
+    const marker = getAttributeMarker(rowId);
+    const latlng = getLayerLatLng(marker);
+    if (latlng) bounds.extend(latlng);
+  });
+  if (!bounds.isValid()) {
+    alert("Selected rows are not currently on the map.");
+    return;
+  }
+  map.fitBounds(bounds.pad(0.18));
+}
+
+function openAttributeTablePopout() {
+  if (attributeTableMode === "streets") {
+    alert("Pop out is currently available for record attributes only.");
+    return;
+  }
+  const headers = window._attributeHeaders || [];
+  const rows = (window._currentRows || [])
+    .map(row => ({ rowId: getAttributeRowId(row), values: row }))
+    .filter(item => Number.isFinite(item.rowId));
+  if (!headers.length || !rows.length) {
+    alert("No attribute data to open.");
+    return;
+  }
+
+  const win = window.open("", "_blank", "width=1180,height=700,resizable=yes,scrollbars=yes");
+  if (!win) {
+    alert("Unable to open attribute table window.");
+    return;
+  }
+
+  const seed = JSON.stringify({
+    headers,
+    rows,
+    selectedIds: [...attributeState.selectedRowIds]
+  }).replace(/</g, "\\u003c");
+
+  win.document.write(`
+    <html>
+      <head>
+        <title>Attribute Table</title>
+        <style>
+          body { margin:0; font-family: Roboto, Arial, sans-serif; background:#0f1822; color:#e8f2fd; }
+          .bar { position:sticky; top:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px; background:#1a2938; border-bottom:1px solid #31495f; z-index:4; }
+          .bar button { border:1px solid #5a7ca1; background:#2a4258; color:#edf6ff; border-radius:8px; padding:6px 10px; cursor:pointer; }
+          .bar input[type=text] { min-width:220px; height:32px; border-radius:8px; border:1px solid #5a7ca1; background:#111a24; color:#eaf3fc; padding:0 10px; }
+          .bar label { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid #48647e; border-radius:8px; padding:5px 8px; background:#132130; }
+          .status { margin-left:auto; font-size:12px; color:#c8dcf1; }
+          .wrap { padding:10px; height:calc(100vh - 128px); overflow:auto; }
+          table { border-collapse:collapse; min-width:100%; width:max-content; background:#16212b; }
+          th, td { border:1px solid #31475b; padding:6px 8px; white-space:nowrap; font-size:12px; }
+          th { position:sticky; top:0; background:#26394a; text-align:left; }
+          th button { border:0; background:transparent; color:inherit; font:inherit; font-weight:700; cursor:pointer; padding:0; }
+          tbody tr { cursor:pointer; }
+          tbody tr:nth-child(even) { background:#192633; }
+          tbody tr.selected { background: rgba(84,176,255,0.22); }
+        </style>
+      </head>
+      <body>
+        <div class="bar">
+          <button onclick="window.close()">Close</button>
+          <input id="searchInput" type="text" placeholder="Filter records by any field..." />
+          <label><input id="selectedOnly" type="checkbox" /> Selected only</label>
+          <button id="selectVisibleBtn">Select Visible</button>
+          <button id="clearSelectedBtn">Clear Selection</button>
+          <button id="zoomSelectedBtn">Zoom to Selected</button>
+          <button id="exportCsvBtn">Export CSV</button>
+          <button id="prevBtn">Prev</button>
+          <button id="nextBtn">Next</button>
+          <span id="pageInfo">Page 1/1</span>
+          <span id="status" class="status">0 selected</span>
+        </div>
+        <div class="wrap">
+          <table id="table"></table>
+        </div>
+        <script>
+          const seed = ${seed};
+          const headers = seed.headers || [];
+          const rows = seed.rows || [];
+          let selectedSet = new Set(seed.selectedIds || []);
+          const state = { sortKey: null, sortDir: 1, filterText: "", selectedOnly: false, page: 1, pageSize: 300 };
+
+          const table = document.getElementById("table");
+          const pageInfo = document.getElementById("pageInfo");
+          const status = document.getElementById("status");
+          const prevBtn = document.getElementById("prevBtn");
+          const nextBtn = document.getElementById("nextBtn");
+          const searchInput = document.getElementById("searchInput");
+          const selectedOnly = document.getElementById("selectedOnly");
+          const selectVisibleBtn = document.getElementById("selectVisibleBtn");
+          const clearSelectedBtn = document.getElementById("clearSelectedBtn");
+          const zoomSelectedBtn = document.getElementById("zoomSelectedBtn");
+          const exportCsvBtn = document.getElementById("exportCsvBtn");
+
+          function setsEqual(a, b) {
+            if (a.size !== b.size) return false;
+            for (const value of a) {
+              if (!b.has(value)) return false;
+            }
+            return true;
+          }
+
+          function pullSelectionFromOpener() {
+            if (!window.opener || typeof window.opener.getAttributeSelectedRowIds !== "function") return false;
+            const ids = window.opener.getAttributeSelectedRowIds() || [];
+            const next = new Set(ids.map(v => Number(v)).filter(v => Number.isFinite(v)));
+            if (setsEqual(selectedSet, next)) return false;
+            selectedSet = next;
+            return true;
+          }
+
+          function pushSelectionToOpener() {
+            if (!window.opener || typeof window.opener.setAttributeSelectedRowIds !== "function") return;
+            window.opener.setAttributeSelectedRowIds([...selectedSet]);
+          }
+
+          function esc(v) {
+            return String(v ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          }
+
+          function getFilteredRows() {
+            const needle = (state.filterText || "").trim().toLowerCase();
+            let data = rows.slice();
+            if (needle) {
+              data = data.filter(item => headers.some(h => String(item.values?.[h] ?? "").toLowerCase().includes(needle)));
+            }
+            if (state.selectedOnly) {
+              data = data.filter(item => selectedSet.has(item.rowId));
+            }
+            if (state.sortKey) {
+              const key = state.sortKey;
+              const dir = state.sortDir;
+              data.sort((a, b) => {
+                const av = a.values?.[key];
+                const bv = b.values?.[key];
+                const an = Number(av);
+                const bn = Number(bv);
+                if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
+                return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+              });
+            }
+            return data;
+          }
+
+          function exportCsv(items) {
+            if (!items.length) return;
+            const csvEsc = (v) => {
+              const raw = String(v ?? "");
+              return /[",\\n]/.test(raw) ? ('"' + raw.replace(/"/g, '""') + '"') : raw;
+            };
+            const lines = [headers.map(csvEsc).join(",")];
+            items.forEach(item => lines.push(headers.map(h => csvEsc(item.values?.[h] ?? "")).join(",")));
+            const blob = new Blob([lines.join("\\n")], { type: "text/csv;charset=utf-8;" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "attribute-table.csv";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+          }
+
+          function render() {
+            const filtered = getFilteredRows();
+            const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
+            state.page = Math.max(1, Math.min(state.page, totalPages));
+            const start = (state.page - 1) * state.pageSize;
+            const pageRows = filtered.slice(start, start + state.pageSize);
+
+            const sortMarker = (key) => state.sortKey === key ? (state.sortDir > 0 ? " ▲" : " ▼") : "";
+            let html = "<thead><tr><th>Sel</th><th>#</th>";
+            headers.forEach(h => {
+              html += '<th><button type="button" data-sort="' + esc(h) + '">' + esc(h) + sortMarker(h) + "</button></th>";
+            });
+            html += "</tr></thead><tbody>";
+            pageRows.forEach((item, i) => {
+              const checked = selectedSet.has(item.rowId) ? " checked" : "";
+              html += '<tr data-row-id="' + item.rowId + '" class="' + (checked ? "selected" : "") + '">';
+              html += '<td><input type="checkbox" data-row-select="' + item.rowId + '"' + checked + "></td>";
+              html += "<td>" + (start + i + 1) + "</td>";
+              headers.forEach(h => {
+                html += "<td>" + esc(item.values?.[h] ?? "") + "</td>";
+              });
+              html += "</tr>";
+            });
+            html += "</tbody>";
+            table.innerHTML = html;
+
+            pageInfo.textContent = "Page " + state.page + "/" + totalPages;
+            status.textContent = selectedSet.size + " selected • " + filtered.length + " visible";
+            prevBtn.disabled = state.page <= 1;
+            nextBtn.disabled = state.page >= totalPages;
+
+            table.querySelectorAll("button[data-sort]").forEach(btn => {
+              btn.addEventListener("click", () => {
+                const key = btn.getAttribute("data-sort");
+                if (!key) return;
+                if (state.sortKey === key) state.sortDir *= -1;
+                else { state.sortKey = key; state.sortDir = 1; }
+                state.page = 1;
+                render();
+              });
+            });
+
+            table.querySelectorAll("input[data-row-select]").forEach(input => {
+              input.addEventListener("change", () => {
+                const rowId = Number(input.getAttribute("data-row-select"));
+                if (!Number.isFinite(rowId)) return;
+                if (input.checked) selectedSet.add(rowId);
+                else selectedSet.delete(rowId);
+                pushSelectionToOpener();
+                render();
+              });
+            });
+
+            table.querySelectorAll("tbody tr[data-row-id]").forEach(tr => {
+              tr.addEventListener("click", (e) => {
+                if (e.target.closest("input")) return;
+                const rowId = Number(tr.getAttribute("data-row-id"));
+                if (window.opener && Number.isFinite(rowId) && typeof window.opener.focusAttributeRowOnMap === "function") {
+                  window.opener.focusAttributeRowOnMap(rowId);
+                }
+              });
+            });
+          }
+
+          searchInput.addEventListener("input", () => { state.filterText = searchInput.value || ""; state.page = 1; render(); });
+          selectedOnly.addEventListener("change", () => {
+            pullSelectionFromOpener();
+            state.selectedOnly = !!selectedOnly.checked;
+            state.page = 1;
+            render();
+          });
+          prevBtn.addEventListener("click", () => { state.page = Math.max(1, state.page - 1); render(); });
+          nextBtn.addEventListener("click", () => { state.page += 1; render(); });
+          selectVisibleBtn.addEventListener("click", () => {
+            getFilteredRows().forEach(item => selectedSet.add(item.rowId));
+            pushSelectionToOpener();
+            render();
+          });
+          clearSelectedBtn.addEventListener("click", () => {
+            selectedSet.clear();
+            pushSelectionToOpener();
+            render();
+          });
+          zoomSelectedBtn.addEventListener("click", () => {
+            pullSelectionFromOpener();
+            const selectedIds = [...selectedSet];
+            if (!selectedIds.length) return;
+            if (window.opener && typeof window.opener.zoomToAttributeRowsOnMap === "function") {
+              const ok = window.opener.zoomToAttributeRowsOnMap(selectedIds);
+              if (ok) return;
+            }
+            if (window.opener && typeof window.opener.focusAttributeRowOnMap === "function") {
+              window.opener.focusAttributeRowOnMap(selectedIds[0]);
+            }
+          });
+          exportCsvBtn.addEventListener("click", () => exportCsv(getFilteredRows()));
+
+          window.addEventListener("focus", () => {
+            if (pullSelectionFromOpener()) render();
+          });
+          setInterval(() => {
+            const changed = pullSelectionFromOpener();
+            if (changed) render();
+          }, 500);
+
+          pullSelectionFromOpener();
+          render();
+        <\/script>
+      </body>
+    </html>
+  `);
+  win.document.close();
+}
+
 async function prepareMappedWorkbookForUpload(buffer, fileName) {
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -1446,6 +2857,13 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
   // store globally for saving later
   window._currentRows = rows;
   window._currentWorkbook = wb;
+  window._attributeHeaders = getAttributeHeaders(rows);
+  attributeState.page = 1;
+  attributeState.selectedRowIds.clear();
+  syncSelectedStopsHeaderCount(0);
+  attributeRowToMarker = new WeakMap();
+  attributeMarkerByRowId.clear();
+  rows.forEach((row, rowIndex) => attributeRowToId.set(row, rowIndex));
 
   // Clear previous map data
   Object.values(routeDayGroups).forEach(g => g.layers.forEach(l => map.removeLayer(l)));
@@ -1456,7 +2874,7 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
 
   const routeSet = new Set();
 
-  rows.forEach(row => {
+  rows.forEach((row, rowIndex) => {
     const lat = Number(row.LATITUDE);
     const lon = Number(row.LONGITUDE);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
@@ -1464,17 +2882,7 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
     const route = String(row.NEWROUTE ?? "").trim() || "Unassigned";
     const day = String(row.NEWDAY ?? "").trim() || "No Day";
 
-    let key;
-
-const status = String(row.del_status || "")
-  .trim()
-  .toLowerCase();
-
-if (status === "delivered") {
-  key = `${route}|Delivered`;
-} else {
-  key = `${route}|${day}`;
-}
+    const key = `${route}|${day}`;
 
 
     const symbol = getSymbol(key);
@@ -1489,16 +2897,11 @@ const fullAddress = [
   row["CSSFUX"] || ""
 ].join(" ").replace(/\s+/g, " ").trim();
 
-// Build popup content
+// Solution Reviewer popup: route + day only.
 const popupContent = `
   <div style="font-size:14px; line-height:1.4;">
-    <div style="font-weight:bold; font-size:15px; margin-bottom:6px;">
-      ${fullAddress || "Address not available"}
-    </div>
-
-    <div><strong>Container Size:</strong> ${row["SIZE"] || "-"}</div>
-    <div><strong>Quantity:</strong> ${row["QTY"] || "-"}</div>
-    <div><strong>Bin #:</strong> ${row["BINNO"] || "-"}</div>
+    <div><strong>Route:</strong> ${route || "-"}</div>
+    <div><strong>Day:</strong> ${dayName(day) || day || "-"}</div>
   </div>
 `;
 
@@ -1525,18 +2928,9 @@ if (labelText) {
 
     // 🔥 CRITICAL: link marker to Excel row
     marker._rowRef = row;
-
-  // ✅ Bright green delivered styling (SAFE + NORMALIZED)
-if (status === "delivered") {
-  marker.setStyle?.({
-    color: "#00FF00",
-    fillColor: "#00FF00",
-    fillOpacity: 1,
-    opacity: 1
-  });
-}
-
-    
+    marker._rowId = rowIndex;
+    attributeRowToMarker.set(row, marker);
+    attributeMarkerByRowId.set(rowIndex, marker);
     routeDayGroups[key].layers.push(marker);
     routeSet.add(route);
     globalBounds.extend([lat, lon]);
@@ -1545,6 +2939,8 @@ if (status === "delivered") {
   buildRouteCheckboxes([...routeSet]);
   buildRouteDayLayerControls();
   applyFilters();
+  renderAttributeTable();
+  refreshAttributeStatus();
 
   if (globalBounds.isValid()) map.fitBounds(globalBounds);
 }
@@ -1558,26 +2954,13 @@ async function listFiles() {
 
   const ul = document.getElementById("savedFiles");
   ul.innerHTML = "";
+  const routeFiles = data.filter(file => !isRouteSummaryFileName(file.name));
+  const allFileNames = data.map(f => f.name);
+  cleanupSummaryAttachments(allFileNames);
 
-  const routeFiles = {};
-  const summaryFiles = {};
-
- // Separate route files and summary files
-data.forEach(file => {
-  const name = file.name.toLowerCase();
-
-  if (name.includes("routesummary")) {
-    summaryFiles[normalizeName(name)] = file.name;
-  } else {
-    routeFiles[normalizeName(name)] = file.name;
-  }
-});
-
-
-  // Build UI
-  Object.keys(routeFiles).forEach(key => {
-    const routeName = routeFiles[key];
-    const summaryName = summaryFiles[key];
+  routeFiles.forEach(file => {
+    const routeName = file.name;
+    const summaryName = resolveSummaryForRoute(routeName, data);
 
     const li = document.createElement("li");
 
@@ -1651,6 +3034,14 @@ openBtn.textContent = "Open Map";
   if (summaryName) toDelete.push(summaryName);
 
   await sb.storage.from(BUCKET).remove(toDelete);
+  removeRouteSummaryAttachment(routeName);
+  if (summaryName) {
+    const map = getSummaryAttachments();
+    Object.keys(map).forEach(routeKey => {
+      if (map[routeKey] === summaryName) delete map[routeKey];
+    });
+    setSummaryAttachments(map);
+  }
 
   alert("✅ File deleted successfully.");
   listFiles();
@@ -1697,6 +3088,49 @@ async function uploadFile(file) {
     console.error("UPLOAD ERROR:", error);
     hideLoading();
     alert("Upload failed: " + error.message);
+  }
+}
+
+async function uploadRouteSummaryAndAttach(file) {
+  if (!file) return;
+
+  try {
+    showLoading("Uploading route summary...");
+
+    const { error } = await sb.storage
+      .from(BUCKET)
+      .upload(file.name, file, { upsert: true });
+
+    if (error) throw error;
+
+    const { data: files, error: listErr } = await sb.storage.from(BUCKET).list();
+    if (listErr) throw listErr;
+
+    const routeFileNames = files
+      .filter(f => !isRouteSummaryFileName(f.name))
+      .map(f => f.name);
+
+    hideLoading();
+
+    if (!routeFileNames.length) {
+      alert("Summary uploaded, but no route files are saved yet. Upload a route file first, then attach this summary.");
+      listFiles();
+      return;
+    }
+
+    const selectedRoute = await openSummaryAttachModal(file.name, routeFileNames);
+    if (!selectedRoute) {
+      listFiles();
+      return;
+    }
+
+    setRouteSummaryAttachment(selectedRoute, file.name);
+    alert(`Attached ${file.name} to ${selectedRoute}.`);
+    listFiles();
+  } catch (error) {
+    console.error("SUMMARY UPLOAD ERROR:", error);
+    hideLoading();
+    alert("Route summary upload failed: " + error.message);
   }
 }
 
@@ -1807,32 +3241,13 @@ async function loadSummaryFor(routeFileName) {
     return;
   }
 
-  console.log("ALL FILES:", data.map(f => f.name));
-  console.log("ROUTE FILE CLICKED:", routeFileName);
-
-  const normalizedRoute = normalizeName(routeFileName);
-  console.log("NORMALIZED ROUTE:", normalizedRoute);
-
-  const summary = data.find(f => {
-    const lower = f.name.toLowerCase();
-    const normalizedSummary = normalizeName(f.name);
-
-    console.log("CHECKING:", f.name, "→", normalizedSummary);
-
-    return (
-      lower.includes("routesummary") ||
-      lower.includes("route summary")
-    ) && normalizedSummary === normalizedRoute;
-  });
-
-  console.log("FOUND SUMMARY:", summary);
-
-  if (!summary) {
+  const summaryName = resolveSummaryForRoute(routeFileName, data);
+  if (!summaryName) {
     document.getElementById("routeSummaryTable").textContent = "No summary available";
     return;
   }
 
-  const { data: urlData } = sb.storage.from(BUCKET).getPublicUrl(summary.name);
+  const { data: urlData } = sb.storage.from(BUCKET).getPublicUrl(summaryName);
   const r = await fetch(urlData.publicUrl);
 
   const wb = XLSX.read(new Uint8Array(await r.arrayBuffer()), { type: "array" });
@@ -1929,79 +3344,34 @@ function toggleSummary() {
 // ===== PLACE LOCATE BUTTON BASED ON SCREEN SIZE =====
 function placeLocateButton() {
   const locateBtn = document.getElementById("locateMeBtn");
-  const completeBtn = document.getElementById("completeStopsBtn");
-  const headerContainer = document.querySelector(".mobile-header-buttons");
+    const headerContainer = document.querySelector(".mobile-header-buttons");
   const desktopContainer = document.getElementById("desktopLocateContainer");
-  const undoBtn = document.getElementById("undoDeliveredBtn");
-  const streetToggle = document.getElementById("streetLabelToggle");
+    const streetToggle = document.getElementById("streetLabelToggle");
 
-  if (!locateBtn || !completeBtn || !headerContainer || !desktopContainer) return;
+  if (!locateBtn || !headerContainer || !desktopContainer) return;
 
   if (window.innerWidth <= 900) {
     // 📱 MOBILE
     headerContainer.appendChild(locateBtn);
-    headerContainer.appendChild(completeBtn);
-    if (undoBtn) headerContainer.appendChild(undoBtn);
 
     if (streetToggle) {
       headerContainer.appendChild(streetToggle.parentElement);
     }
 
-    completeBtn.textContent = "✔";
-
   } else {
     // 🖥 DESKTOP
     desktopContainer.appendChild(locateBtn);
-    desktopContainer.appendChild(completeBtn);
-    if (undoBtn) desktopContainer.appendChild(undoBtn);
 
     if (streetToggle) {
       desktopContainer.appendChild(streetToggle.parentElement);
     }
-
-    completeBtn.textContent = "Complete Stops";
   }
 }
 
 //undo button state
 function updateUndoButtonState() {
-  const undoBtn = document.getElementById("undoDeliveredBtn");
-  if (!undoBtn) return;
-
-  const polygon = drawnLayer.getLayers()[0];
-  if (!polygon) {
-    undoBtn.classList.remove("pulse");
-    return;
-  }
-
-  let hasDeliveredInSelection = false;
-
-  Object.entries(routeDayGroups).forEach(([key, group]) => {
-
-    if (!key.endsWith("|Delivered")) return;
-
-    group.layers.forEach(marker => {
-
-      if (!map.hasLayer(marker)) return;
-
-      const pos = marker.getLatLng();
-
-      if (
-        polygon.getBounds().contains(pos) &&
-        marker._rowRef &&
-        String(marker._rowRef.del_status || "").trim().toLowerCase() === "delivered"
-      ) {
-        hasDeliveredInSelection = true;
-      }
-
-    });
-  });
-
-  if (hasDeliveredInSelection) {
-    undoBtn.classList.add("pulse");
-  } else {
-    undoBtn.classList.remove("pulse");
-  }
+  // Solution Reviewer does not use undo state.
+  return;
 }
 
 
@@ -2020,14 +3390,11 @@ function initApp() { //begining of initApp======================================
 const selectionBox = document.getElementById("selectionBox");
 const toggleSelectionBtn = document.getElementById("toggleSelectionBtn");
 const clearBtn = document.getElementById("clearSelectionBtn");
+const selectedStopsLabel = document.getElementById("selectedStopsLabel");
+const selectionCountNode = document.getElementById("selectionCount");
+const desktopSelectionHeader = document.getElementById("desktopSelectionHeader");
 const pageHeader = document.querySelector("header");
 
-// ===== COMPLETE STOPS BUTTON =====
-const completeBtnDesktop = document.getElementById("completeStopsBtn");
-const completeBtnMobile  = document.getElementById("completeStopsBtnMobile");
-
-
-  
 // Toggle sidebar open/closed
 if (selectionBox && toggleSelectionBtn) {
   toggleSelectionBtn.onclick = () => {
@@ -2053,14 +3420,46 @@ function syncSelectionBoxTop() {
   if (toggleSelectionBtn) toggleSelectionBtn.style.top = `${topOffset + 8}px`;
 }
 
+function placeDesktopSelectionControls() {
+  if (
+    !selectionBox ||
+    !clearBtn ||
+    !selectedStopsLabel ||
+    !selectionCountNode ||
+    !desktopSelectionHeader
+  ) return;
+
+  const desktopLocateContainer = document.getElementById("desktopLocateContainer");
+
+  if (window.innerWidth > 900) {
+    desktopSelectionHeader.appendChild(selectedStopsLabel);
+    desktopSelectionHeader.appendChild(selectionCountNode);
+    desktopSelectionHeader.appendChild(clearBtn);
+  } else {
+    selectionBox.insertBefore(selectedStopsLabel, selectionBox.firstChild);
+    selectionBox.insertBefore(selectionCountNode, selectedStopsLabel.nextSibling);
+    if (desktopLocateContainer) {
+      selectionBox.insertBefore(clearBtn, desktopLocateContainer);
+    } else {
+      selectionBox.appendChild(clearBtn);
+    }
+  }
+}
+
 syncSelectionBoxTop();
+placeDesktopSelectionControls();
 window.addEventListener("resize", syncSelectionBoxTop);
+window.addEventListener("resize", placeDesktopSelectionControls);
 
 // Clear selection button (ALWAYS ACTIVE)
 if (clearBtn) {
   clearBtn.onclick = () => {
+    selectedLayerKey = null;
     // Remove polygon
     drawnLayer.clearLayers();
+    attributeState.selectedRowIds.clear();
+    streetAttributeSelectedIds.clear();
+    applyStreetSelectionStyles();
 
     
 
@@ -2075,6 +3474,7 @@ if (clearBtn) {
 
     // 🔥 Force counter refresh everywhere (desktop + mobile)
     updateSelectionCount();
+    renderAttributeTable();
     updateUndoButtonState();
   };
 }
@@ -2086,10 +3486,280 @@ if (clearBtn) {
 
 
   
-// ===== FILE UPLOAD (DRAG + CLICK) =====
-const dropZone = document.getElementById("dropZone");
+// ===== IMPORT WIZARD + FILE UPLOAD =====
+const attributePanel = document.getElementById("attributeTablePanel");
+const streetAttributesBtnDesktop = document.getElementById("streetAttributesBtn");
+const streetAttributesBtnMobile = document.getElementById("streetAttributesBtnMobile");
+const attributeBtnDesktop = document.getElementById("attributeTableBtn");
+const attributeBtnMobile = document.getElementById("attributeTableBtnMobile");
+const attributeCloseBtn = document.getElementById("attributeDockCloseBtn");
+const attributePopoutBtn = document.getElementById("attributePopoutBtn");
+const attributeSearchInput = document.getElementById("attributeSearchInput");
+const attributeSelectedOnly = document.getElementById("attributeSelectedOnly");
+const attributeSelectVisibleBtn = document.getElementById("attributeSelectVisibleBtn");
+const attributeClearSelectionBtn = document.getElementById("attributeClearSelectionBtn");
+const attributeZoomSelectedBtn = document.getElementById("attributeZoomSelectedBtn");
+const attributeExportCsvBtn = document.getElementById("attributeExportCsvBtn");
+const attributePrevPageBtn = document.getElementById("attributePrevPageBtn");
+const attributeNextPageBtn = document.getElementById("attributeNextPageBtn");
+const attributeHeaderBar = attributePanel?.querySelector(".attribute-table-header");
+const attributeResizeHandles = attributePanel
+  ? [...attributePanel.querySelectorAll(".attribute-resize-handle[data-dir]")]
+  : [];
 
-// create hidden file input dynamically (so no HTML change needed)
+if (attributePanel) {
+  attributePanel.classList.add("closed");
+  attributePanel.classList.remove("collapsed");
+  const interaction = {
+    mode: null,
+    dir: "",
+    startX: 0,
+    startY: 0,
+    startLeft: 0,
+    startTop: 0,
+    startW: 0,
+    startH: 0,
+    popoutIntent: false
+  };
+
+  if (attributeHeaderBar) {
+    attributeHeaderBar.addEventListener("pointerdown", e => {
+      if (attributePanel.classList.contains("closed") || attributePanel.classList.contains("collapsed")) return;
+      if (e.target.closest("button, input, label")) return;
+      interaction.mode = "move";
+      interaction.startX = e.clientX;
+      interaction.startY = e.clientY;
+      interaction.startLeft = attributePanel.offsetLeft;
+      interaction.startTop = attributePanel.offsetTop;
+      interaction.startW = attributePanel.offsetWidth;
+      interaction.startH = attributePanel.offsetHeight;
+      interaction.popoutIntent = false;
+      document.body.style.userSelect = "none";
+      attributePanel.classList.add("dragging");
+      attributeHeaderBar.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    });
+  }
+
+  attributeResizeHandles.forEach(handle => {
+    handle.addEventListener("pointerdown", e => {
+      if (attributePanel.classList.contains("closed") || attributePanel.classList.contains("collapsed")) return;
+      interaction.mode = "resize";
+      interaction.dir = handle.dataset.dir || "se";
+      interaction.startX = e.clientX;
+      interaction.startY = e.clientY;
+      interaction.startLeft = attributePanel.offsetLeft;
+      interaction.startTop = attributePanel.offsetTop;
+      interaction.startW = attributePanel.offsetWidth;
+      interaction.startH = attributePanel.offsetHeight;
+      document.body.style.userSelect = "none";
+      handle.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    });
+  });
+
+  document.addEventListener("pointermove", e => {
+    if (!interaction.mode || attributePanel.classList.contains("closed")) return;
+    let left = interaction.startLeft;
+    let top = interaction.startTop;
+    let width = interaction.startW;
+    let height = interaction.startH;
+
+    const dx = e.clientX - interaction.startX;
+    const dy = e.clientY - interaction.startY;
+
+    if (interaction.mode === "move") {
+      const rawLeft = interaction.startLeft + dx;
+      const rawTop = interaction.startTop + dy;
+      const rawRight = rawLeft + interaction.startW;
+      const rawBottom = rawTop + interaction.startH;
+      const bounds = getAttributePanelBounds();
+      const detachMargin = 80;
+
+      interaction.popoutIntent =
+        rawLeft < bounds.left - detachMargin ||
+        rawTop < bounds.top - detachMargin ||
+        rawRight > bounds.right + detachMargin ||
+        rawBottom > bounds.bottom + detachMargin;
+
+      attributePanel.classList.toggle("detach-ready", interaction.popoutIntent);
+      left = rawLeft;
+      top = rawTop;
+    } else if (interaction.mode === "resize") {
+      // Keep resize smooth and direct while still slightly boosted.
+      const cornerDrag = interaction.dir.length === 2;
+      const speed = cornerDrag ? 1.35 : 1.2;
+      const sx = dx * speed;
+      const sy = dy * speed;
+
+      if (interaction.dir.includes("e")) {
+        width = interaction.startW + sx;
+      }
+      if (interaction.dir.includes("s")) {
+        height = interaction.startH + sy;
+      }
+      if (interaction.dir.includes("w")) {
+        width = interaction.startW - sx;
+        left = interaction.startLeft + sx;
+      }
+      if (interaction.dir.includes("n")) {
+        height = interaction.startH - sy;
+        top = interaction.startTop + sy;
+      }
+    }
+
+    if (interaction.mode === "move" && interaction.popoutIntent) {
+      // Let the panel follow the cursor outside bounds for intuitive "detach" feel.
+      attributePanel.style.left = `${Math.round(left)}px`;
+      attributePanel.style.top = `${Math.round(top)}px`;
+      attributePanel.style.width = `${Math.round(interaction.startW)}px`;
+      attributePanel.style.height = `${Math.round(interaction.startH)}px`;
+    } else {
+      const rect = clampAttributePanelRect(left, top, width, height);
+      applyAttributePanelRect(attributePanel, rect);
+    }
+  });
+
+  document.addEventListener("pointerup", () => {
+    if (!interaction.mode) return;
+    if (interaction.mode === "move" && interaction.popoutIntent) {
+      interaction.mode = null;
+      interaction.dir = "";
+      interaction.popoutIntent = false;
+      document.body.style.userSelect = "";
+      attributePanel.classList.remove("dragging", "detach-ready");
+      openAttributeTablePopout();
+      closeAttributePanel();
+      return;
+    }
+    if (interaction.mode === "move") {
+      snapAttributePanelToCorner(attributePanel);
+    }
+    interaction.mode = null;
+    interaction.dir = "";
+    interaction.popoutIntent = false;
+    document.body.style.userSelect = "";
+    attributePanel.classList.remove("dragging", "detach-ready");
+    saveAttributePanelRect(attributePanel);
+    refreshMapAfterOverlayChange();
+  });
+}
+
+const toggleAttributePanel = () => {
+  if (!attributePanel) return;
+  const isClosed = attributePanel.classList.contains("closed");
+  if (isClosed) {
+    setAttributeTableMode("records");
+    openAttributePanel();
+    renderAttributeTable();
+    return;
+  }
+  if (attributeTableMode !== "records") {
+    setAttributeTableMode("records");
+    renderAttributeTable();
+    return;
+  }
+  closeAttributePanel();
+};
+
+const openStreetAttributesPanel = async () => {
+  if (!attributePanel) return;
+  setAttributeTableMode("streets");
+  const isClosed = attributePanel.classList.contains("closed");
+  if (isClosed) openAttributePanel();
+  await loadStreetAttributesForCurrentView();
+  renderAttributeTable();
+};
+
+streetAttributesBtnDesktop?.addEventListener("click", openStreetAttributesPanel);
+streetAttributesBtnMobile?.addEventListener("click", openStreetAttributesPanel);
+attributeBtnDesktop?.addEventListener("click", toggleAttributePanel);
+attributeBtnMobile?.addEventListener("click", toggleAttributePanel);
+
+attributeCloseBtn?.addEventListener("click", () => {
+  if (!attributePanel) return;
+  attributePanel.classList.toggle("collapsed");
+  syncAttributePanelLayout();
+  refreshMapAfterOverlayChange();
+});
+
+attributePopoutBtn?.addEventListener("click", openAttributeTablePopout);
+
+attributeSearchInput?.addEventListener("input", () => {
+  attributeState.filterText = attributeSearchInput.value || "";
+  attributeState.page = 1;
+  renderAttributeTable();
+});
+
+attributeSelectedOnly?.addEventListener("change", () => {
+  attributeState.selectedOnly = !!attributeSelectedOnly.checked;
+  attributeState.page = 1;
+  renderAttributeTable();
+});
+
+attributeSelectVisibleBtn?.addEventListener("click", () => {
+  if (attributeTableMode === "streets") {
+    streetAttributeById.forEach(entry => streetAttributeSelectedIds.add(entry.id));
+    applyStreetSelectionStyles();
+  } else {
+    getFilteredAttributeRows().forEach(({ rowId }) => attributeState.selectedRowIds.add(rowId));
+    applyAttributeSelectionStyles();
+    syncSelectedStopsHeaderCount(attributeState.selectedRowIds.size);
+  }
+  renderAttributeTable();
+});
+
+attributeClearSelectionBtn?.addEventListener("click", () => {
+  if (attributeTableMode === "streets") {
+    streetAttributeSelectedIds.clear();
+    applyStreetSelectionStyles();
+  } else {
+    attributeState.selectedRowIds.clear();
+    applyAttributeSelectionStyles();
+    syncSelectedStopsHeaderCount(0);
+  }
+  renderAttributeTable();
+});
+
+attributeZoomSelectedBtn?.addEventListener("click", () => {
+  if (attributeTableMode === "streets") zoomToSelectedStreetSegments();
+  else zoomToSelectedAttributeRows();
+});
+attributeExportCsvBtn?.addEventListener("click", exportAttributeVisibleRowsToCsv);
+attributePrevPageBtn?.addEventListener("click", () => {
+  attributeState.page = Math.max(1, attributeState.page - 1);
+  renderAttributeTable();
+});
+attributeNextPageBtn?.addEventListener("click", () => {
+  attributeState.page = attributeState.page + 1;
+  renderAttributeTable();
+});
+
+window.addEventListener("resize", () => {
+  syncAttributePanelLayout();
+  if (!attributePanel || attributePanel.classList.contains("closed")) return;
+  const rect = clampAttributePanelRect(
+    attributePanel.offsetLeft,
+    attributePanel.offsetTop,
+    attributePanel.offsetWidth,
+    attributePanel.offsetHeight
+  );
+  applyAttributePanelRect(attributePanel, rect);
+  saveAttributePanelRect(attributePanel);
+  refreshMapAfterOverlayChange();
+});
+syncAttributePanelLayout();
+setAttributeTableMode("records");
+renderAttributeTable();
+
+const importWizardBtn = document.getElementById("importWizardBtn");
+const importWizardBtnMobile = document.getElementById("importWizardBtnMobile");
+const importWizardModal = document.getElementById("importWizardModal");
+const importWizardRouteBtn = document.getElementById("importWizardRouteBtn");
+const importWizardSummaryBtn = document.getElementById("importWizardSummaryBtn");
+const importWizardClose = document.getElementById("importWizardClose");
+
+// create hidden file inputs dynamically (fallback)
 let fileInput = document.getElementById("fileInput");
 if (!fileInput) {
   fileInput = document.createElement("input");
@@ -2100,37 +3770,72 @@ if (!fileInput) {
   document.body.appendChild(fileInput);
 }
 
-// CLICK → open picker
-dropZone.addEventListener("click", () => fileInput.click());
+let summaryFileInput = document.getElementById("summaryFileInput");
+if (!summaryFileInput) {
+  summaryFileInput = document.createElement("input");
+  summaryFileInput.type = "file";
+  summaryFileInput.accept = ".xlsx,.xls,.csv";
+  summaryFileInput.id = "summaryFileInput";
+  summaryFileInput.hidden = true;
+  document.body.appendChild(summaryFileInput);
+}
+
+function closeImportWizardModal() {
+  if (importWizardModal) importWizardModal.style.display = "none";
+}
+
+if (importWizardBtn && importWizardModal) {
+  importWizardBtn.addEventListener("click", () => {
+    importWizardModal.style.display = "flex";
+  });
+}
+
+if (importWizardBtnMobile && importWizardModal) {
+  importWizardBtnMobile.addEventListener("click", () => {
+    importWizardModal.style.display = "flex";
+  });
+}
+
+if (importWizardClose) {
+  importWizardClose.addEventListener("click", closeImportWizardModal);
+}
+
+if (importWizardModal) {
+  importWizardModal.addEventListener("click", e => {
+    if (e.target === importWizardModal) closeImportWizardModal();
+  });
+}
+
+if (importWizardRouteBtn) {
+  importWizardRouteBtn.addEventListener("click", () => {
+    closeImportWizardModal();
+    fileInput.click();
+  });
+}
+
+if (importWizardSummaryBtn) {
+  importWizardSummaryBtn.addEventListener("click", () => {
+    closeImportWizardModal();
+    summaryFileInput.click();
+  });
+}
 
 // FILE SELECTED
 fileInput.addEventListener("change", e => {
   const file = e.target.files[0];
   if (file) uploadFile(file);
+  e.target.value = "";
 });
 
-// PREVENT browser opening file on drop
-["dragenter", "dragover", "dragleave", "drop"].forEach(evt => {
-  dropZone.addEventListener(evt, e => e.preventDefault());
+summaryFileInput.addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (file) uploadRouteSummaryAndAttach(file);
+  e.target.value = "";
 });
-
-["dragenter", "dragover"].forEach(evt => {
-  dropZone.addEventListener(evt, () => dropZone.classList.add("drag-active"));
-});
-
-["dragleave", "drop"].forEach(evt => {
-  dropZone.addEventListener(evt, () => dropZone.classList.remove("drag-active"));
-});
-
-// DROP → upload
-dropZone.addEventListener("drop", e => {
-  const file = e.dataTransfer.files[0];
-  if (file) uploadFile(file);
-});
-
 
 // ===== INITIAL MAP LAYER + USER LOCATION =====
 baseMaps.streets.addTo(map);
+initStreetNetworkToggle();
 
 
 
@@ -2148,6 +3853,7 @@ if (baseSelect) {
     if (selected === "satellite" && map.getZoom() >= 15) {
       satelliteLabelsLayer.addTo(map);
     }
+    syncStreetNetworkOverlay();
   });
 }
 
@@ -3150,7 +4856,6 @@ if (resetBtn) {
 
     // 5. Reset counters & stats
     document.getElementById("selectionCount").textContent = "0";
-    document.getElementById("statsList").innerHTML = "";
 
     // 6. Clear route/day checkbox UI
     document.getElementById("routeCheckboxes").innerHTML = "";
@@ -3316,6 +5021,7 @@ if (currentBase === "satellite") {
 } else {
   map.removeLayer(satelliteLabelsLayer);
 }
+syncStreetNetworkOverlay();
 
 
   Object.values(routeDayGroups).forEach(group => {
@@ -3572,208 +5278,8 @@ async function saveWorkbookToCloud() {
 }
 
 
-// ================= COMPLETE STOPS + SAVE TO CLOUD =================
-async function completeStops() {
-  if (!window._currentRows || !window._currentWorkbook || !window._currentFilePath) {
-    alert("No Excel file loaded.");
-    return;
-  }
-
-  const polygon = drawnLayer.getLayers()[0];
-  if (!polygon) {
-    alert("Draw a selection first.");
-    return;
-  }
-
-  let completedCount = 0;
- 
-
-
-  // find markers inside polygon
-  // 🔥 ONLY process NON-Delivered layers
-Object.entries(routeDayGroups).forEach(([key, group]) => {
-
-  if (key.endsWith("|Delivered")) return;
-  if (!layerVisibilityState[key]) return; // 🔥 ONLY active layer
-
-  group.layers.slice().forEach(marker => {
-
-    const pos = marker.getLatLng();
-
-    if (polygon.getBounds().contains(pos) && marker._rowRef) {
-
-      const row = marker._rowRef;
-
-      row.del_status = "Delivered";
-
-      routeDayGroups[key].layers =
-        routeDayGroups[key].layers.filter(l => l !== marker);
-
-      const deliveredKey = `${row.NEWROUTE}|Delivered`;
-
-      if (!routeDayGroups[deliveredKey]) {
-        routeDayGroups[deliveredKey] = { layers: [] };
-      }
-
-      marker.setStyle?.({
-        color: "#00FF00",
-        fillColor: "#00FF00",
-        fillOpacity: 1,
-        opacity: 1
-      });
-
-      routeDayGroups[deliveredKey].layers.push(marker);
-
-      completedCount++;
-    }
-
-  });
-
-});
-
-
-  if (completedCount === 0) {
-    alert("No stops inside selection.");
-    return;
-  }
-
-  // rewrite worksheet from updated rows
-  const saved = await saveWorkbookToCloud();
-
-if (!saved) {
-  alert("❌ Cloud save failed. Excel file was NOT updated.");
-  return;
-}
-
-// 🔥 remove selection polygon after completion
-drawnLayer.clearLayers();
-  // Save current checkbox states
-document.querySelectorAll("#routeDayLayers input[type='checkbox']")
-  .forEach(cb => {
-    const key = cb.dataset.key;
-    if (key) layerVisibilityState[key] = cb.checked;
-  });
-
-document.querySelectorAll("#deliveredControls input[type='checkbox']")
-  .forEach(cb => {
-    const key = cb.dataset.key;
-    if (key) layerVisibilityState[key] = cb.checked;
-  });
-
-buildRouteDayLayerControls(); // refresh UI
-updateUndoButtonState();
-
-// 🔥 CLEAR selection + counter AFTER UI rebuild
-// 🔥 CLEAR polygon
-if (drawnLayer) {
-  drawnLayer.clearLayers();
-}
-
-// 🔥 Recalculate + restore marker styling properly
-updateSelectionCount();
-updateUndoButtonState();
-
-alert(`${completedCount} stop(s) marked Delivered and saved.`);
-
-
-}
-////////undo delivered stops
-async function undoDelivered() {
-
-  const confirmed = confirm("Are you sure you want to undo Delivered stops inside the selected area?");
-  if (!confirmed) return;
-
-  if (!window._currentRows || !window._currentWorkbook || !window._currentFilePath) {
-    alert("No Excel file loaded.");
-    return;
-  }
-
-
-  const polygon = drawnLayer.getLayers()[0];
-  if (!polygon) {
-    alert("Draw a selection first.");
-    return;
-  }
-
-  let undoCount = 0;
-
-  // 🔥 ONLY loop Delivered groups
-  Object.entries(routeDayGroups).forEach(([key, group]) => {
-
-    if (!key.endsWith("|Delivered")) return;  // HARD FILTER
-
-    group.layers.slice().forEach(marker => {
-
-      const pos = marker.getLatLng();
-
-      // must be inside selection AND actually marked Delivered
-      if (
-        polygon.getBounds().contains(pos) &&
-        marker._rowRef &&
-        String(marker._rowRef.del_status || "").trim().toLowerCase() === "delivered"
-      ) {
-
-        const row = marker._rowRef;
-
-        // remove Delivered from Excel data
-        row.del_status = "";
-
-        // remove marker from Delivered layer
-        routeDayGroups[key].layers =
-          routeDayGroups[key].layers.filter(l => l !== marker);
-
-      // restore original route/day layer
-const originalKey = `${row.NEWROUTE}|${row.NEWDAY}`;
-
-if (!routeDayGroups[originalKey]) {
-  routeDayGroups[originalKey] = { layers: [] };
-}
-
-const symbol = getSymbol(originalKey);
-
-marker.setStyle?.({
-  color: symbol.color,
-  fillColor: symbol.color,
-  fillOpacity: 0.95,
-  opacity: 1
-});
-
-routeDayGroups[originalKey].layers.push(marker);
-
-undoCount++;
-              }
-    });
-  });
-
-  if (undoCount === 0) {
-    alert("No Delivered stops inside selection.");
-    return;
-  }
-
-  // Rewrite Excel sheet
- const saved = await saveWorkbookToCloud();
-
-if (!saved) {
-  alert("❌ Cloud save failed. Excel file was NOT updated.");
-  return;
-}
-
-
-// 🔥 CLEAR polygon
-if (drawnLayer) {
-  drawnLayer.clearLayers();
-}
-
-// 🔥 Recalculate selection state + restore styling
-updateSelectionCount();
-updateUndoButtonState();
-
-buildRouteDayLayerControls();
-
-alert(`${undoCount} stop(s) restored.`);
-
-}
- // ================= LOADING OVERLAY =================
+// Solution Reviewer intentionally excludes complete/undo workflows.
+// ================= LOADING OVERLAY =================
 window.showLoading = function(message) {
   const loader = document.getElementById("loadingOverlay");
   if (!loader) return;
@@ -3843,21 +5349,6 @@ if (daysToggle && daysContent) {
   });
 }
 
-// ===== STATS COLLAPSIBLE =====
-const statsToggle = document.getElementById("statsToggle");
-const statsContent = document.getElementById("statsContent");
-
-if (statsToggle && statsContent) {
-
-  // Closed by default
-  statsContent.classList.add("collapsed");
-
-  statsToggle.addEventListener("click", () => {
-    const isCollapsed = statsContent.classList.toggle("collapsed");
-    statsToggle.classList.toggle("open", !isCollapsed);
-  });
-}
-//////////
   // ===== ROUTES COLLAPSIBLE =====
 const routesToggle = document.getElementById("routesToggle");
 const routesContent = document.getElementById("routesContent");
@@ -3881,21 +5372,15 @@ if (routesToggle && routesContent) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
-// ================= COMPLETE BUTTON EVENTS =================
-document.getElementById("completeStopsBtn")
-  ?.addEventListener("click", completeStops);
-
-document.getElementById("completeStopsBtnMobile")
-  ?.addEventListener("click", completeStops);
-//undo delivered stops button event
-  document.getElementById("undoDeliveredBtn")
-  ?.addEventListener("click", undoDelivered);
-
-
-
-  
   listFiles();
 }
+
+
+
+
+
+
+
 
 
 

@@ -55,7 +55,8 @@ function storageSet(name, value) {
 const HEADER_TOOL_LINKS = [
   { label: "Cart Delivery App", href: "./index.html" },
   { label: "Sales-Polygon Viewer", href: "./sales-polygon-viewer.html" },
-  { label: "Solution Reviewer", href: "./solution-reviewer.html" }
+  { label: "Solution Reviewer", href: "./solution-reviewer.html" },
+  { label: "TDS-PAK", href: "./tds-pak.html" }
 ];
 
 function setupHeaderToolsMenu() {
@@ -578,7 +579,7 @@ setCurrentFileDisplay(window._currentFilePath);
 
 // ================= MAP SETUP =================
 // Create Leaflet map
-const map = L.map("map").setView([0, 0], 2);
+const map = L.map("map").setView([31.0, -99.0], 6);
 // Shared Canvas renderer for high-performance drawing
 const canvasRenderer = L.canvas({ padding: 0.5 });
 
@@ -4744,6 +4745,7 @@ if (routesToggle && routesContent) {
 
   listFiles();
 }
+
 
 
 
