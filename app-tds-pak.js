@@ -634,6 +634,26 @@ let lastStreetLoadPolygonSnapshot = null;
 const LOCAL_STREET_GRID_SIZE_DEG = 0.025;
 const LOCAL_STREET_SAVED_POLYGONS_KEY = "localStreetSavedPolygons";
 const LOCAL_STREET_SAVED_POLYGONS_MAX = 60;
+const LOCAL_STREET_SYMBOLOGY_KEY = "localStreetSymbology";
+const STREET_BASE_LINE_COLOR = "#4ea2f5";
+const STREET_BASE_LINE_WEIGHT = 3;
+const STREET_BASE_LINE_OPACITY = 0.65;
+const STREET_SYMBOLOGY_EMPTY_KEY = "__EMPTY__";
+const STREET_NETWORK_MANAGER_TAB_KEY = "streetNetworkManagerTab";
+const STREET_SYMBOLOGY_PALETTE = [
+  "#4ea2f5",
+  "#ef4444",
+  "#22c55e",
+  "#f59e0b",
+  "#a855f7",
+  "#06b6d4",
+  "#84cc16",
+  "#f97316",
+  "#ec4899",
+  "#14b8a6",
+  "#eab308",
+  "#3b82f6"
+];
 const localStreetSourceState = {
   loaded: false,
   sourceName: "",
@@ -699,6 +719,13 @@ const localStreetBackendState = {
   checking: false,
   lastCheckedAt: 0
 };
+let streetSymbologyState = {
+  enabled: false,
+  field: "highway",
+  valueColors: {},
+  lineWidth: STREET_BASE_LINE_WEIGHT,
+  opacity: STREET_BASE_LINE_OPACITY
+};
 
 function localStreetCellKey(latIdx, lonIdx) {
   return `${latIdx}:${lonIdx}`;
@@ -724,6 +751,139 @@ function setStoredLocalStreetBackendUrl(urlValue) {
 
 function localStreetHasProvider() {
   return !!localStreetSourceState.loaded || (!!localStreetBackendState.available && !!localStreetBackendState.hasIndex);
+}
+
+function normalizeStreetSymbologyState(raw) {
+  const base = {
+    enabled: false,
+    field: "highway",
+    valueColors: {},
+    lineWidth: STREET_BASE_LINE_WEIGHT,
+    opacity: STREET_BASE_LINE_OPACITY
+  };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+
+  const field = String(raw.field || "highway").trim() || "highway";
+  const valueColors = {};
+  if (raw.valueColors && typeof raw.valueColors === "object" && !Array.isArray(raw.valueColors)) {
+    Object.keys(raw.valueColors).forEach(key => {
+      const normalizedKey = String(key || "").trim();
+      const color = String(raw.valueColors[key] || "").trim();
+      if (!normalizedKey || !/^#[0-9a-fA-F]{6}$/.test(color)) return;
+      valueColors[normalizedKey] = color.toLowerCase();
+    });
+  }
+
+  const widthNum = Number(raw.lineWidth);
+  const opacityNum = Number(raw.opacity);
+  return {
+    enabled: !!raw.enabled,
+    field,
+    valueColors,
+    lineWidth: Number.isFinite(widthNum) ? Math.max(1, Math.min(8, widthNum)) : STREET_BASE_LINE_WEIGHT,
+    opacity: Number.isFinite(opacityNum) ? Math.max(0.2, Math.min(1, opacityNum)) : STREET_BASE_LINE_OPACITY
+  };
+}
+
+function loadStoredStreetSymbologyState() {
+  const raw = storageGet(LOCAL_STREET_SYMBOLOGY_KEY);
+  if (!raw) return normalizeStreetSymbologyState(null);
+  try {
+    return normalizeStreetSymbologyState(JSON.parse(raw));
+  } catch {
+    return normalizeStreetSymbologyState(null);
+  }
+}
+
+function saveStoredStreetSymbologyState() {
+  storageSet(LOCAL_STREET_SYMBOLOGY_KEY, JSON.stringify(normalizeStreetSymbologyState(streetSymbologyState)));
+}
+
+function ensureStreetSymbologyState() {
+  streetSymbologyState = normalizeStreetSymbologyState(streetSymbologyState);
+  return streetSymbologyState;
+}
+
+function normalizeStreetSymbologyValueKey(value) {
+  const text = String(value ?? "").trim();
+  return text ? text : STREET_SYMBOLOGY_EMPTY_KEY;
+}
+
+function formatStreetSymbologyValueLabel(key) {
+  if (key === STREET_SYMBOLOGY_EMPTY_KEY) return "(Blank)";
+  return key;
+}
+
+function getStreetSymbologyPaletteColorByKey(key) {
+  const text = String(key || "");
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  const idx = Math.abs(hash) % STREET_SYMBOLOGY_PALETTE.length;
+  return STREET_SYMBOLOGY_PALETTE[idx];
+}
+
+function getStreetSymbologyAvailableFields() {
+  const preferredOrder = ["highway", "surface", "lanes", "maxspeed", "oneway", "name", "ref", "id"];
+  const fieldSet = new Set(preferredOrder);
+  streetAttributeById.forEach(entry => {
+    const row = entry?.row;
+    if (!row || typeof row !== "object") return;
+    Object.keys(row).forEach(key => {
+      const normalized = String(key || "").trim();
+      if (!normalized) return;
+      fieldSet.add(normalized);
+    });
+  });
+  const fields = [...fieldSet];
+  fields.sort((a, b) => {
+    const aIndex = preferredOrder.indexOf(a);
+    const bIndex = preferredOrder.indexOf(b);
+    const aRank = aIndex === -1 ? 999 : aIndex;
+    const bRank = bIndex === -1 ? 999 : bIndex;
+    if (aRank !== bRank) return aRank - bRank;
+    return a.localeCompare(b, undefined, { sensitivity: "base" });
+  });
+  return fields;
+}
+
+function getStreetSymbologyClassStats(fieldName) {
+  const field = String(fieldName || "").trim();
+  const counts = new Map();
+  streetAttributeById.forEach(entry => {
+    const row = entry?.row || {};
+    const valueKey = normalizeStreetSymbologyValueKey(row?.[field]);
+    const item = counts.get(valueKey) || { key: valueKey, label: formatStreetSymbologyValueLabel(valueKey), count: 0 };
+    item.count += 1;
+    counts.set(valueKey, item);
+  });
+  return [...counts.values()].sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+  });
+}
+
+function resolveStreetSymbologyColorForEntry(entry) {
+  const state = ensureStreetSymbologyState();
+  if (!state.enabled) return STREET_BASE_LINE_COLOR;
+  const field = String(state.field || "highway");
+  const valueKey = normalizeStreetSymbologyValueKey(entry?.row?.[field]);
+  const explicit = state.valueColors?.[valueKey];
+  if (typeof explicit === "string" && /^#[0-9a-fA-F]{6}$/.test(explicit)) {
+    return explicit.toLowerCase();
+  }
+  return getStreetSymbologyPaletteColorByKey(valueKey);
+}
+
+function getStreetSegmentBaseStyle(entry) {
+  const state = ensureStreetSymbologyState();
+  return {
+    color: resolveStreetSymbologyColorForEntry(entry),
+    weight: state.enabled ? state.lineWidth : STREET_BASE_LINE_WEIGHT,
+    opacity: state.enabled ? state.opacity : STREET_BASE_LINE_OPACITY
+  };
 }
 
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS) {
@@ -834,28 +994,28 @@ function updateStreetNetworkManagerHint(hasProvider = localStreetHasProvider()) 
   const layerVisible = isStreetNetworkLayerVisibleEnabled();
 
   if (!hasProvider) {
-    hintNode.textContent = "Start with Data Source: load a ZIP/GeoJSON file or open Street Setup Wizard.";
+    hintNode.textContent = "Start with Street Setup Wizard: download setup program, run launcher, then check backend.";
     return;
   }
 
   if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
     if (usingLocal && layerVisible) {
-      hintNode.textContent = "Backend source is active. Draw a polygon to load streets for this area.";
+      hintNode.textContent = "Backend source is active. Choose a saved polygon or draw a new one to load streets for this area.";
     } else if (usingLocal) {
       hintNode.textContent = "Street source is on, but map layer is hidden. Turn on Street Network Layer in the sidebar.";
     } else {
-      hintNode.textContent = "Backend is ready. Turn on Street Segments, then draw a polygon.";
+      hintNode.textContent = "Backend is ready. Turn on Street Segments, then choose a saved polygon or draw a new one.";
     }
     return;
   }
 
   const loadedCount = localStreetSourceState.elementsById.size.toLocaleString();
   if (usingLocal && layerVisible) {
-    hintNode.textContent = `Local source is active (${loadedCount} indexed). Draw a polygon to refresh streets in view.`;
+    hintNode.textContent = `Local source is active (${loadedCount} indexed). Choose a saved polygon or draw a new one to refresh streets in view.`;
   } else if (usingLocal) {
     hintNode.textContent = "Street source is on, but map layer is hidden. Turn on Street Network Layer in the sidebar.";
   } else {
-    hintNode.textContent = `Local source is ready (${loadedCount} indexed). Turn on Street Segments, then draw a polygon.`;
+    hintNode.textContent = `Local source is ready (${loadedCount} indexed). Turn on Street Segments, then choose a saved polygon or draw a new one.`;
   }
 }
 
@@ -887,7 +1047,7 @@ function updateLocalStreetSourceStatus(message = "") {
     } else if (shouldUseLocalStreetSource()) {
       node.textContent = `Street layer: Hidden (Local backend${backendName})`;
     } else {
-      node.textContent = `Street layer: Off (Local backend ready${backendName}). Turn on Street Segments, then draw a polygon.`;
+      node.textContent = `Street layer: Off (Local backend ready${backendName}). Turn on Street Segments, then choose a saved polygon or draw a new one.`;
     }
     return;
   }
@@ -1966,7 +2126,7 @@ function startTexasStreetsDownload(skipConfirm = false) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  updateLocalStreetSourceStatus("Downloading Texas source ZIP from Geofabrik... then click Load File and select that .zip file.");
+  updateLocalStreetSourceStatus("Downloading Texas source ZIP from Geofabrik... then run the setup program on that ZIP.");
   return true;
 }
 
@@ -2291,7 +2451,7 @@ async function loadLocalStreetSourceFromPath(pathInput, options = {}) {
     finishLocalStreetLoadProgress("Could not read saved streets path.", true);
     const baseMsg = `Unable to open "${sourcePath}".`;
     const localHint = isLikelyLocalFilesystemPath(sourcePath)
-      ? "\n\nBrowsers usually block direct local filesystem paths. Use the Load File button instead."
+      ? "\n\nBrowsers usually block direct local filesystem paths. Use Street Setup Wizard + backend instead."
       : "";
     throw new Error(`${baseMsg}\n${err?.message || err}${localHint}`);
   }
@@ -2331,7 +2491,7 @@ async function loadLocalStreetSourceFromPath(pathInput, options = {}) {
     finishLocalStreetLoadProgress("Could not stream saved streets file.", true);
     throw new Error(
       "Saved streets JSON is too large for non-stream parsing in this browser. " +
-      "Use Load File in a Chromium-based browser or provide a smaller regional file."
+      "Use the backend setup workflow or provide a smaller regional file."
     );
   }
 
@@ -2421,7 +2581,7 @@ async function promptForMissingSavedStreetSource(error = null) {
   try {
     await loadLocalStreetSourceFromPath(pastedPath);
   } catch (err) {
-    alert(`Could not load streets from that path.\n\n${err?.message || err}\n\nYou can use Load File instead.`);
+    alert(`Could not load streets from that path.\n\n${err?.message || err}\n\nUse Street Setup Wizard instead.`);
   }
 }
 
@@ -2526,8 +2686,8 @@ function openStreetSetupWizardModal() {
   updateStreetSetupGuide();
   setStreetWizardStatus(
     localStreetBackendState.available && localStreetBackendState.hasIndex
-      ? "Backend is ready. Next: Turn on Street Segments, then draw a polygon."
-      : "Use buttons below in order: get data, check backend, then start polygon load."
+      ? "Backend is ready. Next: turn on Street Segments, then choose a saved polygon or draw a new one."
+      : "Recommended path: Download Setup Program, run launcher, Check Backend, then start polygon load."
   );
   modal.style.display = "flex";
 }
@@ -2541,6 +2701,9 @@ function openStreetNetworkManagerModal() {
   const modal = document.getElementById("streetNetworkManagerModal");
   if (!modal) return;
   updateLocalStreetSourceStatus();
+  if (typeof window.__refreshStreetNetworkManagerUi === "function") {
+    window.__refreshStreetNetworkManagerUi();
+  }
   modal.style.display = "flex";
 }
 
@@ -2553,8 +2716,11 @@ function initLocalStreetSourceControls() {
   const streetNetworkManagerBtn = document.getElementById("streetNetworkManagerBtn");
   const streetNetworkManagerModal = document.getElementById("streetNetworkManagerModal");
   const streetNetworkManagerClose = document.getElementById("streetNetworkManagerClose");
+  const setupTabBtn = document.getElementById("streetNetworkSetupTabBtn");
+  const symbologyTabBtn = document.getElementById("streetNetworkSymbologyTabBtn");
+  const setupPanel = document.getElementById("streetNetworkSetupPanel");
+  const symbologyPanel = document.getElementById("streetNetworkSymbologyPanel");
   const openStreetSetupWizardBtn = document.getElementById("openStreetSetupWizardBtn");
-  const loadLocalStreetFileBtn = document.getElementById("loadLocalStreetFileBtn");
   const downloadTexasZipBtn = document.getElementById("downloadTexasZipBtn");
   const downloadAutoSetupPackageBtn = document.getElementById("downloadAutoSetupPackageBtn");
   const checkLocalBackendBtn = document.getElementById("checkLocalBackendBtn");
@@ -2562,10 +2728,21 @@ function initLocalStreetSourceControls() {
   const streetWizardModal = document.getElementById("streetSetupWizardModal");
   const streetWizardClose = document.getElementById("streetSetupWizardClose");
   const streetWizardDownloadTexasBtn = document.getElementById("streetWizardDownloadTexasBtn");
-  const streetWizardLoadFileBtn = document.getElementById("streetWizardLoadFileBtn");
   const streetWizardAutoSetupBtn = document.getElementById("streetWizardAutoSetupBtn");
   const streetWizardCheckBackendBtn = document.getElementById("streetWizardCheckBackendBtn");
   const streetWizardStartBtn = document.getElementById("streetWizardStartBtn");
+  const streetSymbologyEnabledInput = document.getElementById("streetSymbologyEnabled");
+  const streetSymbologyFieldSelect = document.getElementById("streetSymbologyFieldSelect");
+  const streetSymbologyRefreshBtn = document.getElementById("streetSymbologyRefreshBtn");
+  const streetSymbologyWidthInput = document.getElementById("streetSymbologyWidthInput");
+  const streetSymbologyWidthValue = document.getElementById("streetSymbologyWidthValue");
+  const streetSymbologyOpacityInput = document.getElementById("streetSymbologyOpacityInput");
+  const streetSymbologyOpacityValue = document.getElementById("streetSymbologyOpacityValue");
+  const streetSymbologyClassMeta = document.getElementById("streetSymbologyClassMeta");
+  const streetSymbologyClassList = document.getElementById("streetSymbologyClassList");
+  const streetSymbologyStatus = document.getElementById("streetSymbologyStatus");
+  const streetSymbologyApplyBtn = document.getElementById("streetSymbologyApplyBtn");
+  const streetSymbologyResetBtn = document.getElementById("streetSymbologyResetBtn");
   const useLocalToggle = document.getElementById("useLocalStreetSource");
 
   let localStreetSourceFileInput = document.getElementById("localStreetSourceFileInput");
@@ -2598,6 +2775,178 @@ function initLocalStreetSourceControls() {
   const openStreetSourceFilePicker = async () => {
     await openLocalStreetSourcePicker(localStreetSourceFileInput);
     updateStreetSetupGuide();
+  };
+
+  streetSymbologyState = loadStoredStreetSymbologyState();
+  ensureStreetSymbologyState();
+
+  const setStreetSymbologyStatus = message => {
+    if (!streetSymbologyStatus) return;
+    streetSymbologyStatus.textContent = String(message || "Symbology: Default style.");
+  };
+
+  const applyStreetSymbologyToMap = (statusMessage = "") => {
+    ensureStreetSymbologyState();
+    saveStoredStreetSymbologyState();
+    applyStreetSelectionStyles();
+    setStreetSymbologyStatus(statusMessage || "Symbology applied to loaded street segments.");
+  };
+
+  const setStreetNetworkManagerTab = (tabName, persist = true) => {
+    const tab = String(tabName || "setup").toLowerCase() === "symbology" ? "symbology" : "setup";
+    const isSymbology = tab === "symbology";
+    setupTabBtn?.classList.toggle("active", !isSymbology);
+    symbologyTabBtn?.classList.toggle("active", isSymbology);
+    setupTabBtn?.setAttribute("aria-selected", !isSymbology ? "true" : "false");
+    symbologyTabBtn?.setAttribute("aria-selected", isSymbology ? "true" : "false");
+    setupPanel?.classList.toggle("active", !isSymbology);
+    symbologyPanel?.classList.toggle("active", isSymbology);
+    if (persist) {
+      storageSet(STREET_NETWORK_MANAGER_TAB_KEY, tab);
+    }
+  };
+
+  const renderStreetSymbologyClassList = () => {
+    if (!streetSymbologyClassList || !streetSymbologyFieldSelect) return;
+    ensureStreetSymbologyState();
+    const selectedField = String(streetSymbologyFieldSelect.value || streetSymbologyState.field || "highway");
+    const stats = getStreetSymbologyClassStats(selectedField);
+    const maxRows = 80;
+    const shown = stats.slice(0, maxRows);
+    const hiddenCount = Math.max(0, stats.length - shown.length);
+
+    if (streetSymbologyClassMeta) {
+      const suffix = hiddenCount ? ` (${hiddenCount.toLocaleString()} more)` : "";
+      streetSymbologyClassMeta.textContent = `${stats.length.toLocaleString()} values${suffix}`;
+    }
+
+    streetSymbologyClassList.innerHTML = "";
+    if (!shown.length) {
+      const empty = document.createElement("div");
+      empty.className = "street-symbology-empty";
+      empty.textContent = "No loaded street segments yet. Load streets, then refresh values.";
+      streetSymbologyClassList.appendChild(empty);
+      return;
+    }
+
+    shown.forEach(item => {
+      const row = document.createElement("div");
+      row.className = "street-symbology-class-item";
+
+      const colorInput = document.createElement("input");
+      colorInput.type = "color";
+      colorInput.value = streetSymbologyState.valueColors?.[item.key] || getStreetSymbologyPaletteColorByKey(item.key);
+      colorInput.disabled = !streetSymbologyState.enabled;
+
+      const label = document.createElement("span");
+      label.className = "street-symbology-class-item-label";
+      label.textContent = item.label;
+
+      const count = document.createElement("span");
+      count.className = "street-symbology-class-item-count";
+      count.textContent = item.count.toLocaleString();
+
+      colorInput.addEventListener("input", () => {
+        if (!streetSymbologyState.valueColors || typeof streetSymbologyState.valueColors !== "object") {
+          streetSymbologyState.valueColors = {};
+        }
+        streetSymbologyState.valueColors[item.key] = String(colorInput.value || "").toLowerCase();
+        applyStreetSymbologyToMap(`Updated color for ${item.label}.`);
+      });
+
+      row.append(colorInput, label, count);
+      streetSymbologyClassList.appendChild(row);
+    });
+  };
+
+  const refreshStreetSymbologyUi = () => {
+    if (!streetSymbologyFieldSelect) return;
+    ensureStreetSymbologyState();
+
+    const fields = getStreetSymbologyAvailableFields();
+    if (!fields.includes(streetSymbologyState.field)) {
+      streetSymbologyState.field = fields[0] || "highway";
+    }
+
+    streetSymbologyFieldSelect.innerHTML = "";
+    fields.forEach(field => {
+      const option = document.createElement("option");
+      option.value = field;
+      option.textContent = field;
+      streetSymbologyFieldSelect.appendChild(option);
+    });
+    streetSymbologyFieldSelect.value = streetSymbologyState.field;
+
+    if (streetSymbologyEnabledInput) streetSymbologyEnabledInput.checked = !!streetSymbologyState.enabled;
+    if (streetSymbologyWidthInput) streetSymbologyWidthInput.value = String(streetSymbologyState.lineWidth);
+    if (streetSymbologyOpacityInput) streetSymbologyOpacityInput.value = String(streetSymbologyState.opacity);
+    if (streetSymbologyWidthValue) streetSymbologyWidthValue.textContent = Number(streetSymbologyState.lineWidth).toFixed(1);
+    if (streetSymbologyOpacityValue) streetSymbologyOpacityValue.textContent = Number(streetSymbologyState.opacity).toFixed(2);
+    renderStreetSymbologyClassList();
+
+    const symbologyStateLabel = streetSymbologyState.enabled
+      ? `Symbology active: ${streetSymbologyState.field}`
+      : "Symbology: Default style.";
+    setStreetSymbologyStatus(symbologyStateLabel);
+  };
+
+  setupTabBtn?.addEventListener("click", () => setStreetNetworkManagerTab("setup"));
+  symbologyTabBtn?.addEventListener("click", () => {
+    setStreetNetworkManagerTab("symbology");
+    refreshStreetSymbologyUi();
+  });
+
+  streetSymbologyEnabledInput?.addEventListener("change", () => {
+    streetSymbologyState.enabled = !!streetSymbologyEnabledInput.checked;
+    applyStreetSymbologyToMap(streetSymbologyState.enabled
+      ? `Symbology enabled for [${streetSymbologyState.field}].`
+      : "Symbology disabled. Default street style restored.");
+    refreshStreetSymbologyUi();
+  });
+
+  streetSymbologyFieldSelect?.addEventListener("change", () => {
+    streetSymbologyState.field = String(streetSymbologyFieldSelect.value || "highway");
+    applyStreetSymbologyToMap(`Symbology field set to [${streetSymbologyState.field}].`);
+    renderStreetSymbologyClassList();
+  });
+
+  streetSymbologyRefreshBtn?.addEventListener("click", () => {
+    refreshStreetSymbologyUi();
+    applyStreetSymbologyToMap("Symbology values refreshed.");
+  });
+
+  streetSymbologyWidthInput?.addEventListener("input", () => {
+    const value = Number(streetSymbologyWidthInput.value);
+    streetSymbologyState.lineWidth = Number.isFinite(value) ? Math.max(1, Math.min(8, value)) : STREET_BASE_LINE_WEIGHT;
+    if (streetSymbologyWidthValue) streetSymbologyWidthValue.textContent = streetSymbologyState.lineWidth.toFixed(1);
+    applyStreetSymbologyToMap(`Street line width set to ${streetSymbologyState.lineWidth.toFixed(1)}.`);
+  });
+
+  streetSymbologyOpacityInput?.addEventListener("input", () => {
+    const value = Number(streetSymbologyOpacityInput.value);
+    streetSymbologyState.opacity = Number.isFinite(value) ? Math.max(0.2, Math.min(1, value)) : STREET_BASE_LINE_OPACITY;
+    if (streetSymbologyOpacityValue) streetSymbologyOpacityValue.textContent = streetSymbologyState.opacity.toFixed(2);
+    applyStreetSymbologyToMap(`Street opacity set to ${streetSymbologyState.opacity.toFixed(2)}.`);
+  });
+
+  streetSymbologyApplyBtn?.addEventListener("click", () => {
+    applyStreetSymbologyToMap(`Symbology applied by [${streetSymbologyState.field}].`);
+    refreshStreetSymbologyUi();
+  });
+
+  streetSymbologyResetBtn?.addEventListener("click", () => {
+    streetSymbologyState = normalizeStreetSymbologyState(null);
+    applyStreetSymbologyToMap("Street symbology reset to default.");
+    refreshStreetSymbologyUi();
+  });
+
+  const preferredTab = storageGet(STREET_NETWORK_MANAGER_TAB_KEY) || "setup";
+  setStreetNetworkManagerTab(preferredTab, false);
+  refreshStreetSymbologyUi();
+  window.__refreshStreetNetworkManagerUi = () => {
+    refreshStreetSymbologyUi();
+    const nextTab = storageGet(STREET_NETWORK_MANAGER_TAB_KEY) || "setup";
+    setStreetNetworkManagerTab(nextTab, false);
   };
 
   const runLocalBackendCheck = async (showAlert = true) => {
@@ -2656,12 +3005,6 @@ function initLocalStreetSourceControls() {
     openStreetSetupWizardModal();
   });
 
-  loadLocalStreetFileBtn?.addEventListener("click", () => {
-    openStreetSourceFilePicker().catch(err => {
-      console.error("Street source picker failed:", err);
-    });
-  });
-
   downloadTexasZipBtn?.addEventListener("click", () => {
     startTexasStreetsDownload(false);
     setStreetWizardStatus("Texas source ZIP download started.");
@@ -2700,13 +3043,7 @@ function initLocalStreetSourceControls() {
 
   streetWizardDownloadTexasBtn?.addEventListener("click", () => {
     startTexasStreetsDownload(false);
-    setStreetWizardStatus("Texas source ZIP download started.");
-  });
-
-  streetWizardLoadFileBtn?.addEventListener("click", () => {
-    openStreetSourceFilePicker().catch(err => {
-      console.error("Street source picker failed:", err);
-    });
+    setStreetWizardStatus("Texas source ZIP download started. Next: run setup program, then check backend.");
   });
 
   streetWizardAutoSetupBtn?.addEventListener("click", () => {
@@ -3315,6 +3652,7 @@ function initStreetNetworkToggle() {
   const cancelBtn = document.getElementById("streetSegmentsPromptCancel");
   const promptModal = document.getElementById("streetSegmentsPromptModal");
   const savePolygonBtn = document.getElementById("saveStreetPolygonBtn");
+  const openPolygonLibraryBtn = document.getElementById("openStreetPolygonLibraryBtn");
   const choosePolygonBtn = document.getElementById("chooseStreetPolygonBtn");
   const polygonLibraryModal = document.getElementById("streetPolygonLibraryModal");
   const polygonLibraryCloseBtn = document.getElementById("streetPolygonLibraryClose");
@@ -3366,9 +3704,13 @@ function initStreetNetworkToggle() {
     saveCurrentStreetPolygonSnapshot();
   });
 
-  choosePolygonBtn?.addEventListener("click", () => {
+  const openSavedPolygonPicker = () => {
+    closeStreetSegmentsPromptModal();
     openStreetPolygonLibraryModal();
-  });
+  };
+
+  choosePolygonBtn?.addEventListener("click", openSavedPolygonPicker);
+  openPolygonLibraryBtn?.addEventListener("click", openSavedPolygonPicker);
 
   polygonLibraryCloseBtn?.addEventListener("click", () => {
     closeStreetPolygonLibraryModal();
@@ -3713,14 +4055,24 @@ function setAttributeTableMode(mode) {
 
   if (attributeTableMode === "streets") updateStreetLoadStatus("Loading street segments...");
   else updateStreetLoadStatus("");
+
+  const selectedCount = attributeTableMode === "streets"
+    ? streetAttributeSelectedIds.size
+    : attributeState.selectedRowIds.size;
+  syncSelectedStopsHeaderCount(selectedCount);
+  if (typeof window.__refreshSelectionToolsUi === "function") {
+    window.__refreshSelectionToolsUi();
+  }
 }
 
 function setStreetSegmentStyle(entry, selected) {
   if (!entry?.layer) return;
+  const baseStyle = getStreetSegmentBaseStyle(entry);
+  const selectedWeight = Math.max((Number(baseStyle.weight) || STREET_BASE_LINE_WEIGHT) + 2, 5);
   entry.layer.setStyle(
     selected
-      ? { color: "#ffe066", weight: 5, opacity: 0.96 }
-      : { color: "#4ea2f5", weight: 3, opacity: 0.65 }
+      ? { color: "#ffe066", weight: selectedWeight, opacity: 0.96 }
+      : baseStyle
   );
 }
 
@@ -4163,18 +4515,27 @@ function upsertStreetElement(e) {
   if (existing?.layer) {
     existing.row = mergeStreetAttributeRows(existing.row, incomingRow);
     if (typeof existing.layer.setLatLngs === "function") existing.layer.setLatLngs(latlngs);
+    setStreetSegmentStyle(existing, streetAttributeSelectedIds.has(id));
     return false;
   }
   const row = mergeStreetAttributeRows(null, incomingRow);
+  const baseStyle = getStreetSegmentBaseStyle({ row });
   const layer = L.polyline(latlngs, {
-    color: "#4ea2f5",
-    weight: 3,
-    opacity: 0.65,
+    color: baseStyle.color,
+    weight: baseStyle.weight,
+    opacity: baseStyle.opacity,
     renderer: canvasRenderer,
     smoothFactor: 1.2
   });
   layer.on("click", () => {
-    if (attributeTableMode !== "streets") return;
+    if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) return;
+    const attributePanel = document.getElementById("attributeTablePanel");
+    if (attributeTableMode !== "streets") {
+      setAttributeTableMode("streets");
+    }
+    if (attributePanel?.classList.contains("closed")) {
+      openAttributePanel();
+    }
     toggleStreetSegmentSelection(id, null, true);
   });
   streetAttributeLayerGroup.addLayer(layer);
@@ -4388,6 +4749,9 @@ async function loadStreetAttributesForCurrentView(boundsOverride = null, polygon
     setStreetLoadBarVisible(false);
     pendingStreetReload = false;
     updateStreetSetupGuide();
+    if (typeof window.__refreshStreetNetworkManagerUi === "function") {
+      window.__refreshStreetNetworkManagerUi();
+    }
   }
 }
 
@@ -4440,6 +4804,211 @@ function replaceStreetSelection(nextSelectedIds) {
   });
 }
 
+const MAP_SELECTION_DRAW_MODE_KEY = "mapSelectionDrawMode";
+
+function normalizeMapSelectionDrawMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "add" || normalized === "subtract" || normalized === "intersect") return normalized;
+  return "replace";
+}
+
+function getMapSelectionModeLabel(modeValue = "replace") {
+  const mode = normalizeMapSelectionDrawMode(modeValue);
+  if (mode === "add") return "Add";
+  if (mode === "subtract") return "Subtract";
+  if (mode === "intersect") return "Intersect";
+  return "Replace";
+}
+
+let mapSelectionDrawMode = normalizeMapSelectionDrawMode(storageGet(MAP_SELECTION_DRAW_MODE_KEY) || "replace");
+
+function setMapSelectionDrawMode(modeValue, persist = true) {
+  mapSelectionDrawMode = normalizeMapSelectionDrawMode(modeValue);
+  if (persist) {
+    storageSet(MAP_SELECTION_DRAW_MODE_KEY, mapSelectionDrawMode);
+  }
+  if (typeof window.__refreshSelectionToolsUi === "function") {
+    window.__refreshSelectionToolsUi();
+  }
+}
+
+function areNumericIdSetsEqual(a, b) {
+  if (!a || !b) return false;
+  if (a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
+  }
+  return true;
+}
+
+function combineSelectionIds(currentIds, candidateIds, modeValue = mapSelectionDrawMode) {
+  const mode = normalizeMapSelectionDrawMode(modeValue);
+  const current = new Set(
+    Array.from(currentIds || [])
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v))
+  );
+  const candidates = new Set(
+    Array.from(candidateIds || [])
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v))
+  );
+
+  if (mode === "add") {
+    candidates.forEach(id => current.add(id));
+    return current;
+  }
+  if (mode === "subtract") {
+    candidates.forEach(id => current.delete(id));
+    return current;
+  }
+  if (mode === "intersect") {
+    const next = new Set();
+    current.forEach(id => {
+      if (candidates.has(id)) next.add(id);
+    });
+    return next;
+  }
+  return candidates;
+}
+
+function getVisibleSelectableRecordRowIds() {
+  const out = new Set();
+  Object.entries(routeDayGroups).forEach(([key, group]) => {
+    if (!isLayerManagerEntrySelectable(key)) return;
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(marker => {
+      if (!map.hasLayer(marker)) return;
+      const rowId = Number(marker?._rowId);
+      if (!Number.isFinite(rowId)) return;
+      out.add(rowId);
+    });
+  });
+  return out;
+}
+
+function getSelectableRecordRowIds() {
+  const out = new Set();
+  Object.entries(routeDayGroups).forEach(([key, group]) => {
+    if (!isLayerManagerEntrySelectable(key)) return;
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(marker => {
+      const rowId = Number(marker?._rowId);
+      if (!Number.isFinite(rowId)) return;
+      out.add(rowId);
+    });
+  });
+  return out;
+}
+
+function getVisibleSelectableStreetIds() {
+  const out = new Set();
+  if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) return out;
+  streetAttributeById.forEach((entry, id) => {
+    if (!entry?.layer) return;
+    if (!map.hasLayer(entry.layer)) return;
+    out.add(id);
+  });
+  return out;
+}
+
+function getRecordRowIdsInCurrentView() {
+  const out = new Set();
+  const bounds = map.getBounds();
+  Object.entries(routeDayGroups).forEach(([key, group]) => {
+    if (!isLayerManagerEntrySelectable(key)) return;
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(marker => {
+      if (!map.hasLayer(marker)) return;
+      const base = marker?._base;
+      if (!base) return;
+      const rowId = Number(marker?._rowId);
+      if (!Number.isFinite(rowId)) return;
+      const latlng = L.latLng(base.lat, base.lon);
+      if (!bounds.contains(latlng)) return;
+      out.add(rowId);
+    });
+  });
+  return out;
+}
+
+function getStreetIdsInCurrentView() {
+  const out = new Set();
+  if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) return out;
+  const bounds = map.getBounds();
+  streetAttributeById.forEach((entry, id) => {
+    const layer = entry?.layer;
+    if (!layer) return;
+    if (!map.hasLayer(layer)) return;
+    const layerBounds = layer.getBounds?.();
+    if (!layerBounds?.isValid?.()) return;
+    if (!bounds.intersects(layerBounds)) return;
+    out.add(id);
+  });
+  return out;
+}
+
+function applySelectionIdsToActiveMode(candidateIds, modeValue = mapSelectionDrawMode) {
+  const mode = normalizeMapSelectionDrawMode(modeValue);
+  if (attributeTableMode === "streets") {
+    if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) {
+      return streetAttributeSelectedIds.size;
+    }
+    const next = combineSelectionIds(streetAttributeSelectedIds, candidateIds, mode);
+    replaceStreetSelection(next);
+    applyStreetSelectionStyles();
+    syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+    refreshAttributeStatus();
+    if (attributeTableMode === "streets") renderAttributeTable();
+    return streetAttributeSelectedIds.size;
+  }
+
+  const selectableIds = getSelectableRecordRowIds();
+  const base = new Set(
+    [...attributeState.selectedRowIds].filter(id => selectableIds.has(id))
+  );
+  const next = combineSelectionIds(base, candidateIds, mode);
+  attributeState.selectedRowIds = next;
+  applyAttributeSelectionStyles();
+  syncSelectedStopsHeaderCount(next.size);
+  refreshAttributeStatus();
+  if (attributeTableMode === "records") renderAttributeTable();
+  return next.size;
+}
+
+function invertVisibleSelectionInActiveMode() {
+  if (attributeTableMode === "streets") {
+    if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) {
+      return streetAttributeSelectedIds.size;
+    }
+    const next = new Set(streetAttributeSelectedIds);
+    const visibleIds = getVisibleSelectableStreetIds();
+    visibleIds.forEach(id => {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    });
+    replaceStreetSelection(next);
+    applyStreetSelectionStyles();
+    syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+    refreshAttributeStatus();
+    if (attributeTableMode === "streets") renderAttributeTable();
+    return streetAttributeSelectedIds.size;
+  }
+
+  const next = new Set(attributeState.selectedRowIds);
+  const visibleIds = getVisibleSelectableRecordRowIds();
+  visibleIds.forEach(id => {
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+  });
+  attributeState.selectedRowIds = next;
+  applyAttributeSelectionStyles();
+  syncSelectedStopsHeaderCount(next.size);
+  refreshAttributeStatus();
+  if (attributeTableMode === "records") renderAttributeTable();
+  return next.size;
+}
+
 // ================= POLYGON SELECT =================
 
 
@@ -4462,81 +5031,139 @@ const drawControl = new L.Control.Draw({
 
 map.addControl(drawControl);
 
+function startSelectionDrawTool(shapeType) {
+  selectedLayerKey = null;
+  const drawToolbar = drawControl?._toolbars?.draw;
+  const mode = drawToolbar?._modes?.[shapeType];
+  if (mode?.handler && typeof mode.handler.enable === "function") {
+    mode.handler.enable();
+    return true;
+  }
+  const fallbackBtn = document.querySelector(`.leaflet-draw-draw-${shapeType}`);
+  if (fallbackBtn) {
+    fallbackBtn.click();
+    return true;
+  }
+  return false;
+}
+
+function clearDrawnSelectionGeometry() {
+  selectedLayerKey = null;
+  drawnLayer.clearLayers();
+  updateSelectionCount();
+  updateUndoButtonState();
+}
+
 // ===== SELECTION COUNT FUNCTION (GLOBAL & CORRECT) =====
 function updateSelectionCount() {
-const polygon = drawnLayer.getLayers()[0];
-let count = 0;
-const nextSelectedRowIds = new Set();
+  const polygon = drawnLayer.getLayers()[0] || null;
+  const polygonBounds = polygon?.getBounds?.() || null;
 
-if (attributeTableMode === "streets") {
-  if (!polygon) {
+  if (attributeTableMode === "streets") {
+    const streetSelectable = isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY);
+    if (!streetSelectable) {
+      const hadSelection = streetAttributeSelectedIds.size > 0;
+      if (hadSelection) {
+        streetAttributeSelectedIds.clear();
+        applyStreetSelectionStyles();
+        renderAttributeTable();
+      }
+      syncSelectedStopsHeaderCount(0);
+      refreshAttributeStatus();
+      return;
+    }
+
+    let nextSelectedStreetIds = new Set(streetAttributeSelectedIds);
+    if (polygon) {
+      const candidateStreetIds = new Set();
+      streetAttributeById.forEach((entry, id) => {
+        if (!entry?.layer) return;
+        if (!map.hasLayer(entry.layer)) return;
+        if (!streetEntryIntersectsSelectionPolygon(entry, polygon)) return;
+        candidateStreetIds.add(id);
+      });
+      nextSelectedStreetIds = combineSelectionIds(nextSelectedStreetIds, candidateStreetIds, mapSelectionDrawMode);
+    }
+    nextSelectedStreetIds = new Set(
+      [...nextSelectedStreetIds].filter(id => streetAttributeById.has(id))
+    );
+
+    const prevStreet = streetAttributeSelectedIds;
+    const changed = !areNumericIdSetsEqual(prevStreet, nextSelectedStreetIds);
+
+    if (changed) {
+      replaceStreetSelection(nextSelectedStreetIds);
+      applyStreetSelectionStyles();
+      if (attributeTableMode === "streets") renderAttributeTable();
+    }
+
     syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
     refreshAttributeStatus();
     return;
   }
 
-  const nextSelectedStreetIds = new Set();
-  streetAttributeById.forEach((entry, id) => {
-    if (!entry?.layer) return;
-    if (!map.hasLayer(entry.layer)) return;
-    if (streetEntryIntersectsSelectionPolygon(entry, polygon)) {
-      nextSelectedStreetIds.add(id);
-    }
+  if (selectedLayerKey && !isLayerManagerEntrySelectable(selectedLayerKey)) {
+    selectedLayerKey = null;
+  }
+  const isLayerSelectMode = !!selectedLayerKey;
+  const selectableRowIds = new Set();
+  let nextSelectedRowIds = new Set(attributeState.selectedRowIds);
+
+  nextSelectedRowIds = new Set(
+    [...nextSelectedRowIds].filter(id => Number.isFinite(id))
+  );
+
+  const layerCandidateIds = new Set();
+  const polygonCandidateIds = new Set();
+
+  Object.entries(routeDayGroups).forEach(([key, group]) => {
+    const layerSelectable = isLayerManagerEntrySelectable(key);
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(marker => {
+      const rowId = Number(marker?._rowId);
+      if (!layerSelectable || !Number.isFinite(rowId)) return;
+      selectableRowIds.add(rowId);
+      if (isLayerSelectMode && key === selectedLayerKey && map.hasLayer(marker)) {
+        layerCandidateIds.add(rowId);
+        return;
+      }
+      if (!isLayerSelectMode && polygonBounds) {
+        const base = marker?._base;
+        if (!base || !map.hasLayer(marker)) return;
+        const latlng = L.latLng(base.lat, base.lon);
+        if (polygonBounds.contains(latlng)) polygonCandidateIds.add(rowId);
+      }
+    });
   });
 
-  const prevStreet = streetAttributeSelectedIds;
-  const changed =
-    prevStreet.size !== nextSelectedStreetIds.size ||
-    [...prevStreet].some(id => !nextSelectedStreetIds.has(id));
+  nextSelectedRowIds = new Set(
+    [...nextSelectedRowIds].filter(id => selectableRowIds.has(id))
+  );
 
-  if (changed) {
-    replaceStreetSelection(nextSelectedStreetIds);
-    applyStreetSelectionStyles();
-    if (attributeTableMode === "streets") renderAttributeTable();
+  if (isLayerSelectMode) {
+    nextSelectedRowIds = layerCandidateIds;
+  } else if (polygonBounds) {
+    nextSelectedRowIds = combineSelectionIds(nextSelectedRowIds, polygonCandidateIds, mapSelectionDrawMode);
   }
 
-  syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+  Object.entries(routeDayGroups).forEach(([key, group]) => {
+    const layerSelectable = isLayerManagerEntrySelectable(key);
+    const sym = symbolMap[key] || getSymbol(key);
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(marker => {
+      const rowId = Number(marker?._rowId);
+      const selected = layerSelectable && Number.isFinite(rowId) && nextSelectedRowIds.has(rowId);
+      const color = selected ? "#ffff00" : sym.color;
+      marker.setStyle?.({ color, fillColor: color });
+    });
+  });
+
+  const prev = attributeState.selectedRowIds;
+  const changed = !areNumericIdSetsEqual(prev, nextSelectedRowIds);
+  attributeState.selectedRowIds = nextSelectedRowIds;
+  syncSelectedStopsHeaderCount(nextSelectedRowIds.size);
   refreshAttributeStatus();
-  return;
-}
-
-Object.entries(routeDayGroups).forEach(([key, group]) => {
- group.layers.forEach(marker => {
-   const base = marker._base;
-   if (!base) return;
-
-   const latlng = L.latLng(base.lat, base.lon);
-
-   const isLayerSelectMode = !!selectedLayerKey;
-   const selectedByLayer = isLayerSelectMode && key === selectedLayerKey;
-   const selectedByPolygon =
-     !isLayerSelectMode && polygon && polygon.getBounds().contains(latlng);
-
-   if ((selectedByLayer || selectedByPolygon) && map.hasLayer(marker)) {
-     // highlight selected marker
-     marker.setStyle?.({ color: "#ffff00", fillColor: "#ffff00" });
-
-     if (Number.isFinite(marker._rowId)) {
-       nextSelectedRowIds.add(marker._rowId);
-     }
-     count++; // ✅ only counting here
-   } else {
-     // restore original color
-     const sym = symbolMap[key];
-     marker.setStyle?.({ color: sym.color, fillColor: sym.color });
-   }
- });
-});
-
-const prev = attributeState.selectedRowIds;
-const changed =
-  prev.size !== nextSelectedRowIds.size ||
-  [...prev].some(id => !nextSelectedRowIds.has(id));
-
-attributeState.selectedRowIds = nextSelectedRowIds;
-syncSelectedStopsHeaderCount(count);
-refreshAttributeStatus();
-if (changed) renderAttributeTable();
+  if (changed) renderAttributeTable();
 }
 
 
@@ -4632,8 +5259,10 @@ const MARKER_SIZE_STEPS = [
 const symbolMap = {};        // stores symbol for each route/day combo
 const routeDayGroups = {};   // stores map markers grouped by route/day
 const LAYER_MANAGER_ORDER_STORAGE_KEY = "layerManagerOrderTop";
+const LAYER_MANAGER_SELECTABLE_STORAGE_KEY = "layerManagerSelectable";
 const LAYER_MANAGER_STREET_KEY = "street-network";
 let layerManagerOrderTop = [];
+let layerManagerSelectableState = {};
 // ===== DELIVERED STOPS LAYER =====
 
 function layerManagerDaySortRank(value) {
@@ -4711,6 +5340,28 @@ function saveLayerManagerOrder(order) {
   storageSet(LAYER_MANAGER_ORDER_STORAGE_KEY, JSON.stringify(order || []));
 }
 
+function loadStoredLayerManagerSelectableState() {
+  const raw = storageGet(LAYER_MANAGER_SELECTABLE_STORAGE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const next = {};
+    Object.keys(parsed).forEach(key => {
+      const k = String(key || "").trim();
+      if (!k) return;
+      next[k] = !!parsed[key];
+    });
+    return next;
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveLayerManagerSelectableState() {
+  storageSet(LAYER_MANAGER_SELECTABLE_STORAGE_KEY, JSON.stringify(layerManagerSelectableState || {}));
+}
+
 function ensureLayerManagerOrder() {
   if (!layerManagerOrderTop.length) {
     layerManagerOrderTop = loadStoredLayerManagerOrder();
@@ -4725,6 +5376,57 @@ function ensureLayerManagerOrder() {
     saveLayerManagerOrder(layerManagerOrderTop);
   }
   return layerManagerOrderTop;
+}
+
+function ensureLayerManagerSelectableState() {
+  const keys = ensureLayerManagerOrder();
+  if (!layerManagerSelectableState || typeof layerManagerSelectableState !== "object" || Array.isArray(layerManagerSelectableState)) {
+    layerManagerSelectableState = {};
+  }
+  if (!Object.keys(layerManagerSelectableState).length) {
+    layerManagerSelectableState = loadStoredLayerManagerSelectableState();
+  }
+
+  let changed = false;
+  keys.forEach(key => {
+    if (!Object.prototype.hasOwnProperty.call(layerManagerSelectableState, key)) {
+      layerManagerSelectableState[key] = true;
+      changed = true;
+    }
+  });
+  Object.keys(layerManagerSelectableState).forEach(key => {
+    if (keys.includes(key)) return;
+    delete layerManagerSelectableState[key];
+    changed = true;
+  });
+  if (changed) saveLayerManagerSelectableState();
+  return layerManagerSelectableState;
+}
+
+function isLayerManagerEntrySelectable(entryId) {
+  const state = ensureLayerManagerSelectableState();
+  if (!Object.prototype.hasOwnProperty.call(state, entryId)) return true;
+  return !!state[entryId];
+}
+
+function setLayerManagerEntrySelectable(entryId, selectable) {
+  const state = ensureLayerManagerSelectableState();
+  const nextValue = !!selectable;
+  if (state[entryId] === nextValue) return false;
+  state[entryId] = nextValue;
+  saveLayerManagerSelectableState();
+
+  if (!nextValue) {
+    if (entryId === LAYER_MANAGER_STREET_KEY) {
+      streetAttributeSelectedIds.clear();
+      applyStreetSelectionStyles();
+      if (attributeTableMode === "streets") renderAttributeTable();
+    } else if (selectedLayerKey === entryId) {
+      selectedLayerKey = null;
+    }
+  }
+  refreshRouteDayLayerSelectButtons();
+  return true;
 }
 
 function moveLayerManagerEntryBefore(entryId, targetId) {
@@ -5176,7 +5878,20 @@ function updateStats() {
   });
 }
 
+function refreshRouteDayLayerSelectButtons() {
+  document.querySelectorAll("#routeDayLayers button[data-select-layer-key]").forEach(btn => {
+    const key = String(btn.dataset.selectLayerKey || "").trim();
+    if (!key) return;
+    const selectable = isLayerManagerEntrySelectable(key);
+    btn.disabled = !selectable;
+    btn.title = selectable
+      ? "Select this layer"
+      : "Enable Selectable in Layer Manager to use layer selection.";
+  });
+}
+
 function selectEntireLayer(key) {
+  if (!isLayerManagerEntrySelectable(key)) return;
   const group = routeDayGroups[key];
   if (!group || !group.layers || !group.layers.length) return;
 
@@ -5306,6 +6021,12 @@ function buildRouteDayLayerControls() {
     selectBtn.type = "button";
     selectBtn.className = "mini-btn";
     selectBtn.textContent = "Select";
+    selectBtn.dataset.selectLayerKey = key;
+    const selectable = isLayerManagerEntrySelectable(key);
+    selectBtn.disabled = !selectable;
+    selectBtn.title = selectable
+      ? "Select this layer"
+      : "Enable Selectable in Layer Manager to use layer selection.";
     selectBtn.addEventListener("click", e => {
       e.preventDefault();
       e.stopPropagation();
@@ -5320,7 +6041,9 @@ function buildRouteDayLayerControls() {
   });
 
   ensureLayerManagerOrder();
+  ensureLayerManagerSelectableState();
   applyLayerManagerOrder();
+  refreshRouteDayLayerSelectButtons();
   refreshLayerManagerUiIfOpen();
 }
 
@@ -5761,6 +6484,53 @@ window.zoomToAttributeRowsOnMap = function(rowIds) {
   });
   if (!bounds.isValid()) return false;
   map.fitBounds(bounds.pad(0.18));
+  return true;
+};
+
+window.getStreetSelectedSegmentIds = function() {
+  return [...streetAttributeSelectedIds];
+};
+
+window.setStreetSelectedSegmentIds = function(rowIds) {
+  const ids = Array.isArray(rowIds) ? rowIds : [];
+  const next = new Set(
+    ids
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v) && streetAttributeById.has(v))
+  );
+  const prev = streetAttributeSelectedIds;
+  const changed =
+    prev.size !== next.size ||
+    [...prev].some(id => !next.has(id));
+
+  if (!changed) return false;
+  streetAttributeSelectedIds.clear();
+  next.forEach(id => streetAttributeSelectedIds.add(id));
+  applyStreetSelectionStyles();
+  refreshAttributeStatus();
+  syncSelectedStopsHeaderCount(next.size);
+  renderAttributeTable();
+  return true;
+};
+
+window.focusStreetSegmentOnMap = function(rowId) {
+  const entry = streetAttributeById.get(Number(rowId));
+  if (!entry?.layer || typeof entry.layer.getBounds !== "function") return false;
+  map.fitBounds(entry.layer.getBounds().pad(0.35));
+  return true;
+};
+
+window.zoomToStreetSegmentsOnMap = function(rowIds) {
+  const ids = Array.isArray(rowIds) ? rowIds : [];
+  if (!ids.length) return false;
+  const bounds = L.latLngBounds();
+  ids.forEach(id => {
+    const entry = streetAttributeById.get(Number(id));
+    const b = entry?.layer?.getBounds?.();
+    if (b?.isValid?.()) bounds.extend(b);
+  });
+  if (!bounds.isValid()) return false;
+  map.fitBounds(bounds.pad(0.15));
   return true;
 };
 
@@ -8657,6 +9427,7 @@ function initLayerManagerControls() {
   openBtn.dataset.layerManagerBound = "1";
 
   ensureLayerManagerOrder();
+  ensureLayerManagerSelectableState();
   let draggingEntryId = "";
 
   const setStatus = message => {
@@ -8744,6 +9515,7 @@ function initLayerManagerControls() {
 
   function renderLayerManagerList() {
     const orderTop = ensureLayerManagerOrder();
+    ensureLayerManagerSelectableState();
     listNode.innerHTML = "";
 
     if (!orderTop.length) {
@@ -8795,6 +9567,23 @@ function initLayerManagerControls() {
           applyEntryVisibility(entryId, visInput.checked);
           refreshLayerManagerUiIfOpen();
           setStatus(`Updated visibility: ${label.textContent}`);
+        });
+
+        const selectLabel = document.createElement("label");
+        selectLabel.className = "layer-manager-select-check";
+        const selectInput = document.createElement("input");
+        selectInput.type = "checkbox";
+        selectInput.checked = isLayerManagerEntrySelectable(entryId);
+        const selectText = document.createElement("span");
+        selectText.textContent = "Selectable";
+        selectLabel.append(selectInput, selectText);
+
+        selectInput.addEventListener("change", () => {
+          const changed = setLayerManagerEntrySelectable(entryId, selectInput.checked);
+          updateSelectionCount();
+          if (!changed) return;
+          const stateText = selectInput.checked ? "enabled" : "disabled";
+          setStatus(`Selection ${stateText}: ${label.textContent}`);
         });
 
         const orderActions = document.createElement("div");
@@ -8862,7 +9651,7 @@ function initLayerManagerControls() {
           updateOrderAndRender("Layer draw order updated.");
         });
 
-        row.append(dragHandle, swatch, labelWrap, visLabel, orderActions);
+        row.append(dragHandle, swatch, labelWrap, visLabel, selectLabel, orderActions);
         sectionBody.appendChild(row);
       });
     };
@@ -8907,8 +9696,9 @@ function initLayerManagerControls() {
 
   const openModal = () => {
     ensureLayerManagerOrder();
+    ensureLayerManagerSelectableState();
     renderLayerManagerList();
-    setStatus("Drag and drop rows to order layers. Route + Day layers stay grouped.");
+    setStatus("Drag rows to order layers. Use Show and Selectable toggles per layer.");
     modal.style.display = "flex";
     openBtn.classList.add("active");
   };
@@ -9312,9 +10102,6 @@ function closeAttributePanel() {
     if (active && typeof active.blur === "function") active.blur();
   }
   panel.classList.add("closed");
-  if (attributeTableMode === "streets") {
-    map.removeLayer(streetAttributeLayerGroup);
-  }
   syncAttributePanelLayout();
   refreshMapAfterOverlayChange();
 }
@@ -9337,9 +10124,277 @@ function zoomToSelectedAttributeRows() {
   map.fitBounds(bounds.pad(0.18));
 }
 
+function openStreetAttributeTablePopout() {
+  const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+  const rows = (Array.isArray(streetAttributesRows) && streetAttributesRows.length
+    ? streetAttributesRows
+    : [...streetAttributeById.values()].map(entry => entry?.row).filter(Boolean))
+    .map(row => ({ rowId: Number(row?.id), values: row || {} }))
+    .filter(item => Number.isFinite(item.rowId));
+
+  if (!rows.length) {
+    alert("No street attributes to open.");
+    return;
+  }
+
+  const win = window.open("", "_blank", "width=1180,height=700,resizable=yes,scrollbars=yes");
+  if (!win) {
+    alert("Unable to open street attribute table window.");
+    return;
+  }
+
+  const seed = JSON.stringify({
+    headers,
+    rows,
+    selectedIds: [...streetAttributeSelectedIds]
+  }).replace(/</g, "\\u003c");
+
+  win.document.write(`
+    <html>
+      <head>
+        <title>Street Attributes</title>
+        <style>
+          body { margin:0; font-family: Roboto, Arial, sans-serif; background:#0f1822; color:#e8f2fd; }
+          .bar { position:sticky; top:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px; background:#1a2938; border-bottom:1px solid #31495f; z-index:4; }
+          .bar button { border:1px solid #5a7ca1; background:#2a4258; color:#edf6ff; border-radius:8px; padding:6px 10px; cursor:pointer; }
+          .bar input[type=text] { min-width:220px; height:32px; border-radius:8px; border:1px solid #5a7ca1; background:#111a24; color:#eaf3fc; padding:0 10px; }
+          .bar label { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid #48647e; border-radius:8px; padding:5px 8px; background:#132130; }
+          .status { margin-left:auto; font-size:12px; color:#c8dcf1; }
+          .wrap { padding:10px; height:calc(100vh - 128px); overflow:auto; }
+          table { border-collapse:collapse; min-width:100%; width:max-content; background:#16212b; }
+          th, td { border:1px solid #31475b; padding:6px 8px; white-space:nowrap; font-size:12px; }
+          th { position:sticky; top:0; background:#26394a; text-align:left; }
+          th button { border:0; background:transparent; color:inherit; font:inherit; font-weight:700; cursor:pointer; padding:0; }
+          tbody tr { cursor:pointer; }
+          tbody tr:nth-child(even) { background:#192633; }
+          tbody tr.selected { background: rgba(84,176,255,0.22); }
+        </style>
+      </head>
+      <body>
+        <div class="bar">
+          <button onclick="window.close()">Close</button>
+          <input id="searchInput" type="text" placeholder="Filter streets by any field..." />
+          <label><input id="selectedOnly" type="checkbox" /> Selected only</label>
+          <button id="selectVisibleBtn">Select Visible</button>
+          <button id="clearSelectedBtn">Clear Selection</button>
+          <button id="zoomSelectedBtn">Zoom to Selected</button>
+          <button id="exportCsvBtn">Export CSV</button>
+          <button id="prevBtn">Prev</button>
+          <button id="nextBtn">Next</button>
+          <span id="pageInfo">Page 1/1</span>
+          <span id="status" class="status">0 selected</span>
+        </div>
+        <div class="wrap">
+          <table id="table"></table>
+        </div>
+        <script>
+          const seed = ${seed};
+          const headers = seed.headers || [];
+          const rows = seed.rows || [];
+          let selectedSet = new Set(seed.selectedIds || []);
+          const state = { sortKey: null, sortDir: 1, filterText: "", selectedOnly: false, page: 1, pageSize: 300 };
+
+          const table = document.getElementById("table");
+          const pageInfo = document.getElementById("pageInfo");
+          const status = document.getElementById("status");
+          const prevBtn = document.getElementById("prevBtn");
+          const nextBtn = document.getElementById("nextBtn");
+          const searchInput = document.getElementById("searchInput");
+          const selectedOnly = document.getElementById("selectedOnly");
+          const selectVisibleBtn = document.getElementById("selectVisibleBtn");
+          const clearSelectedBtn = document.getElementById("clearSelectedBtn");
+          const zoomSelectedBtn = document.getElementById("zoomSelectedBtn");
+          const exportCsvBtn = document.getElementById("exportCsvBtn");
+
+          function setsEqual(a, b) {
+            if (a.size !== b.size) return false;
+            for (const value of a) {
+              if (!b.has(value)) return false;
+            }
+            return true;
+          }
+
+          function pullSelectionFromOpener() {
+            if (!window.opener || typeof window.opener.getStreetSelectedSegmentIds !== "function") return false;
+            const ids = window.opener.getStreetSelectedSegmentIds() || [];
+            const next = new Set(ids.map(v => Number(v)).filter(v => Number.isFinite(v)));
+            if (setsEqual(selectedSet, next)) return false;
+            selectedSet = next;
+            return true;
+          }
+
+          function pushSelectionToOpener() {
+            if (!window.opener || typeof window.opener.setStreetSelectedSegmentIds !== "function") return;
+            window.opener.setStreetSelectedSegmentIds([...selectedSet]);
+          }
+
+          function esc(v) {
+            return String(v ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          }
+
+          function getFilteredRows() {
+            const needle = (state.filterText || "").trim().toLowerCase();
+            let data = rows.slice();
+            if (needle) {
+              data = data.filter(item => headers.some(h => String(item.values?.[h] ?? "").toLowerCase().includes(needle)));
+            }
+            if (state.selectedOnly) {
+              data = data.filter(item => selectedSet.has(item.rowId));
+            }
+            if (state.sortKey) {
+              const key = state.sortKey;
+              const dir = state.sortDir;
+              data.sort((a, b) => {
+                const av = a.values?.[key];
+                const bv = b.values?.[key];
+                const an = Number(av);
+                const bn = Number(bv);
+                if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
+                return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+              });
+            }
+            return data;
+          }
+
+          function exportCsv(items) {
+            if (!items.length) return;
+            const csvEsc = (v) => {
+              const raw = String(v ?? "");
+              return /[",\\n]/.test(raw) ? ('"' + raw.replace(/"/g, '""') + '"') : raw;
+            };
+            const lines = [headers.map(csvEsc).join(",")];
+            items.forEach(item => lines.push(headers.map(h => csvEsc(item.values?.[h] ?? "")).join(",")));
+            const blob = new Blob([lines.join("\\n")], { type: "text/csv;charset=utf-8;" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "street-attributes.csv";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+          }
+
+          function render() {
+            const filtered = getFilteredRows();
+            const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
+            state.page = Math.max(1, Math.min(state.page, totalPages));
+            const start = (state.page - 1) * state.pageSize;
+            const pageRows = filtered.slice(start, start + state.pageSize);
+
+            const sortMarker = (key) => state.sortKey === key ? (state.sortDir > 0 ? " ^" : " v") : "";
+            let html = "<thead><tr><th>Sel</th><th>#</th>";
+            headers.forEach(h => {
+              html += '<th><button type="button" data-sort="' + esc(h) + '">' + esc(h) + sortMarker(h) + "</button></th>";
+            });
+            html += "</tr></thead><tbody>";
+            pageRows.forEach((item, i) => {
+              const checked = selectedSet.has(item.rowId) ? " checked" : "";
+              html += '<tr data-row-id="' + item.rowId + '" class="' + (checked ? "selected" : "") + '">';
+              html += '<td><input type="checkbox" data-row-select="' + item.rowId + '"' + checked + "></td>";
+              html += "<td>" + (start + i + 1) + "</td>";
+              headers.forEach(h => {
+                html += "<td>" + esc(item.values?.[h] ?? "") + "</td>";
+              });
+              html += "</tr>";
+            });
+            html += "</tbody>";
+            table.innerHTML = html;
+
+            pageInfo.textContent = "Page " + state.page + "/" + totalPages;
+            status.textContent = selectedSet.size + " selected • " + filtered.length + " visible";
+            prevBtn.disabled = state.page <= 1;
+            nextBtn.disabled = state.page >= totalPages;
+
+            table.querySelectorAll("button[data-sort]").forEach(btn => {
+              btn.addEventListener("click", () => {
+                const key = btn.getAttribute("data-sort");
+                if (!key) return;
+                if (state.sortKey === key) state.sortDir *= -1;
+                else { state.sortKey = key; state.sortDir = 1; }
+                state.page = 1;
+                render();
+              });
+            });
+
+            table.querySelectorAll("input[data-row-select]").forEach(input => {
+              input.addEventListener("change", () => {
+                const rowId = Number(input.getAttribute("data-row-select"));
+                if (!Number.isFinite(rowId)) return;
+                if (input.checked) selectedSet.add(rowId);
+                else selectedSet.delete(rowId);
+                pushSelectionToOpener();
+                render();
+              });
+            });
+
+            table.querySelectorAll("tbody tr[data-row-id]").forEach(tr => {
+              tr.addEventListener("click", (e) => {
+                if (e.target.closest("input")) return;
+                const rowId = Number(tr.getAttribute("data-row-id"));
+                if (window.opener && Number.isFinite(rowId) && typeof window.opener.focusStreetSegmentOnMap === "function") {
+                  window.opener.focusStreetSegmentOnMap(rowId);
+                }
+              });
+            });
+          }
+
+          searchInput.addEventListener("input", () => { state.filterText = searchInput.value || ""; state.page = 1; render(); });
+          selectedOnly.addEventListener("change", () => {
+            pullSelectionFromOpener();
+            state.selectedOnly = !!selectedOnly.checked;
+            state.page = 1;
+            render();
+          });
+          prevBtn.addEventListener("click", () => { state.page = Math.max(1, state.page - 1); render(); });
+          nextBtn.addEventListener("click", () => { state.page += 1; render(); });
+          selectVisibleBtn.addEventListener("click", () => {
+            getFilteredRows().forEach(item => selectedSet.add(item.rowId));
+            pushSelectionToOpener();
+            render();
+          });
+          clearSelectedBtn.addEventListener("click", () => {
+            selectedSet.clear();
+            pushSelectionToOpener();
+            render();
+          });
+          zoomSelectedBtn.addEventListener("click", () => {
+            pullSelectionFromOpener();
+            const selectedIds = [...selectedSet];
+            if (!selectedIds.length) return;
+            if (window.opener && typeof window.opener.zoomToStreetSegmentsOnMap === "function") {
+              const ok = window.opener.zoomToStreetSegmentsOnMap(selectedIds);
+              if (ok) return;
+            }
+            if (window.opener && typeof window.opener.focusStreetSegmentOnMap === "function") {
+              window.opener.focusStreetSegmentOnMap(selectedIds[0]);
+            }
+          });
+          exportCsvBtn.addEventListener("click", () => exportCsv(getFilteredRows()));
+
+          window.addEventListener("focus", () => {
+            if (pullSelectionFromOpener()) render();
+          });
+          setInterval(() => {
+            const changed = pullSelectionFromOpener();
+            if (changed) render();
+          }, 500);
+
+          pullSelectionFromOpener();
+          render();
+        <\/script>
+      </body>
+    </html>
+  `);
+  win.document.close();
+}
+
 function openAttributeTablePopout() {
   if (attributeTableMode === "streets") {
-    alert("Pop out is currently available for record attributes only.");
+    openStreetAttributeTablePopout();
     return;
   }
   const headers = window._attributeHeaders || [];
@@ -10187,6 +11242,15 @@ const selectedStopsLabel = document.getElementById("selectedStopsLabel");
 const selectionCountNode = document.getElementById("selectionCount");
 const desktopSelectionHeader = document.getElementById("desktopSelectionHeader");
 const pageHeader = document.querySelector("header");
+const selectionDrawModeSelect = document.getElementById("selectionDrawModeSelect");
+const selectionModeBadge = document.getElementById("selectionModeBadge");
+const selectionToolsStatus = document.getElementById("selectionToolsStatus");
+const selectionDrawPolygonBtn = document.getElementById("selectionDrawPolygonBtn");
+const selectionDrawRectangleBtn = document.getElementById("selectionDrawRectangleBtn");
+const selectionSelectInViewBtn = document.getElementById("selectionSelectInViewBtn");
+const selectionSelectVisibleBtn = document.getElementById("selectionSelectVisibleBtn");
+const selectionInvertVisibleBtn = document.getElementById("selectionInvertVisibleBtn");
+const selectionClearShapeBtn = document.getElementById("selectionClearShapeBtn");
 
 // Start with the right sidebar closed on initial page load.
 if (selectionBox) selectionBox.classList.add("collapsed");
@@ -10248,6 +11312,76 @@ placeDesktopSelectionControls();
 window.addEventListener("resize", syncSelectionBoxTop);
 window.addEventListener("resize", placeDesktopSelectionControls);
 
+const setSelectionToolsStatus = message => {
+  if (!selectionToolsStatus) return;
+  selectionToolsStatus.textContent = String(message || "");
+};
+
+const refreshSelectionToolsUi = () => {
+  const mode = normalizeMapSelectionDrawMode(mapSelectionDrawMode);
+  const modeLabel = getMapSelectionModeLabel(mode);
+  const targetLabel = attributeTableMode === "streets" ? "Street Segments" : "Record Stops";
+  if (selectionDrawModeSelect) selectionDrawModeSelect.value = mode;
+  if (selectionModeBadge) selectionModeBadge.textContent = modeLabel;
+  setSelectionToolsStatus(`Target: ${targetLabel}. Mode: ${modeLabel}.`);
+};
+
+window.__refreshSelectionToolsUi = refreshSelectionToolsUi;
+refreshSelectionToolsUi();
+
+selectionDrawModeSelect?.addEventListener("change", () => {
+  setMapSelectionDrawMode(selectionDrawModeSelect.value, true);
+  refreshSelectionToolsUi();
+});
+
+selectionDrawPolygonBtn?.addEventListener("click", () => {
+  const started = startSelectionDrawTool("polygon");
+  if (!started) {
+    setSelectionToolsStatus("Unable to start polygon tool.");
+    return;
+  }
+  const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
+  setSelectionToolsStatus(`Polygon draw started (${modeLabel}).`);
+});
+
+selectionDrawRectangleBtn?.addEventListener("click", () => {
+  const started = startSelectionDrawTool("rectangle");
+  if (!started) {
+    setSelectionToolsStatus("Unable to start rectangle tool.");
+    return;
+  }
+  const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
+  setSelectionToolsStatus(`Rectangle draw started (${modeLabel}).`);
+});
+
+selectionSelectInViewBtn?.addEventListener("click", () => {
+  const ids = attributeTableMode === "streets"
+    ? getStreetIdsInCurrentView()
+    : getRecordRowIdsInCurrentView();
+  const total = applySelectionIdsToActiveMode(ids, mapSelectionDrawMode);
+  const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
+  setSelectionToolsStatus(`Select In View applied (${modeLabel}). ${total.toLocaleString()} selected.`);
+});
+
+selectionSelectVisibleBtn?.addEventListener("click", () => {
+  const ids = attributeTableMode === "streets"
+    ? getVisibleSelectableStreetIds()
+    : getVisibleSelectableRecordRowIds();
+  const total = applySelectionIdsToActiveMode(ids, mapSelectionDrawMode);
+  const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
+  setSelectionToolsStatus(`Select All Visible applied (${modeLabel}). ${total.toLocaleString()} selected.`);
+});
+
+selectionInvertVisibleBtn?.addEventListener("click", () => {
+  const total = invertVisibleSelectionInActiveMode();
+  setSelectionToolsStatus(`Invert Visible applied. ${total.toLocaleString()} selected.`);
+});
+
+selectionClearShapeBtn?.addEventListener("click", () => {
+  clearDrawnSelectionGeometry();
+  setSelectionToolsStatus("Drawn selection shape cleared.");
+});
+
 // Clear selection button (ALWAYS ACTIVE)
 if (clearBtn) {
   clearBtn.onclick = () => {
@@ -10273,6 +11407,7 @@ if (clearBtn) {
     updateSelectionCount();
     renderAttributeTable();
     updateUndoButtonState();
+    setSelectionToolsStatus("Selection cleared.");
   };
 }
 
@@ -10481,7 +11616,7 @@ const openStreetAttributesPanel = async () => {
       if (scopedPolygon) {
         await loadStreetAttributesForCurrentView(scopedPolygon.getBounds(), scopedPolygon);
       } else {
-        updateStreetLoadStatus("No street segments loaded yet. Turn on 'Use Local Streets File' and draw a polygon.", true);
+        updateStreetLoadStatus("No street segments loaded yet. Turn on 'Use Local Streets File', then choose a saved polygon or draw a new one.", true);
       }
     }
   } else {

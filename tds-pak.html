@@ -260,6 +260,31 @@
   <button id="clearSelectionBtn" class="primary-btn">
     Clear Selection
   </button>
+
+  <section class="selection-tools-card" aria-label="Selection tools">
+    <div class="selection-tools-head">
+      <strong>Selection Tools</strong>
+      <span id="selectionModeBadge" class="selection-mode-badge">Replace</span>
+    </div>
+    <div class="selection-tools-mode-row">
+      <label for="selectionDrawModeSelect">Mode</label>
+      <select id="selectionDrawModeSelect" aria-label="Selection mode">
+        <option value="replace">Replace</option>
+        <option value="add">Add</option>
+        <option value="subtract">Subtract</option>
+        <option value="intersect">Intersect</option>
+      </select>
+    </div>
+    <div class="selection-tools-grid">
+      <button id="selectionDrawPolygonBtn" class="primary-btn" type="button">Draw Polygon</button>
+      <button id="selectionDrawRectangleBtn" class="primary-btn" type="button">Draw Rectangle</button>
+      <button id="selectionSelectInViewBtn" class="primary-btn" type="button">Select In View</button>
+      <button id="selectionSelectVisibleBtn" class="primary-btn" type="button">Select All Visible</button>
+      <button id="selectionInvertVisibleBtn" class="primary-btn" type="button">Invert Visible</button>
+      <button id="selectionClearShapeBtn" class="primary-btn" type="button">Clear Draw Shape</button>
+    </div>
+    <div id="selectionToolsStatus" class="selection-tools-status">Mode: Replace. Draw or run an action.</div>
+  </section>
   
   <div id="desktopLocateContainer"></div>
   
@@ -418,58 +443,121 @@
       <h3>Street Network Manager</h3>
       <p>Manage local street source, backend connection, and loading controls in one place.</p>
     </div>
-    <div class="street-network-manager-grid">
-      <section class="street-network-manager-card street-network-manager-mode-card">
+    <div class="street-network-manager-tabs" role="tablist" aria-label="Street network manager sections">
+      <button id="streetNetworkSetupTabBtn" class="street-network-manager-tab active" type="button" role="tab" aria-selected="true" aria-controls="streetNetworkSetupPanel">Setup</button>
+      <button id="streetNetworkSymbologyTabBtn" class="street-network-manager-tab" type="button" role="tab" aria-selected="false" aria-controls="streetNetworkSymbologyPanel">Symbology</button>
+    </div>
+
+    <div id="streetNetworkSetupPanel" class="street-network-manager-tab-panel active" role="tabpanel" aria-labelledby="streetNetworkSetupTabBtn">
+      <div class="street-network-manager-grid">
+        <section class="street-network-manager-card street-network-manager-mode-card">
+          <div class="street-network-manager-card-top">
+            <h4>Mode</h4>
+            <span id="streetNetworkManagerBadge" class="street-network-manager-badge">No Source</span>
+          </div>
+          <label class="map-network-toggle local-street-toggle street-network-manager-toggle">
+            <input type="checkbox" id="useLocalStreetSource" />
+            <span class="street-network-manager-toggle-copy">
+              <span class="street-network-manager-toggle-title">Street Segments (Local Source)</span>
+              <span class="street-network-manager-toggle-subtitle">Enable this, then draw a polygon to load streets for that map area.</span>
+            </span>
+          </label>
+          <div id="streetNetworkManagerHint" class="street-network-manager-hint">Choose a data source, then enable Street Segments to start loading streets.</div>
+          <div id="streetSetupGuide" class="street-network-manager-progress">
+            <div id="streetSetupStep1" class="street-network-manager-progress-step">1) Source ready</div>
+            <div id="streetSetupStep2" class="street-network-manager-progress-step">2) Backend ready</div>
+            <div id="streetSetupStep3" class="street-network-manager-progress-step">3) Streets visible</div>
+          </div>
+        </section>
+        <section class="street-network-manager-card">
+          <h4>Data Source</h4>
+          <p class="street-network-manager-card-desc">Use the setup program workflow, then connect to backend.</p>
+          <div class="street-network-manager-actions">
+            <button id="openStreetPolygonLibraryBtn" class="mini-btn street-network-action-btn" type="button">
+              <span class="street-network-action-title">Saved Polygons</span>
+              <span class="street-network-action-subtitle">Load street segments from a saved polygon.</span>
+            </button>
+            <button id="saveStreetPolygonBtn" class="mini-btn street-network-action-btn" type="button">
+              <span class="street-network-action-title">Save Current Polygon</span>
+              <span class="street-network-action-subtitle">Save the last used street polygon for reuse.</span>
+            </button>
+            <button id="downloadAutoSetupPackageBtn" class="mini-btn street-network-action-btn" type="button">
+              <span class="street-network-action-title">Download Setup Program</span>
+              <span class="street-network-action-subtitle">Get the full converter + index + backend package.</span>
+            </button>
+            <button id="openStreetSetupWizardBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
+              <span class="street-network-action-title">Street Setup Wizard</span>
+              <span class="street-network-action-subtitle">Step-by-step guided setup workflow.</span>
+            </button>
+          </div>
+        </section>
+        <section class="street-network-manager-card">
+          <h4>Backend</h4>
+          <p class="street-network-manager-card-desc">Check local server health and set its URL.</p>
+          <div class="street-network-manager-actions street-network-manager-actions-two">
+            <button id="checkLocalBackendBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
+              <span class="street-network-action-title">Check Backend</span>
+              <span class="street-network-action-subtitle">Verify local API + index availability.</span>
+            </button>
+            <button id="setLocalBackendUrlBtn" class="mini-btn street-network-action-btn" type="button">
+              <span class="street-network-action-title">Backend URL</span>
+              <span class="street-network-action-subtitle">Set server address (default `127.0.0.1:8787`).</span>
+            </button>
+          </div>
+          <div id="localStreetsStatus" class="local-streets-status street-network-manager-status">Street layer: Off. Click Street Setup Wizard and follow the steps.</div>
+        </section>
+      </div>
+    </div>
+
+    <div id="streetNetworkSymbologyPanel" class="street-network-manager-tab-panel" role="tabpanel" aria-labelledby="streetNetworkSymbologyTabBtn">
+      <section class="street-network-manager-card street-network-symbology-card">
         <div class="street-network-manager-card-top">
-          <h4>Mode</h4>
-          <span id="streetNetworkManagerBadge" class="street-network-manager-badge">No Source</span>
+          <h4>Street Segment Symbology</h4>
         </div>
-        <label class="map-network-toggle local-street-toggle street-network-manager-toggle">
-          <input type="checkbox" id="useLocalStreetSource" />
+        <p class="street-network-manager-card-desc">Color street segments by any available field, like class (`highway`) or surface type.</p>
+        <label class="map-network-toggle street-network-manager-toggle street-symbology-toggle">
+          <input type="checkbox" id="streetSymbologyEnabled" />
           <span class="street-network-manager-toggle-copy">
-            <span class="street-network-manager-toggle-title">Street Segments (Local Source)</span>
-            <span class="street-network-manager-toggle-subtitle">Enable this, then draw a polygon to load streets for that map area.</span>
+            <span class="street-network-manager-toggle-title">Enable Field-Based Symbology</span>
+            <span class="street-network-manager-toggle-subtitle">When enabled, the selected field controls street line colors.</span>
           </span>
         </label>
-        <div id="streetNetworkManagerHint" class="street-network-manager-hint">Choose a data source, then enable Street Segments to start loading streets.</div>
-        <div id="streetSetupGuide" class="street-network-manager-progress">
-          <div id="streetSetupStep1" class="street-network-manager-progress-step">1) Source ready</div>
-          <div id="streetSetupStep2" class="street-network-manager-progress-step">2) Backend ready</div>
-          <div id="streetSetupStep3" class="street-network-manager-progress-step">3) Streets visible</div>
-        </div>
-      </section>
-      <section class="street-network-manager-card">
-        <h4>Data Source</h4>
-        <p class="street-network-manager-card-desc">Load a local streets file or use setup tools.</p>
-        <div class="street-network-manager-actions">
-          <button id="loadLocalStreetFileBtn" class="mini-btn street-network-action-btn" type="button">
-            <span class="street-network-action-title">Load ZIP/GeoJSON File</span>
-            <span class="street-network-action-subtitle">Choose your local street source file.</span>
-          </button>
-          <button id="downloadAutoSetupPackageBtn" class="mini-btn street-network-action-btn" type="button">
-            <span class="street-network-action-title">Download Setup Program</span>
-            <span class="street-network-action-subtitle">Get the full converter + index + backend package.</span>
-          </button>
-          <button id="openStreetSetupWizardBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
-            <span class="street-network-action-title">Street Setup Wizard</span>
-            <span class="street-network-action-subtitle">Step-by-step guided setup workflow.</span>
+
+        <div class="street-symbology-controls">
+          <label class="street-symbology-field">
+            <span>Field</span>
+            <select id="streetSymbologyFieldSelect"></select>
+          </label>
+          <button id="streetSymbologyRefreshBtn" class="mini-btn street-network-action-btn" type="button">
+            <span class="street-network-action-title">Refresh Values</span>
+            <span class="street-network-action-subtitle">Rebuild classes from currently loaded street segments.</span>
           </button>
         </div>
-      </section>
-      <section class="street-network-manager-card">
-        <h4>Backend</h4>
-        <p class="street-network-manager-card-desc">Check local server health and set its URL.</p>
-        <div class="street-network-manager-actions street-network-manager-actions-two">
-          <button id="checkLocalBackendBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
-            <span class="street-network-action-title">Check Backend</span>
-            <span class="street-network-action-subtitle">Verify local API + index availability.</span>
-          </button>
-          <button id="setLocalBackendUrlBtn" class="mini-btn street-network-action-btn" type="button">
-            <span class="street-network-action-title">Backend URL</span>
-            <span class="street-network-action-subtitle">Set server address (default `127.0.0.1:8787`).</span>
-          </button>
+
+        <div class="street-symbology-slider-grid">
+          <label class="street-symbology-slider">
+            <span>Line Width</span>
+            <input id="streetSymbologyWidthInput" type="range" min="1" max="8" step="0.5" />
+            <span id="streetSymbologyWidthValue">3.0</span>
+          </label>
+          <label class="street-symbology-slider">
+            <span>Opacity</span>
+            <input id="streetSymbologyOpacityInput" type="range" min="0.2" max="1" step="0.05" />
+            <span id="streetSymbologyOpacityValue">0.65</span>
+          </label>
         </div>
-        <div id="localStreetsStatus" class="local-streets-status street-network-manager-status">Street layer: Off. Click Street Setup Wizard and follow the steps.</div>
+
+        <div class="street-symbology-class-head">
+          <strong>Classes</strong>
+          <span id="streetSymbologyClassMeta">0 values</span>
+        </div>
+        <div id="streetSymbologyClassList" class="street-symbology-class-list"></div>
+
+        <div id="streetSymbologyStatus" class="local-streets-status street-network-manager-status">Symbology: Default style.</div>
+        <div class="street-symbology-actions">
+          <button id="streetSymbologyApplyBtn" class="primary-btn" type="button">Apply Symbology</button>
+          <button id="streetSymbologyResetBtn" class="primary-btn" type="button">Reset Default</button>
+        </div>
       </section>
     </div>
     <div class="modal-actions">
@@ -646,7 +734,7 @@
       <button id="layerManagerShowAllBtn" class="primary-btn" type="button">Show All</button>
       <button id="layerManagerHideAllBtn" class="primary-btn" type="button">Hide All</button>
     </div>
-    <div id="layerManagerList" class="layer-manager-list" role="listbox" aria-label="Layer order and visibility"></div>
+    <div id="layerManagerList" class="layer-manager-list" role="listbox" aria-label="Layer order, visibility, and selectability"></div>
     <div id="layerManagerStatus" class="layer-manager-status">Ready.</div>
     <div class="modal-actions">
       <button id="layerManagerCloseBtn" type="button">Close</button>
@@ -750,23 +838,23 @@
 <div id="streetSegmentsPromptModal" class="modal">
   <div class="modal-content">
     <h3>Street Segments</h3>
-    <p>Draw a polygon on the map to load street segments inside that area.</p>
+    <p>Choose a saved polygon or draw a new polygon to load street segments for that area.</p>
     <div class="modal-actions">
       <button id="streetSegmentsPromptCancel">Cancel</button>
-      <button id="streetSegmentsPromptDraw">Draw Polygon</button>
+      <button id="chooseStreetPolygonBtn">Use Saved Polygon</button>
+      <button id="streetSegmentsPromptDraw">Draw New Polygon</button>
     </div>
   </div>
 </div>
 <div id="streetSetupWizardModal" class="modal">
   <div class="modal-content street-setup-wizard-modal-content">
     <h3>Street Setup Wizard</h3>
-    <p>Follow these steps in order. You only need to do setup once per new streets file.</p>
+    <p>Recommended flow: download setup program, run launcher, check backend, then turn on Street Segments and choose/draw a polygon.</p>
     <div class="street-setup-wizard-actions">
-      <button id="streetWizardDownloadTexasBtn" class="primary-btn" type="button">1) Download Texas Source ZIP</button>
-      <button id="streetWizardLoadFileBtn" class="primary-btn" type="button">Load ZIP/GeoJSON File</button>
-      <button id="streetWizardAutoSetupBtn" class="primary-btn" type="button">Download Setup Program</button>
+      <button id="streetWizardDownloadTexasBtn" class="primary-btn" type="button">Optional: Download Texas Source ZIP</button>
+      <button id="streetWizardAutoSetupBtn" class="primary-btn" type="button">1) Download Setup Program</button>
       <button id="streetWizardCheckBackendBtn" class="primary-btn" type="button">2) Check Backend</button>
-      <button id="streetWizardStartBtn" class="primary-btn" type="button">3) Turn On + Draw Polygon</button>
+      <button id="streetWizardStartBtn" class="primary-btn" type="button">3) Turn On + Choose/Draw Polygon</button>
     </div>
     <div id="streetWizardStatus" class="local-streets-status">Ready.</div>
     <div class="modal-actions">
