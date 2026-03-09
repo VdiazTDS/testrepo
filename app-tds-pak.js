@@ -2,6 +2,17 @@ window.addEventListener("error", e => {
   console.error("JS ERROR:", e.message, "at line", e.lineno);
 });
 
+// Fallback: always try to wire Print Center after full load.
+window.addEventListener("load", () => {
+  try {
+    if (typeof initPrintCenterControls === "function") {
+      initPrintCenterControls();
+    }
+  } catch (err) {
+    console.warn("Print Center init fallback failed:", err);
+  }
+});
+
 let layerVisibilityState = {};
 let selectedLayerKey = null;
 
@@ -2982,8 +2993,6 @@ function syncStreetNetworkOverlay() {
   if (enabled) {
     if (!map.hasLayer(streetAttributeLayerGroup)) {
       streetAttributeLayerGroup.addTo(map);
-    } else {
-      streetAttributeLayerGroup.bringToFront?.();
     }
   } else {
     map.removeLayer(streetAttributeLayerGroup);
@@ -2998,6 +3007,9 @@ function syncStreetNetworkOverlay() {
     }
     setStreetLoadBarVisible(false);
   }
+
+  applyLayerManagerOrder();
+  refreshLayerManagerUiIfOpen();
 }
 
 function roundStreetPolygonCoord(value) {
@@ -4619,7 +4631,236 @@ const MARKER_SIZE_STEPS = [
 
 const symbolMap = {};        // stores symbol for each route/day combo
 const routeDayGroups = {};   // stores map markers grouped by route/day
+const LAYER_MANAGER_ORDER_STORAGE_KEY = "layerManagerOrderTop";
+const LAYER_MANAGER_STREET_KEY = "street-network";
+let layerManagerOrderTop = [];
 // ===== DELIVERED STOPS LAYER =====
+
+function layerManagerDaySortRank(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  const byName = {
+    "1": 1, mon: 1, monday: 1,
+    "2": 2, tue: 2, tues: 2, tuesday: 2,
+    "3": 3, wed: 3, wednesday: 3,
+    "4": 4, thu: 4, thur: 4, thurs: 4, thursday: 4,
+    "5": 5, fri: 5, friday: 5,
+    "6": 6, sat: 6, saturday: 6,
+    "7": 7, sun: 7, sunday: 7,
+    delivered: 99
+  };
+  if (Object.prototype.hasOwnProperty.call(byName, v)) return byName[v];
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 98;
+}
+
+function getSortedRouteDayKeysForLayerManager() {
+  return Object.keys(routeDayGroups).sort((aKey, bKey) => {
+    const [aRoute = "", aDay = ""] = String(aKey).split("|");
+    const [bRoute = "", bDay = ""] = String(bKey).split("|");
+    const routeCmp = aRoute.localeCompare(bRoute, undefined, { numeric: true, sensitivity: "base" });
+    if (routeCmp !== 0) return routeCmp;
+    return layerManagerDaySortRank(aDay) - layerManagerDaySortRank(bDay);
+  });
+}
+
+function getLayerManagerDefaultOrder() {
+  // Top-to-bottom order: route/day layers on top, street network near bottom by default.
+  return [...getSortedRouteDayKeysForLayerManager(), LAYER_MANAGER_STREET_KEY];
+}
+
+function isRouteDayLayerManagerEntry(entryId) {
+  return entryId !== LAYER_MANAGER_STREET_KEY && Object.prototype.hasOwnProperty.call(routeDayGroups, entryId);
+}
+
+function buildLayerManagerOrderWithRouteGrouping(orderCandidate = []) {
+  const source = Array.isArray(orderCandidate) ? orderCandidate.map(v => String(v || "")).filter(Boolean) : [];
+  const streetOnTop = source.indexOf(LAYER_MANAGER_STREET_KEY) === 0;
+  const routeKeys = getSortedRouteDayKeysForLayerManager();
+
+  const routeOrder = [];
+  source.forEach(key => {
+    if (!isRouteDayLayerManagerEntry(key)) return;
+    if (routeOrder.includes(key)) return;
+    routeOrder.push(key);
+  });
+  routeKeys.forEach(key => {
+    if (!routeOrder.includes(key)) routeOrder.push(key);
+  });
+
+  if (!routeOrder.length) {
+    return [LAYER_MANAGER_STREET_KEY];
+  }
+  return streetOnTop
+    ? [LAYER_MANAGER_STREET_KEY, ...routeOrder]
+    : [...routeOrder, LAYER_MANAGER_STREET_KEY];
+}
+
+function loadStoredLayerManagerOrder() {
+  const raw = storageGet(LAYER_MANAGER_ORDER_STORAGE_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(v => String(v || "")).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveLayerManagerOrder(order) {
+  storageSet(LAYER_MANAGER_ORDER_STORAGE_KEY, JSON.stringify(order || []));
+}
+
+function ensureLayerManagerOrder() {
+  if (!layerManagerOrderTop.length) {
+    layerManagerOrderTop = loadStoredLayerManagerOrder();
+  }
+  const next = buildLayerManagerOrderWithRouteGrouping(layerManagerOrderTop.length ? layerManagerOrderTop : getLayerManagerDefaultOrder());
+
+  const changed =
+    next.length !== layerManagerOrderTop.length ||
+    next.some((key, idx) => key !== layerManagerOrderTop[idx]);
+  if (changed) {
+    layerManagerOrderTop = next;
+    saveLayerManagerOrder(layerManagerOrderTop);
+  }
+  return layerManagerOrderTop;
+}
+
+function moveLayerManagerEntryBefore(entryId, targetId) {
+  const order = [...ensureLayerManagerOrder()];
+  const streetOnTop = order[0] === LAYER_MANAGER_STREET_KEY;
+  const routeOrder = order.filter(isRouteDayLayerManagerEntry);
+
+  if (entryId === LAYER_MANAGER_STREET_KEY && isRouteDayLayerManagerEntry(targetId)) {
+    if (streetOnTop) return false;
+    layerManagerOrderTop = [LAYER_MANAGER_STREET_KEY, ...routeOrder];
+    saveLayerManagerOrder(layerManagerOrderTop);
+    return true;
+  }
+
+  if (isRouteDayLayerManagerEntry(entryId) && targetId === LAYER_MANAGER_STREET_KEY) {
+    if (!streetOnTop) return false;
+    layerManagerOrderTop = [...routeOrder, LAYER_MANAGER_STREET_KEY];
+    saveLayerManagerOrder(layerManagerOrderTop);
+    return true;
+  }
+
+  if (!isRouteDayLayerManagerEntry(entryId) || !isRouteDayLayerManagerEntry(targetId)) return false;
+  if (entryId === targetId) return false;
+
+  const fromIndex = routeOrder.indexOf(entryId);
+  const toIndex = routeOrder.indexOf(targetId);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return false;
+  routeOrder.splice(fromIndex, 1);
+  const insertAt = fromIndex < toIndex ? toIndex - 1 : toIndex;
+  routeOrder.splice(insertAt, 0, entryId);
+  layerManagerOrderTop = streetOnTop
+    ? [LAYER_MANAGER_STREET_KEY, ...routeOrder]
+    : [...routeOrder, LAYER_MANAGER_STREET_KEY];
+  saveLayerManagerOrder(layerManagerOrderTop);
+  return true;
+}
+
+function moveLayerManagerEntryByOffset(entryId, offset) {
+  const order = [...ensureLayerManagerOrder()];
+  const streetOnTop = order[0] === LAYER_MANAGER_STREET_KEY;
+  const routeOrder = order.filter(isRouteDayLayerManagerEntry);
+  const step = Number(offset || 0);
+  if (!step) return false;
+
+  if (entryId === LAYER_MANAGER_STREET_KEY) {
+    if (!routeOrder.length) return false;
+    const moveUp = step < 0;
+    if (moveUp && streetOnTop) return false;
+    if (!moveUp && !streetOnTop) return false;
+    layerManagerOrderTop = moveUp
+      ? [LAYER_MANAGER_STREET_KEY, ...routeOrder]
+      : [...routeOrder, LAYER_MANAGER_STREET_KEY];
+    saveLayerManagerOrder(layerManagerOrderTop);
+    return true;
+  }
+
+  if (!isRouteDayLayerManagerEntry(entryId)) return false;
+  const fromIndex = routeOrder.indexOf(entryId);
+  if (fromIndex < 0) return false;
+  const toIndex = Math.max(0, Math.min(routeOrder.length - 1, fromIndex + step));
+  if (toIndex === fromIndex) return false;
+  routeOrder.splice(fromIndex, 1);
+  routeOrder.splice(toIndex, 0, entryId);
+  layerManagerOrderTop = streetOnTop
+    ? [LAYER_MANAGER_STREET_KEY, ...routeOrder]
+    : [...routeOrder, LAYER_MANAGER_STREET_KEY];
+  saveLayerManagerOrder(layerManagerOrderTop);
+  return true;
+}
+
+function isRouteDayLayerVisibleOnMap(key) {
+  const group = routeDayGroups[key];
+  if (!group || !Array.isArray(group.layers)) return false;
+  return group.layers.some(layer => map.hasLayer(layer));
+}
+
+function applyLayerManagerOrder() {
+  const orderTop = ensureLayerManagerOrder();
+  for (let i = orderTop.length - 1; i >= 0; i -= 1) {
+    const entryId = orderTop[i];
+    if (entryId === LAYER_MANAGER_STREET_KEY) {
+      if (map.hasLayer(streetAttributeLayerGroup)) {
+        streetAttributeLayerGroup.eachLayer(layer => {
+          try { layer.bringToFront?.(); } catch (_) {}
+        });
+      }
+      continue;
+    }
+
+    const group = routeDayGroups[entryId];
+    if (!group || !Array.isArray(group.layers)) continue;
+    group.layers.forEach(layer => {
+      if (!map.hasLayer(layer)) return;
+      try { layer.bringToFront?.(); } catch (_) {}
+    });
+  }
+
+  // Keep temporary selection/polygon tools above data layers.
+  try { drawnLayer?.bringToFront?.(); } catch (_) {}
+  try { streetLoadPolygonLayerGroup?.bringToFront?.(); } catch (_) {}
+}
+
+function setRouteDayLayerVisibilityFromManager(key, visible) {
+  const group = routeDayGroups[key];
+  if (!group || !Array.isArray(group.layers)) return;
+  const nextVisible = !!visible;
+  layerVisibilityState[key] = nextVisible;
+
+  const routeDayCheckbox = [...document.querySelectorAll("#routeDayLayers input[data-key]")]
+    .find(node => node.dataset.key === key);
+  if (routeDayCheckbox) routeDayCheckbox.checked = nextVisible;
+
+  group.layers.forEach(layer => {
+    if (nextVisible) map.addLayer(layer);
+    else map.removeLayer(layer);
+  });
+
+  applyLayerManagerOrder();
+  updateSelectionCount();
+  updateStats();
+}
+
+function setStreetNetworkLayerVisibilityFromManager(visible) {
+  const nextVisible = !!visible;
+  const layerToggle = document.getElementById("streetNetworkLayerToggle");
+  if (layerToggle) layerToggle.checked = nextVisible;
+  storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, nextVisible ? "on" : "off");
+  syncStreetNetworkOverlay();
+  updateLocalStreetSourceStatus();
+}
+
+function refreshLayerManagerUiIfOpen() {
+  if (typeof window.__refreshLayerManagerList === "function") {
+    window.__refreshLayerManagerList();
+  }
+}
 
 function normalizeDayToken(value) {
   const s = String(value ?? "").trim().toLowerCase();
@@ -4910,8 +5151,10 @@ function applyFilters() {
     group.layers.forEach(l => show ? l.addTo(map) : map.removeLayer(l));
   });
 
+  applyLayerManagerOrder();
   updateSelectionCount();
   updateStats();
+  refreshLayerManagerUiIfOpen();
 }
 
 
@@ -4947,6 +5190,7 @@ function selectEntireLayer(key) {
     const ll = getLayerLatLng(marker);
     if (ll) bounds.extend(ll);
   });
+  applyLayerManagerOrder();
 
   if (!bounds.isValid()) return;
 
@@ -5028,6 +5272,9 @@ function buildRouteDayLayerControls() {
         if (checkbox.checked) map.addLayer(marker);
         else map.removeLayer(marker);
       });
+      applyLayerManagerOrder();
+      updateStats();
+      refreshLayerManagerUiIfOpen();
     });
 
     const symbol = getSymbol(key);
@@ -5071,6 +5318,10 @@ function buildRouteDayLayerControls() {
     wrapper.appendChild(selectBtn);
     routeDayContainer.appendChild(wrapper);
   });
+
+  ensureLayerManagerOrder();
+  applyLayerManagerOrder();
+  refreshLayerManagerUiIfOpen();
 }
 
 
@@ -6372,6 +6623,2332 @@ function initSelectByAttributesControls() {
   renderSavedList("");
   refreshFields("");
   updatePreview();
+}
+
+function escapePrintHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatPrintNumber(value, maximumFractionDigits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  return n.toLocaleString(undefined, { maximumFractionDigits });
+}
+
+function getCurrentRouteFileNameForPrint() {
+  const node = document.getElementById("currentFileName");
+  const name = String(node?.textContent || "").trim();
+  return name || "None";
+}
+
+function getSelectedBasemapLabelForPrint() {
+  const select = document.getElementById("baseMapSelect");
+  if (!select) return "Unknown";
+  const option = select.options?.[select.selectedIndex];
+  return String(option?.textContent || option?.value || "Unknown").trim();
+}
+
+function getVisibleRouteDayLegendItemsForPrint() {
+  return Object.entries(routeDayGroups)
+    .map(([key, group]) => {
+      const layers = Array.isArray(group?.layers) ? group.layers : [];
+      const visibleCount = layers.reduce((count, layer) => count + (map.hasLayer(layer) ? 1 : 0), 0);
+      if (!visibleCount) return null;
+      const [route = "", dayRaw = ""] = String(key || "").split("|");
+      const numericDay = Number(dayRaw);
+      const dayLabel = Number.isFinite(numericDay) ? (dayName(numericDay) || String(dayRaw)) : String(dayRaw || "Unknown");
+      const symbol = symbolMap[key] || getSymbol(key);
+      return {
+        key,
+        route: String(route || "Unassigned"),
+        day: dayLabel,
+        color: symbol?.color || "#2f89df",
+        shape: symbol?.shape || "circle",
+        visibleCount
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const routeCmp = String(a.route).localeCompare(String(b.route), undefined, { numeric: true, sensitivity: "base" });
+      if (routeCmp !== 0) return routeCmp;
+      return String(a.day).localeCompare(String(b.day), undefined, { numeric: true, sensitivity: "base" });
+    });
+}
+
+function buildMapLegendHtmlForPrint() {
+  const basemapLabel = getSelectedBasemapLabelForPrint();
+  const routeFileName = getCurrentRouteFileNameForPrint();
+  const routeDayItems = getVisibleRouteDayLegendItemsForPrint();
+  const shownItems = routeDayItems.slice(0, 42);
+  const hiddenCount = Math.max(0, routeDayItems.length - shownItems.length);
+  const streetLayerVisible = map.hasLayer(streetAttributeLayerGroup);
+  const streetSegmentsLoaded = streetAttributeById.size;
+
+  const itemRows = shownItems.length
+    ? shownItems.map(item => `
+      <div class="map-print-legend-row">
+        <span class="map-print-legend-swatch" style="background:${escapePrintHtml(item.color)};${item.shape === "square" ? "border-radius:2px;" : ""}${item.shape === "diamond" ? "transform:rotate(45deg);" : ""}"></span>
+        <span>Route ${escapePrintHtml(item.route)} - ${escapePrintHtml(item.day)} (${item.visibleCount.toLocaleString()})</span>
+      </div>
+    `).join("")
+    : '<div class="map-print-legend-row map-print-legend-muted">No route/day layers currently visible.</div>';
+
+  return `
+    <div class="map-print-legend-title">Map Legend</div>
+    <p class="map-print-legend-meta">File: ${escapePrintHtml(routeFileName)}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}</p>
+    <div class="map-print-legend-section-title">Basemap</div>
+    <div class="map-print-legend-row"><span class="map-print-legend-swatch" style="background:#6487ac;"></span><span>${escapePrintHtml(basemapLabel)}</span></div>
+    <div class="map-print-legend-section-title">Street Network</div>
+    <div class="map-print-legend-row"><span class="map-print-legend-swatch" style="background:${streetLayerVisible ? "#4ea2f5" : "#919aa5"};"></span><span>${streetLayerVisible ? "Visible" : "Hidden"} (${streetSegmentsLoaded.toLocaleString()} loaded)</span></div>
+    <div class="map-print-legend-section-title">Visible Route + Day Layers (${routeDayItems.length.toLocaleString()})</div>
+    ${itemRows}
+    ${hiddenCount ? `<div class="map-print-legend-row map-print-legend-muted">+${hiddenCount.toLocaleString()} more layers not listed</div>` : ""}
+  `;
+}
+
+function ensureMapPrintLegendPanel() {
+  if (!document.body) return null;
+  let panel = document.getElementById("mapPrintLegendPanel");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "mapPrintLegendPanel";
+    panel.className = "map-print-legend-panel";
+    document.body.appendChild(panel);
+  } else if (panel.parentElement !== document.body) {
+    document.body.appendChild(panel);
+  }
+  return panel;
+}
+
+const PRINT_MAP_SPAN_OPTIONS = new Set(["full", "wide", "standard", "compact", "legend-right", "legend-left"]);
+const PRINT_LEGEND_POSITION_OPTIONS = new Set(["top-left", "top-right", "bottom-left", "bottom-right", "outside-right", "outside-left"]);
+const PRINT_OUTPUT_SCALE_OPTIONS = new Set(["1", "0.95", "0.9", "0.85"]);
+const PRINT_RESOLUTION_SCALE_OPTIONS = new Set(["1", "1.5", "2"]);
+
+function runMapPrintFlow({
+  withLegend = false,
+  legendPosition = "outside-right",
+  mapSpan = "legend-right",
+  outputScale = 1,
+  resolutionScale = 1,
+  customLegendLeftPx = NaN,
+  customLegendTopPx = NaN,
+  customLegendLeftRatio = NaN,
+  customLegendTopRatio = NaN,
+  customMapLeftPx = NaN,
+  customMapTopPx = NaN,
+  customMapWidthPx = NaN,
+  customMapHeightPx = NaN,
+  customMapLeftRatio = NaN,
+  customMapTopRatio = NaN,
+  customMapWidthRatio = NaN,
+  customMapHeightRatio = NaN
+} = {}) {
+  const mapNode = document.getElementById("map");
+  if (!mapNode) {
+    alert("Map is not available to print.");
+    return;
+  }
+
+  const finalLegendPosition = PRINT_LEGEND_POSITION_OPTIONS.has(String(legendPosition))
+    ? String(legendPosition)
+    : "outside-right";
+  const finalMapSpan = PRINT_MAP_SPAN_OPTIONS.has(String(mapSpan))
+    ? String(mapSpan)
+    : "legend-right";
+  const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
+  const normalizedOutputScale = Number.isFinite(Number(outputScale))
+    ? clampValue(Number(outputScale), 0.55, 1)
+    : 1;
+  const normalizedResolutionScale = Number.isFinite(Number(resolutionScale))
+    ? clampValue(Number(resolutionScale), 1, 2)
+    : 1;
+  const hasCustomMapRect =
+    Number.isFinite(customMapLeftPx) &&
+    Number.isFinite(customMapTopPx) &&
+    Number.isFinite(customMapWidthPx) &&
+    Number.isFinite(customMapHeightPx) &&
+    customMapWidthPx > 120 &&
+    customMapHeightPx > 120;
+  const hasCustomMapRatios =
+    Number.isFinite(customMapLeftRatio) &&
+    Number.isFinite(customMapTopRatio) &&
+    Number.isFinite(customMapWidthRatio) &&
+    Number.isFinite(customMapHeightRatio) &&
+    customMapWidthRatio > 0.08 &&
+    customMapHeightRatio > 0.08;
+
+  let legendPanel = null;
+  if (withLegend) {
+    legendPanel = ensureMapPrintLegendPanel();
+    if (legendPanel) {
+      legendPanel.innerHTML = buildMapLegendHtmlForPrint();
+      const hasCustomLegendRatios = Number.isFinite(customLegendLeftRatio) && Number.isFinite(customLegendTopRatio);
+      if (hasCustomLegendRatios) {
+        const legendRect = legendPanel.getBoundingClientRect();
+        const legendWidthRatio = window.innerWidth > 0 ? (Math.max(120, legendRect.width || 260) / window.innerWidth) : 0.24;
+        const legendHeightRatio = window.innerHeight > 0 ? (Math.max(80, legendRect.height || 220) / window.innerHeight) : 0.22;
+        let safeLeftRatio = clampValue(Number(customLegendLeftRatio), 0, 1);
+        let safeTopRatio = clampValue(Number(customLegendTopRatio), 0, 1);
+        if ((safeLeftRatio + legendWidthRatio) > 1) {
+          safeLeftRatio = Math.max(0, 1 - legendWidthRatio - 0.004);
+        }
+        if ((safeTopRatio + legendHeightRatio) > 1) {
+          safeTopRatio = Math.max(0, 1 - legendHeightRatio - 0.004);
+        }
+        legendPanel.style.left = `${(safeLeftRatio * 100).toFixed(4)}vw`;
+        legendPanel.style.top = `${(safeTopRatio * 100).toFixed(4)}vh`;
+        legendPanel.style.right = "auto";
+        legendPanel.style.bottom = "auto";
+      } else {
+      const hasCustomLegendPosition = Number.isFinite(customLegendLeftPx) && Number.isFinite(customLegendTopPx);
+      if (hasCustomLegendPosition) {
+        const legendRect = legendPanel.getBoundingClientRect();
+        const legendW = Math.max(120, legendRect.width || 260);
+        const legendH = Math.max(80, legendRect.height || 220);
+        const safeLeft = Math.max(8, Math.min(Math.round(customLegendLeftPx), Math.max(8, window.innerWidth - legendW - 8)));
+        const safeTop = Math.max(8, Math.min(Math.round(customLegendTopPx), Math.max(8, window.innerHeight - legendH - 8)));
+        legendPanel.style.left = `${safeLeft}px`;
+        legendPanel.style.top = `${safeTop}px`;
+        legendPanel.style.right = "auto";
+        legendPanel.style.bottom = "auto";
+      }
+      }
+    }
+  }
+
+  const previousTitle = document.title;
+  document.title = withLegend ? "TDS-PAK Map Print (Legend)" : "TDS-PAK Map Print";
+  const pageStyle = document.createElement("style");
+  pageStyle.id = "tdsPakMapPrintPageStyle";
+  pageStyle.textContent = "@page { size: landscape; margin: 0; }";
+  document.head.appendChild(pageStyle);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    document.body.classList.remove(
+      "print-mode-map",
+      "print-mode-map-legend",
+      "print-map-span-full",
+      "print-map-span-wide",
+      "print-map-span-standard",
+      "print-map-span-compact",
+      "print-map-span-legend-right",
+      "print-map-span-legend-left",
+      "print-map-span-custom",
+      "print-mode-map-legend-pos-top-left",
+      "print-mode-map-legend-pos-top-right",
+      "print-mode-map-legend-pos-bottom-left",
+      "print-mode-map-legend-pos-bottom-right",
+      "print-mode-map-legend-pos-outside-right",
+      "print-mode-map-legend-pos-outside-left"
+    );
+    document.body.style.removeProperty("--print-custom-map-left");
+    document.body.style.removeProperty("--print-custom-map-top");
+    document.body.style.removeProperty("--print-custom-map-width");
+    document.body.style.removeProperty("--print-custom-map-height");
+    document.body.style.removeProperty("--print-map-render-scale");
+    document.body.style.removeProperty("--print-map-render-inverse");
+    document.title = previousTitle;
+    if (legendPanel) legendPanel.remove();
+    if (pageStyle && pageStyle.parentNode) pageStyle.parentNode.removeChild(pageStyle);
+    setTimeout(() => {
+      try { map.invalidateSize({ pan: false }); } catch (_) {}
+    }, 120);
+  };
+
+  const cleanupFallbackTimer = window.setTimeout(() => {
+    cleanup();
+  }, 300000);
+
+  window.addEventListener("afterprint", () => {
+    window.clearTimeout(cleanupFallbackTimer);
+    cleanup();
+  }, { once: true });
+
+  document.body.classList.add("print-mode-map", `print-map-span-${finalMapSpan}`);
+  document.body.style.setProperty("--print-map-render-scale", normalizedResolutionScale.toFixed(3));
+  document.body.style.setProperty("--print-map-render-inverse", (1 / normalizedResolutionScale).toFixed(6));
+  if (hasCustomMapRatios || hasCustomMapRect) {
+    document.body.classList.add("print-map-span-custom");
+    if (hasCustomMapRatios) {
+      let safeLeft = clampValue(Number(customMapLeftRatio), 0, 1);
+      let safeTop = clampValue(Number(customMapTopRatio), 0, 1);
+      let safeWidth = clampValue(Number(customMapWidthRatio), 0.08, 1);
+      let safeHeight = clampValue(Number(customMapHeightRatio), 0.08, 1);
+      if (normalizedOutputScale < 0.999) {
+        const shrunkWidth = clampValue(safeWidth * normalizedOutputScale, 0.08, 1);
+        const shrunkHeight = clampValue(safeHeight * normalizedOutputScale, 0.08, 1);
+        safeLeft += (safeWidth - shrunkWidth) * 0.5;
+        safeTop += (safeHeight - shrunkHeight) * 0.5;
+        safeWidth = shrunkWidth;
+        safeHeight = shrunkHeight;
+      }
+      if ((safeLeft + safeWidth) > 1) safeLeft = Math.max(0, 1 - safeWidth);
+      if ((safeTop + safeHeight) > 1) safeTop = Math.max(0, 1 - safeHeight);
+      document.body.style.setProperty("--print-custom-map-left", `${(safeLeft * 100).toFixed(4)}vw`);
+      document.body.style.setProperty("--print-custom-map-top", `${(safeTop * 100).toFixed(4)}vh`);
+      document.body.style.setProperty("--print-custom-map-width", `${(safeWidth * 100).toFixed(4)}vw`);
+      document.body.style.setProperty("--print-custom-map-height", `${(safeHeight * 100).toFixed(4)}vh`);
+    } else {
+      let safeWidthPx = clampValue(Math.round(customMapWidthPx), 120, Math.max(120, window.innerWidth));
+      let safeHeightPx = clampValue(Math.round(customMapHeightPx), 120, Math.max(120, window.innerHeight));
+      let safeLeftPx = Math.round(customMapLeftPx);
+      let safeTopPx = Math.round(customMapTopPx);
+      if (normalizedOutputScale < 0.999) {
+        const shrunkWidthPx = clampValue(Math.round(safeWidthPx * normalizedOutputScale), 120, Math.max(120, window.innerWidth));
+        const shrunkHeightPx = clampValue(Math.round(safeHeightPx * normalizedOutputScale), 120, Math.max(120, window.innerHeight));
+        safeLeftPx += Math.round((safeWidthPx - shrunkWidthPx) * 0.5);
+        safeTopPx += Math.round((safeHeightPx - shrunkHeightPx) * 0.5);
+        safeWidthPx = shrunkWidthPx;
+        safeHeightPx = shrunkHeightPx;
+      }
+      safeLeftPx = clampValue(safeLeftPx, 0, Math.max(0, window.innerWidth - safeWidthPx));
+      safeTopPx = clampValue(safeTopPx, 0, Math.max(0, window.innerHeight - safeHeightPx));
+      document.body.style.setProperty("--print-custom-map-left", `${safeLeftPx}px`);
+      document.body.style.setProperty("--print-custom-map-top", `${safeTopPx}px`);
+      document.body.style.setProperty("--print-custom-map-width", `${safeWidthPx}px`);
+      document.body.style.setProperty("--print-custom-map-height", `${safeHeightPx}px`);
+    }
+  }
+  if (withLegend) {
+    document.body.classList.add("print-mode-map-legend", `print-mode-map-legend-pos-${finalLegendPosition}`);
+  }
+
+  try { map.invalidateSize({ pan: false }); } catch (_) {}
+  const printDelayMs = clampValue(Math.round(180 + ((normalizedResolutionScale - 1) * 650)), 180, 1300);
+  setTimeout(() => {
+    try {
+      window.print();
+    } catch (_) {
+      window.clearTimeout(cleanupFallbackTimer);
+      cleanup();
+    }
+  }, printDelayMs);
+}
+
+function openPrintDocumentWindow({ title, bodyHtml, extraStyles = "", autoPrint = true }) {
+  const win = window.open("", "_blank", "width=1120,height=760,resizable=yes,scrollbars=yes");
+  if (!win) return null;
+
+  const autoPrintFlag = autoPrint ? "true" : "false";
+  win.document.write(`
+    <html>
+      <head>
+        <title>${escapePrintHtml(title || "Print")}</title>
+        <meta charset="UTF-8" />
+        <style>
+          :root { --bg:#f3f7fb; --panel:#ffffff; --line:#d6e2ee; --head:#e9f2fb; --text:#17334d; --muted:#4f6e8b; --accent:#2f89df; --ok:#1f8a58; --warn:#b06f1e; }
+          * { box-sizing: border-box; }
+          html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family:"Segoe UI", Roboto, Arial, sans-serif; }
+          .print-shell { max-width: 1280px; margin: 0 auto; padding: 16px; }
+          .print-header { border:1px solid var(--line); background:linear-gradient(180deg,#fafdff 0%,#eef5fd 100%); border-radius:12px; padding:10px 12px; margin-bottom:10px; }
+          .print-title { margin:0; font-size:20px; line-height:1.2; }
+          .print-meta { margin:5px 0 0; color:var(--muted); font-size:12px; line-height:1.4; }
+          .print-section { margin-top: 10px; border:1px solid var(--line); border-radius:12px; background:#fff; overflow:hidden; }
+          .print-section h3 { margin:0; padding:10px 12px; font-size:14px; border-bottom:1px solid var(--line); background:#f6faff; }
+          .print-section-body { padding:10px 12px; }
+          .cards { display:grid; grid-template-columns: repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
+          .card { border:1px solid var(--line); border-radius:10px; background:#fbfdff; padding:9px 10px; }
+          .card-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+          .card-value { margin-top:4px; font-size:20px; font-weight:700; }
+          .bar-row { display:grid; grid-template-columns:220px 1fr 110px; gap:8px; align-items:center; margin-bottom:7px; }
+          .bar-label { font-size:12px; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+          .bar-track { height:11px; border-radius:999px; background:#e6eef7; overflow:hidden; }
+          .bar-fill { height:100%; background:linear-gradient(90deg,#4ea2f5 0%, var(--accent) 100%); }
+          .bar-fill.alt { background:linear-gradient(90deg,#4fc88f 0%, var(--ok) 100%); }
+          .bar-fill.warn { background:linear-gradient(90deg,#f0b05f 0%, var(--warn) 100%); }
+          .bar-value { text-align:right; font-size:12px; color:var(--muted); font-weight:700; }
+          .note { margin:0; color:var(--muted); font-size:12px; line-height:1.4; }
+          .list { margin:0; padding-left:18px; }
+          .list li { margin:4px 0; font-size:12px; }
+          table { width:100%; border-collapse:collapse; font-size:12px; }
+          th, td { border:1px solid var(--line); padding:7px 8px; text-align:left; vertical-align:top; white-space:nowrap; }
+          th { background:var(--head); font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+          tr:nth-child(even) td { background:#fafcff; }
+          .mono { font-family: Consolas, "Courier New", monospace; font-size:12px; }
+          @media print {
+            html, body { background:#fff; }
+            .print-shell { padding:0; max-width:none; }
+            .print-section { break-inside: avoid; }
+            .print-section table { break-inside:auto; }
+            .print-section tr { break-inside: avoid; break-after:auto; }
+          }
+          ${extraStyles || ""}
+        </style>
+      </head>
+      <body>
+        ${bodyHtml}
+        <script>
+          (function() {
+            const shouldPrint = ${autoPrintFlag};
+            if (!shouldPrint) return;
+            const trigger = function() {
+              setTimeout(function() {
+                try { window.print(); } catch (_) {}
+              }, 260);
+            };
+            if (document.readyState === "complete") trigger();
+            else window.addEventListener("load", trigger, { once: true });
+          })();
+        <\/script>
+      </body>
+    </html>
+  `);
+
+  win.document.close();
+  return win;
+}
+
+function buildSummaryTablePrintDocumentHtml() {
+  const tableNode = document.getElementById("routeSummaryTable");
+  const table = tableNode?.querySelector("table");
+  if (!table) return null;
+  const tableHtml = table.outerHTML;
+  const routeFileName = getCurrentRouteFileNameForPrint();
+  return `
+    <div class="print-shell">
+      <div class="print-header">
+        <h1 class="print-title">Route Summary Table</h1>
+        <p class="print-meta">Route file: ${escapePrintHtml(routeFileName)}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}</p>
+      </div>
+      <div class="print-section">
+        <h3>Summary Rows</h3>
+        <div class="print-section-body">${tableHtml}</div>
+      </div>
+    </div>
+  `;
+}
+
+function extractSummaryAnalyticsForPrint(rows, headers) {
+  const normalize = value => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalizedHeaders = headers.map(h => ({ original: h, norm: normalize(h) }));
+
+  const findHeader = candidates => {
+    const norms = candidates.map(normalize);
+    const direct = normalizedHeaders.find(h => norms.includes(h.norm));
+    if (direct) return direct.original;
+    const fuzzy = normalizedHeaders.find(h => norms.some(n => h.norm.includes(n) || n.includes(h.norm)));
+    return fuzzy ? fuzzy.original : null;
+  };
+
+  const toNumber = value => {
+    if (value === null || value === undefined) return NaN;
+    const cleaned = String(value).replace(/,/g, "").trim();
+    if (!cleaned) return NaN;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : NaN;
+  };
+
+  const toHours = value => {
+    if (value === null || value === undefined) return NaN;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (value > 0 && value < 1) return value * 24;
+      return value;
+    }
+    const text = String(value).trim();
+    if (!text) return NaN;
+    const direct = toNumber(text);
+    if (Number.isFinite(direct)) return direct > 0 && direct < 1 ? direct * 24 : direct;
+    const colonMatch = text.match(/^(-?\d+):(\d{1,2})(?::(\d{1,2}))?$/);
+    if (colonMatch) {
+      const h = Number(colonMatch[1]) || 0;
+      const m = Number(colonMatch[2]) || 0;
+      const s = Number(colonMatch[3] || 0) || 0;
+      return h + (m / 60) + (s / 3600);
+    }
+    const lower = text.toLowerCase();
+    const hMatch = lower.match(/(-?\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)/);
+    const mMatch = lower.match(/(-?\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes)/);
+    if (hMatch || mMatch) {
+      const h = hMatch ? Number(hMatch[1]) : 0;
+      const m = mMatch ? Number(mMatch[1]) : 0;
+      return (Number.isFinite(h) ? h : 0) + ((Number.isFinite(m) ? m : 0) / 60);
+    }
+    return NaN;
+  };
+
+  const fields = {
+    route: findHeader(["route", "newroute", "routeid", "rte"]),
+    day: findHeader(["day", "newday", "routeday", "dispatchday"]),
+    stops: findHeader(["totalstops", "stops", "stopcount", "numberofstops"]),
+    miles: findHeader(["miles", "totalmiles", "distancemiles", "distance"]),
+    demand: findHeader(["demand", "totaldemand", "volume", "load"]),
+    trips: findHeader(["numberoftrips", "trips", "tripcount", "totaltrips"]),
+    totalTime: findHeader(["totaltime", "totalroutetime", "routetime", "hours"])
+  };
+
+  const routeDayMap = new Map();
+  rows.forEach(row => {
+    const route = String(fields.route ? row?.[fields.route] : "").trim() || "Unknown Route";
+    const day = String(fields.day ? row?.[fields.day] : "").trim() || "Unknown Day";
+    const key = `${route} | ${day}`;
+    if (!routeDayMap.has(key)) {
+      routeDayMap.set(key, { route, day, routeDay: key, stops: 0, miles: 0, demand: 0, trips: 0, totalTime: 0 });
+    }
+    const bucket = routeDayMap.get(key);
+    const stops = toNumber(fields.stops ? row?.[fields.stops] : "");
+    const miles = toNumber(fields.miles ? row?.[fields.miles] : "");
+    const demand = toNumber(fields.demand ? row?.[fields.demand] : "");
+    const trips = toNumber(fields.trips ? row?.[fields.trips] : "");
+    const totalTime = toHours(fields.totalTime ? row?.[fields.totalTime] : "");
+    bucket.stops += Number.isFinite(stops) ? stops : 0;
+    bucket.miles += Number.isFinite(miles) ? miles : 0;
+    bucket.demand += Number.isFinite(demand) ? demand : 0;
+    bucket.trips += Number.isFinite(trips) ? trips : 0;
+    bucket.totalTime += Number.isFinite(totalTime) ? totalTime : 0;
+  });
+
+  const routeDayRows = [...routeDayMap.values()];
+  const dayTotalsMap = new Map();
+  routeDayRows.forEach(row => {
+    const day = row.day || "Unknown Day";
+    if (!dayTotalsMap.has(day)) {
+      dayTotalsMap.set(day, { day, demand: 0, miles: 0, stops: 0, trips: 0, routeDayCount: 0 });
+    }
+    const dayBucket = dayTotalsMap.get(day);
+    dayBucket.routeDayCount += 1;
+    dayBucket.demand += row.demand;
+    dayBucket.miles += row.miles;
+    dayBucket.stops += row.stops;
+    dayBucket.trips += row.trips;
+  });
+
+  const dayTotals = [...dayTotalsMap.values()].sort((a, b) => b.routeDayCount - a.routeDayCount);
+  const totalStops = routeDayRows.reduce((sum, row) => sum + row.stops, 0);
+  const totalMiles = routeDayRows.reduce((sum, row) => sum + row.miles, 0);
+  const totalDemand = routeDayRows.reduce((sum, row) => sum + row.demand, 0);
+  const totalTrips = routeDayRows.reduce((sum, row) => sum + row.trips, 0);
+  const totalTime = routeDayRows.reduce((sum, row) => sum + row.totalTime, 0);
+  const avgTime = routeDayRows.length ? (totalTime / routeDayRows.length) : 0;
+  const overTarget = routeDayRows.filter(row => row.totalTime > 11).length;
+
+  return {
+    fields,
+    routeDayRows,
+    dayTotals,
+    totals: {
+      totalStops,
+      totalMiles,
+      totalDemand,
+      totalTrips,
+      avgTime,
+      overTarget,
+      routeDayCount: routeDayRows.length
+    }
+  };
+}
+
+function buildBarsHtmlForPrint(items, labelKey, valueKey, fillClass = "") {
+  if (!items.length) {
+    return '<p class="note">No data available.</p>';
+  }
+  const max = Math.max(1, ...items.map(item => Number(item?.[valueKey]) || 0));
+  return items
+    .slice()
+    .sort((a, b) => (Number(b?.[valueKey]) || 0) - (Number(a?.[valueKey]) || 0))
+    .slice(0, 18)
+    .map(item => {
+      const label = String(item?.[labelKey] ?? "");
+      const value = Number(item?.[valueKey]) || 0;
+      const width = Math.max(0, Math.min(100, (value / max) * 100));
+      return `
+        <div class="bar-row">
+          <div class="bar-label">${escapePrintHtml(label)}</div>
+          <div class="bar-track"><div class="bar-fill ${fillClass}" style="width:${width}%"></div></div>
+          <div class="bar-value">${formatPrintNumber(value)}</div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function buildSummaryVisualizationPrintDocumentHtml() {
+  const rows = Array.isArray(window._summaryRows) ? window._summaryRows : [];
+  const headers = Array.isArray(window._summaryHeaders) ? window._summaryHeaders : [];
+  if (!rows.length || !headers.length) return null;
+
+  const routeFileName = getCurrentRouteFileNameForPrint();
+  const analytics = extractSummaryAnalyticsForPrint(rows, headers);
+  const dayDemandBars = buildBarsHtmlForPrint(analytics.dayTotals, "day", "demand");
+  const dayMilesBars = buildBarsHtmlForPrint(analytics.dayTotals, "day", "miles", "alt");
+  const dayStopsBars = buildBarsHtmlForPrint(analytics.dayTotals, "day", "stops", "warn");
+
+  const detailRows = analytics.routeDayRows
+    .slice()
+    .sort((a, b) => (String(a.day).localeCompare(String(b.day), undefined, { numeric: true, sensitivity: "base" }) || String(a.route).localeCompare(String(b.route), undefined, { numeric: true, sensitivity: "base" })))
+    .slice(0, 360)
+    .map((row, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${escapePrintHtml(row.route)}</td>
+        <td>${escapePrintHtml(row.day)}</td>
+        <td>${formatPrintNumber(row.stops)}</td>
+        <td>${formatPrintNumber(row.miles)}</td>
+        <td>${formatPrintNumber(row.demand)}</td>
+        <td>${formatPrintNumber(row.trips)}</td>
+        <td>${formatPrintNumber(row.totalTime)}</td>
+      </tr>
+    `)
+    .join("");
+
+  return `
+    <div class="print-shell">
+      <div class="print-header">
+        <h1 class="print-title">Route Summary Visualization Report</h1>
+        <p class="print-meta">Route file: ${escapePrintHtml(routeFileName)}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}<br>Summary rows scanned: ${rows.length.toLocaleString()}</p>
+      </div>
+      <section class="print-section">
+        <h3>KPI Snapshot</h3>
+        <div class="print-section-body">
+          <div class="cards">
+            <div class="card"><div class="card-label">Route + Day Units</div><div class="card-value">${analytics.totals.routeDayCount.toLocaleString()}</div></div>
+            <div class="card"><div class="card-label">Total Stops</div><div class="card-value">${formatPrintNumber(analytics.totals.totalStops)}</div></div>
+            <div class="card"><div class="card-label">Total Miles</div><div class="card-value">${formatPrintNumber(analytics.totals.totalMiles)}</div></div>
+            <div class="card"><div class="card-label">Total Demand</div><div class="card-value">${formatPrintNumber(analytics.totals.totalDemand)}</div></div>
+            <div class="card"><div class="card-label">Total Trips</div><div class="card-value">${formatPrintNumber(analytics.totals.totalTrips)}</div></div>
+            <div class="card"><div class="card-label">Avg Total Time</div><div class="card-value">${formatPrintNumber(analytics.totals.avgTime)}h</div></div>
+            <div class="card"><div class="card-label">Over 11 Hours</div><div class="card-value">${analytics.totals.overTarget.toLocaleString()}</div></div>
+          </div>
+        </div>
+      </section>
+      <section class="print-section">
+        <h3>Demand by Day</h3>
+        <div class="print-section-body">${dayDemandBars}</div>
+      </section>
+      <section class="print-section">
+        <h3>Miles by Day</h3>
+        <div class="print-section-body">${dayMilesBars}</div>
+      </section>
+      <section class="print-section">
+        <h3>Stops by Day</h3>
+        <div class="print-section-body">${dayStopsBars}</div>
+      </section>
+      <section class="print-section">
+        <h3>Route + Day Detail</h3>
+        <div class="print-section-body">
+          <p class="note">Showing ${Math.min(analytics.routeDayRows.length, 360).toLocaleString()} of ${analytics.routeDayRows.length.toLocaleString()} grouped route/day rows.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Route</th>
+                <th>Day</th>
+                <th>Stops</th>
+                <th>Miles</th>
+                <th>Demand</th>
+                <th>Trips</th>
+                <th>Total Time (h)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${detailRows || '<tr><td colspan="8">No grouped rows available.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function buildAttributeTablePrintDocumentHtml() {
+  if (attributeTableMode === "streets") {
+    const rows = getFilteredStreetAttributeRows();
+    if (!rows.length) return null;
+    const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+    const maxRows = 4200;
+    const slice = rows.slice(0, maxRows);
+    const tableRows = slice.map((row, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        <td>${streetAttributeSelectedIds.has(Number(row?.id)) ? "Yes" : ""}</td>
+        ${headers.map(key => `<td>${escapePrintHtml(row?.[key] ?? "")}</td>`).join("")}
+      </tr>
+    `).join("");
+
+    return `
+      <div class="print-shell">
+        <div class="print-header">
+          <h1 class="print-title">Street Attribute Table</h1>
+          <p class="print-meta">Route file: ${escapePrintHtml(getCurrentRouteFileNameForPrint())}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}</p>
+        </div>
+        <section class="print-section">
+          <h3>Rows (${rows.length.toLocaleString()} visible${rows.length > maxRows ? `, showing first ${maxRows.toLocaleString()}` : ""})</h3>
+          <div class="print-section-body">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Selected</th>
+                  ${headers.map(h => `<th>${escapePrintHtml(h)}</th>`).join("")}
+                </tr>
+              </thead>
+              <tbody>
+                ${tableRows}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  const headers = Array.isArray(window._attributeHeaders) ? window._attributeHeaders : [];
+  const rows = getFilteredAttributeRows();
+  if (!headers.length || !rows.length) return null;
+  const maxRows = 4200;
+  const slice = rows.slice(0, maxRows);
+  const tableRows = slice.map((item, idx) => `
+    <tr>
+      <td>${idx + 1}</td>
+      <td>${attributeState.selectedRowIds.has(Number(item?.rowId)) ? "Yes" : ""}</td>
+      ${headers.map(h => `<td>${escapePrintHtml(item?.row?.[h] ?? "")}</td>`).join("")}
+    </tr>
+  `).join("");
+
+  return `
+    <div class="print-shell">
+      <div class="print-header">
+        <h1 class="print-title">Record Attribute Table</h1>
+        <p class="print-meta">Route file: ${escapePrintHtml(getCurrentRouteFileNameForPrint())}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}</p>
+      </div>
+      <section class="print-section">
+        <h3>Rows (${rows.length.toLocaleString()} visible${rows.length > maxRows ? `, showing first ${maxRows.toLocaleString()}` : ""})</h3>
+        <div class="print-section-body">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Selected</th>
+                ${headers.map(h => `<th>${escapePrintHtml(h)}</th>`).join("")}
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRows}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function buildSelectionReportPrintDocumentHtml() {
+  const selectedRecordIds = [...attributeState.selectedRowIds].filter(id => Number.isFinite(id)).sort((a, b) => a - b);
+  const selectedStreetIds = [...streetAttributeSelectedIds].filter(id => Number.isFinite(id)).sort((a, b) => a - b);
+  if (!selectedRecordIds.length && !selectedStreetIds.length) return null;
+
+  const allRows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const headers = Array.isArray(window._attributeHeaders) ? window._attributeHeaders : [];
+  const selectedRecordRows = selectedRecordIds
+    .map(id => ({ rowId: id, row: allRows[id] }))
+    .filter(item => item && item.row && typeof item.row === "object");
+
+  const routeKey = headers.find(h => /route/i.test(String(h || ""))) || null;
+  const dayKey = headers.find(h => /day/i.test(String(h || ""))) || null;
+  const addressKey = headers.find(h => /(address|csstrt|street|location)/i.test(String(h || ""))) || null;
+
+  const recordRowsHtml = selectedRecordRows.slice(0, 700).map(item => `
+    <tr>
+      <td>${item.rowId}</td>
+      <td>${escapePrintHtml(routeKey ? item.row?.[routeKey] : "")}</td>
+      <td>${escapePrintHtml(dayKey ? item.row?.[dayKey] : "")}</td>
+      <td>${escapePrintHtml(addressKey ? item.row?.[addressKey] : "")}</td>
+    </tr>
+  `).join("");
+
+  const selectedStreetRows = selectedStreetIds
+    .map(id => streetAttributeById.get(id)?.row)
+    .filter(Boolean);
+
+  const streetRowsHtml = selectedStreetRows.slice(0, 700).map(row => `
+    <tr>
+      <td>${escapePrintHtml(row?.id ?? "")}</td>
+      <td>${escapePrintHtml(row?.name ?? "")}</td>
+      <td>${escapePrintHtml(row?.highway ?? "")}</td>
+      <td>${escapePrintHtml(row?.maxspeed ?? "")}</td>
+      <td>${escapePrintHtml(row?.lanes ?? "")}</td>
+    </tr>
+  `).join("");
+
+  return `
+    <div class="print-shell">
+      <div class="print-header">
+        <h1 class="print-title">Selection Report</h1>
+        <p class="print-meta">Route file: ${escapePrintHtml(getCurrentRouteFileNameForPrint())}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}</p>
+      </div>
+
+      <section class="print-section">
+        <h3>Selection Totals</h3>
+        <div class="print-section-body">
+          <div class="cards">
+            <div class="card"><div class="card-label">Selected Records</div><div class="card-value">${selectedRecordIds.length.toLocaleString()}</div></div>
+            <div class="card"><div class="card-label">Selected Street Segments</div><div class="card-value">${selectedStreetIds.length.toLocaleString()}</div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="print-section">
+        <h3>Record Selections ${selectedRecordRows.length > 700 ? `(showing first 700 of ${selectedRecordRows.length.toLocaleString()})` : ""}</h3>
+        <div class="print-section-body">
+          ${selectedRecordRows.length
+            ? `<table>
+                <thead><tr><th>Row ID</th><th>Route</th><th>Day</th><th>Address/Location</th></tr></thead>
+                <tbody>${recordRowsHtml}</tbody>
+              </table>`
+            : '<p class="note">No record selections.</p>'}
+        </div>
+      </section>
+
+      <section class="print-section">
+        <h3>Street Segment Selections ${selectedStreetRows.length > 700 ? `(showing first 700 of ${selectedStreetRows.length.toLocaleString()})` : ""}</h3>
+        <div class="print-section-body">
+          ${selectedStreetRows.length
+            ? `<table>
+                <thead><tr><th>Way ID</th><th>Name</th><th>Class</th><th>Max Speed</th><th>Lanes</th></tr></thead>
+                <tbody>${streetRowsHtml}</tbody>
+              </table>`
+            : '<p class="note">No street segment selections.</p>'}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function buildOperationalReportPrintDocumentHtml() {
+  const routeFileName = getCurrentRouteFileNameForPrint();
+  const basemapLabel = getSelectedBasemapLabelForPrint();
+  const visibleRouteDayItems = getVisibleRouteDayLegendItemsForPrint();
+  const routeSummaryRows = Array.isArray(window._summaryRows) ? window._summaryRows : [];
+  const routeSummaryHeaders = Array.isArray(window._summaryHeaders) ? window._summaryHeaders : [];
+  const hasSummary = routeSummaryRows.length && routeSummaryHeaders.length;
+  const analytics = hasSummary ? extractSummaryAnalyticsForPrint(routeSummaryRows, routeSummaryHeaders) : null;
+
+  const summaryTableRows = hasSummary
+    ? routeSummaryRows.slice(0, 280).map((row, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        ${routeSummaryHeaders.map(h => `<td>${escapePrintHtml(row?.[h] ?? "")}</td>`).join("")}
+      </tr>
+    `).join("")
+    : "";
+
+  const filterRouteCount = document.querySelectorAll("#routeCheckboxes input:checked").length;
+  const filterDayCount = document.querySelectorAll("#dayCheckboxes input:checked").length;
+  const selectedCount = attributeTableMode === "streets" ? streetAttributeSelectedIds.size : attributeState.selectedRowIds.size;
+
+  return `
+    <div class="print-shell">
+      <div class="print-header">
+        <h1 class="print-title">Operational Report</h1>
+        <p class="print-meta">Route file: ${escapePrintHtml(routeFileName)}<br>Printed: ${escapePrintHtml(new Date().toLocaleString())}</p>
+      </div>
+
+      <section class="print-section">
+        <h3>Map Context</h3>
+        <div class="print-section-body">
+          <ul class="list">
+            <li>Basemap: ${escapePrintHtml(basemapLabel)}</li>
+            <li>Visible route/day layers: ${visibleRouteDayItems.length.toLocaleString()}</li>
+            <li>Routes currently checked in filter: ${filterRouteCount.toLocaleString()}</li>
+            <li>Days currently checked in filter: ${filterDayCount.toLocaleString()}</li>
+            <li>Street network layer: ${map.hasLayer(streetAttributeLayerGroup) ? "Visible" : "Hidden"} (${streetAttributeById.size.toLocaleString()} loaded segments)</li>
+            <li>Current selection mode: ${escapePrintHtml(attributeTableMode === "streets" ? "Street Attributes" : "Record Attributes")} (${selectedCount.toLocaleString()} selected)</li>
+          </ul>
+          <p class="note">For a cartographic sheet, use Print Center -> Map + Legend.</p>
+        </div>
+      </section>
+
+      <section class="print-section">
+        <h3>Summary KPI Snapshot</h3>
+        <div class="print-section-body">
+          ${analytics
+            ? `<div class="cards">
+                <div class="card"><div class="card-label">Route + Day Units</div><div class="card-value">${analytics.totals.routeDayCount.toLocaleString()}</div></div>
+                <div class="card"><div class="card-label">Total Stops</div><div class="card-value">${formatPrintNumber(analytics.totals.totalStops)}</div></div>
+                <div class="card"><div class="card-label">Total Miles</div><div class="card-value">${formatPrintNumber(analytics.totals.totalMiles)}</div></div>
+                <div class="card"><div class="card-label">Total Demand</div><div class="card-value">${formatPrintNumber(analytics.totals.totalDemand)}</div></div>
+                <div class="card"><div class="card-label">Total Trips</div><div class="card-value">${formatPrintNumber(analytics.totals.totalTrips)}</div></div>
+                <div class="card"><div class="card-label">Avg Time</div><div class="card-value">${formatPrintNumber(analytics.totals.avgTime)}h</div></div>
+              </div>`
+            : '<p class="note">No route summary is currently loaded.</p>'}
+        </div>
+      </section>
+
+      <section class="print-section">
+        <h3>Route Summary Table ${hasSummary ? `(showing first ${Math.min(routeSummaryRows.length, 280).toLocaleString()} of ${routeSummaryRows.length.toLocaleString()})` : ""}</h3>
+        <div class="print-section-body">
+          ${hasSummary
+            ? `<table>
+                <thead>
+                  <tr><th>#</th>${routeSummaryHeaders.map(h => `<th>${escapePrintHtml(h)}</th>`).join("")}</tr>
+                </thead>
+                <tbody>${summaryTableRows}</tbody>
+              </table>`
+            : '<p class="note">No summary table available.</p>'}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function initPrintCenterControls() {
+  const modal = document.getElementById("printCenterModal");
+  const openBtn = document.getElementById("printCenterBtn");
+  const closeBtn = document.getElementById("printCenterClose");
+  const statusNode = document.getElementById("printCenterStatus");
+  const printMapOnlyBtn = document.getElementById("printMapOnlyBtn");
+  const printMapLegendBtn = document.getElementById("printMapLegendBtn");
+  const printSummaryTableBtn = document.getElementById("printSummaryTableBtn");
+  const printSummaryVizBtn = document.getElementById("printSummaryVizBtn");
+  const printAttributeTableBtn = document.getElementById("printAttributeTableBtn");
+  const printSelectionReportBtn = document.getElementById("printSelectionReportBtn");
+  const printOperationalReportBtn = document.getElementById("printOperationalReportBtn");
+  const legendPositionSelect = document.getElementById("printLegendPositionSelect");
+  const mapSpanSelect = document.getElementById("printMapSpanSelect");
+  const outputScaleSelect = document.getElementById("printOutputScaleSelect");
+  const resolutionSelect = document.getElementById("printResolutionSelect");
+  const previewOverlay = document.getElementById("mapPrintPreviewOverlay");
+  const previewToolbar = document.getElementById("mapPrintPreviewToolbar");
+  const previewToolbarHandle = document.getElementById("mapPrintPreviewToolbarHandle");
+  const previewPopoutBtn = document.getElementById("mapPrintPreviewPopoutBtn");
+  const previewFrame = document.getElementById("mapPrintPreviewFrame");
+  const previewLegend = document.getElementById("mapPrintPreviewLegend");
+  const previewFrameMoveHandle = document.getElementById("mapPrintPreviewFrameMoveHandle");
+  const previewFrameResizeHandle = document.getElementById("mapPrintPreviewFrameResizeHandle");
+  const previewMapSpanSelect = document.getElementById("mapPrintPreviewMapSpan");
+  const previewLegendPositionSelect = document.getElementById("mapPrintPreviewLegendPosition");
+  const previewOutputScaleSelect = document.getElementById("mapPrintPreviewOutputScale");
+  const previewResolutionSelect = document.getElementById("mapPrintPreviewResolution");
+  const previewLegendToggle = document.getElementById("mapPrintPreviewLegendToggle");
+  const previewResetFrameBtn = document.getElementById("mapPrintPreviewResetFrame");
+  const previewResetLegendBtn = document.getElementById("mapPrintPreviewResetLegend");
+  const previewPrintBtn = document.getElementById("mapPrintPreviewPrintBtn");
+  const previewCloseBtn = document.getElementById("mapPrintPreviewCloseBtn");
+
+  if (!modal || !openBtn || !closeBtn) return;
+  if (openBtn.dataset.printCenterBound === "1") return;
+  openBtn.dataset.printCenterBound = "1";
+
+  const previewState = {
+    active: false,
+    withLegend: true,
+    frameMoved: false,
+    frameResized: false,
+    frameDragging: false,
+    frameResizing: false,
+    framePointerId: null,
+    frameResizePointerId: null,
+    frameDragOffsetX: 0,
+    frameDragOffsetY: 0,
+    frameStartRect: null,
+    frameResizeStartX: 0,
+    frameResizeStartY: 0,
+    toolbarDragging: false,
+    toolbarPointerId: null,
+    toolbarDragOffsetX: 0,
+    toolbarDragOffsetY: 0,
+    popoutWindow: null,
+    popoutOpen: false,
+    dragging: false,
+    dragPointerId: null,
+    dragOffsetX: 0,
+    dragOffsetY: 0,
+    legendMoved: false
+  };
+
+  const PRINT_LEGEND_POSITION_STORAGE_KEY = "printLegendPosition";
+  const PRINT_MAP_SPAN_STORAGE_KEY = "printMapSpan";
+  const PRINT_OUTPUT_SCALE_STORAGE_KEY = "printOutputScale";
+  const PRINT_RESOLUTION_SCALE_STORAGE_KEY = "printResolutionScale";
+
+  const getLegendPosition = () => {
+    const value = String(legendPositionSelect?.value || storageGet(PRINT_LEGEND_POSITION_STORAGE_KEY) || "outside-right");
+    return PRINT_LEGEND_POSITION_OPTIONS.has(value) ? value : "outside-right";
+  };
+
+  const getMapSpan = () => {
+    const value = String(mapSpanSelect?.value || storageGet(PRINT_MAP_SPAN_STORAGE_KEY) || "legend-right");
+    return PRINT_MAP_SPAN_OPTIONS.has(value) ? value : "legend-right";
+  };
+
+  const getOutputScaleValue = () => {
+    const value = String(outputScaleSelect?.value || storageGet(PRINT_OUTPUT_SCALE_STORAGE_KEY) || "1");
+    return PRINT_OUTPUT_SCALE_OPTIONS.has(value) ? value : "1";
+  };
+
+  const getResolutionScaleValue = () => {
+    const value = String(resolutionSelect?.value || storageGet(PRINT_RESOLUTION_SCALE_STORAGE_KEY) || "1");
+    return PRINT_RESOLUTION_SCALE_OPTIONS.has(value) ? value : "1";
+  };
+
+  const getOutputScale = () => Number(getOutputScaleValue());
+  const getResolutionScale = () => Number(getResolutionScaleValue());
+
+  const syncLayoutControlsFromStorage = () => {
+    if (legendPositionSelect) legendPositionSelect.value = getLegendPosition();
+    if (mapSpanSelect) mapSpanSelect.value = getMapSpan();
+    if (outputScaleSelect) outputScaleSelect.value = getOutputScaleValue();
+    if (resolutionSelect) resolutionSelect.value = getResolutionScaleValue();
+  };
+
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+  const setPreviewToolbarPosition = ({ left, top, right = null }) => {
+    if (!previewToolbar) return;
+    const toolbarRect = previewToolbar.getBoundingClientRect();
+    const width = Math.max(220, toolbarRect.width || 320);
+    const height = Math.max(120, toolbarRect.height || 220);
+    const safeLeft = clamp(Number(left) || 0, 6, Math.max(6, window.innerWidth - width - 6));
+    const safeTop = clamp(Number(top) || 0, 6, Math.max(6, window.innerHeight - height - 6));
+    previewToolbar.style.left = `${Math.round(safeLeft)}px`;
+    previewToolbar.style.top = `${Math.round(safeTop)}px`;
+    previewToolbar.style.right = right === null ? "auto" : String(right);
+  };
+
+  const resetPreviewToolbarPosition = () => {
+    if (!previewToolbar) return;
+    previewToolbar.style.left = "";
+    previewToolbar.style.top = "";
+    previewToolbar.style.right = "";
+  };
+
+  const setPreviewPopoutMode = enabled => {
+    if (!previewOverlay) return;
+    previewOverlay.classList.toggle("popout-mode", !!enabled);
+  };
+
+  const getPreviewFrameRectForSpan = spanValue => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const span = PRINT_MAP_SPAN_OPTIONS.has(String(spanValue)) ? String(spanValue) : "legend-right";
+    if (span === "full") {
+      return { left: 8, top: 8, width: Math.max(140, vw - 16), height: Math.max(140, vh - 16) };
+    }
+    if (span === "wide") {
+      return { left: Math.round(vw * 0.01), top: Math.round(vh * 0.08), width: Math.max(140, Math.round(vw * 0.98)), height: Math.max(140, Math.round(vh * 0.84)) };
+    }
+    if (span === "standard") {
+      return { left: Math.round(vw * 0.06), top: Math.round(vh * 0.1), width: Math.max(140, Math.round(vw * 0.88)), height: Math.max(140, Math.round(vh * 0.8)) };
+    }
+    if (span === "compact") {
+      return { left: Math.round(vw * 0.14), top: Math.round(vh * 0.14), width: Math.max(140, Math.round(vw * 0.72)), height: Math.max(140, Math.round(vh * 0.72)) };
+    }
+    if (span === "legend-left") {
+      const frameWidth = clamp(vw - 420, 240, vw - 24);
+      return { left: vw - frameWidth - 14, top: 26, width: frameWidth, height: Math.max(160, vh - 52) };
+    }
+    const frameWidth = clamp(vw - 420, 240, vw - 24);
+    return { left: 14, top: 26, width: frameWidth, height: Math.max(160, vh - 52) };
+  };
+
+  const getCurrentPreviewFrameRect = () => {
+    if (!previewFrame) return null;
+    const rect = previewFrame.getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+  };
+
+  const clampPreviewFrameRect = rawRect => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const minW = 180;
+    const minH = 140;
+    const width = clamp(Number(rawRect?.width) || minW, minW, Math.max(minW, vw - 12));
+    const height = clamp(Number(rawRect?.height) || minH, minH, Math.max(minH, vh - 12));
+    const left = clamp(Number(rawRect?.left) || 0, 6, Math.max(6, vw - width - 6));
+    const top = clamp(Number(rawRect?.top) || 0, 6, Math.max(6, vh - height - 6));
+    return { left, top, width, height };
+  };
+
+  const setPreviewFrameRect = (rawRect, { markMoved = false, markResized = false } = {}) => {
+    if (!previewFrame) return null;
+    const rect = clampPreviewFrameRect(rawRect);
+    previewFrame.style.left = `${Math.round(rect.left)}px`;
+    previewFrame.style.top = `${Math.round(rect.top)}px`;
+    previewFrame.style.width = `${Math.round(rect.width)}px`;
+    previewFrame.style.height = `${Math.round(rect.height)}px`;
+    if (markMoved) previewState.frameMoved = true;
+    if (markResized) previewState.frameResized = true;
+    return rect;
+  };
+
+  const applyPreviewFrameRectPreset = () => {
+    if (!previewMapSpanSelect) return null;
+    const rect = getPreviewFrameRectForSpan(previewMapSpanSelect.value);
+    previewState.frameMoved = false;
+    previewState.frameResized = false;
+    return setPreviewFrameRect(rect, { markMoved: false, markResized: false });
+  };
+
+  const setPreviewLegendPosition = (left, top, { markMoved = false } = {}) => {
+    if (!previewLegend || !previewFrame) return;
+    const frameRect = previewFrame.getBoundingClientRect();
+    const legendRect = previewLegend.getBoundingClientRect();
+    const legendW = Math.max(90, legendRect.width || 260);
+    const legendH = Math.max(70, legendRect.height || 220);
+    const minLeft = -frameRect.left + 8;
+    const maxLeft = window.innerWidth - frameRect.left - legendW - 8;
+    const minTop = -frameRect.top + 8;
+    const maxTop = window.innerHeight - frameRect.top - legendH - 8;
+    const safeLeft = clamp(Number(left) || 0, minLeft, maxLeft);
+    const safeTop = clamp(Number(top) || 0, minTop, maxTop);
+    previewLegend.style.left = `${Math.round(safeLeft)}px`;
+    previewLegend.style.top = `${Math.round(safeTop)}px`;
+    if (markMoved) previewState.legendMoved = true;
+  };
+
+  const applyPreviewLegendPreset = (preset, { markMoved = false } = {}) => {
+    if (!previewLegend || !previewFrame) return;
+    const frameRect = previewFrame.getBoundingClientRect();
+    const legendRect = previewLegend.getBoundingClientRect();
+    const legendW = Math.max(90, legendRect.width || 260);
+    const legendH = Math.max(70, legendRect.height || 220);
+    const margin = 12;
+    const outsideGap = 16;
+    let left = frameRect.width - legendW - margin;
+    let top = margin;
+    const value = PRINT_LEGEND_POSITION_OPTIONS.has(String(preset)) ? String(preset) : "outside-right";
+    if (value === "top-left") {
+      left = margin;
+      top = margin;
+    } else if (value === "top-right") {
+      left = frameRect.width - legendW - margin;
+      top = margin;
+    } else if (value === "bottom-left") {
+      left = margin;
+      top = frameRect.height - legendH - margin;
+    } else if (value === "bottom-right") {
+      left = frameRect.width - legendW - margin;
+      top = frameRect.height - legendH - margin;
+    } else if (value === "outside-left") {
+      left = -legendW - outsideGap;
+      top = margin;
+    } else {
+      left = frameRect.width + outsideGap;
+      top = margin;
+    }
+    setPreviewLegendPosition(left, top, { markMoved });
+  };
+
+  const setStatus = (message, type = "") => {
+    if (!statusNode) return;
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (type === "error") statusNode.classList.add("error");
+    if (type === "success") statusNode.classList.add("success");
+  };
+
+  const openModal = () => {
+    syncLayoutControlsFromStorage();
+    setStatus("Ready.");
+    openBtn.classList.add("active");
+    modal.style.display = "flex";
+  };
+
+  const closeModal = () => {
+    openBtn.classList.remove("active");
+    modal.style.display = "none";
+  };
+
+  const openWindowAndPrint = (title, html, emptyMessage) => {
+    if (!html) {
+      setStatus(emptyMessage || "Nothing available to print right now.", "error");
+      return;
+    }
+    const win = openPrintDocumentWindow({
+      title,
+      bodyHtml: html,
+      autoPrint: true
+    });
+    if (!win) {
+      setStatus("Unable to open print window. Check browser pop-up settings.", "error");
+      return;
+    }
+    setStatus("Print window opened.", "success");
+  };
+
+  const getPreviewControlState = () => ({
+    mapSpan: String(previewMapSpanSelect?.value || getMapSpan()),
+    legendPosition: String(previewLegendPositionSelect?.value || getLegendPosition()),
+    outputScale: String(previewOutputScaleSelect?.value || getOutputScaleValue()),
+    resolutionScale: String(previewResolutionSelect?.value || getResolutionScaleValue()),
+    legendVisible: !!previewLegendToggle?.checked,
+    popoutOpen: !!previewState.popoutOpen
+  });
+
+  const setPreviewControlState = ({ mapSpan, legendPosition, outputScale, resolutionScale, legendVisible } = {}) => {
+    if (previewMapSpanSelect && mapSpan && PRINT_MAP_SPAN_OPTIONS.has(String(mapSpan))) {
+      previewMapSpanSelect.value = String(mapSpan);
+      if (mapSpanSelect) mapSpanSelect.value = String(mapSpan);
+      storageSet(PRINT_MAP_SPAN_STORAGE_KEY, String(mapSpan));
+      applyPreviewFrameRectPreset();
+      if (!previewState.legendMoved) {
+        applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+      }
+    }
+
+    if (previewLegendPositionSelect && legendPosition && PRINT_LEGEND_POSITION_OPTIONS.has(String(legendPosition))) {
+      previewLegendPositionSelect.value = String(legendPosition);
+      if (legendPositionSelect) legendPositionSelect.value = String(legendPosition);
+      storageSet(PRINT_LEGEND_POSITION_STORAGE_KEY, String(legendPosition));
+      previewState.legendMoved = false;
+      applyPreviewLegendPreset(String(legendPosition), { markMoved: false });
+    }
+
+    if (previewOutputScaleSelect && outputScale && PRINT_OUTPUT_SCALE_OPTIONS.has(String(outputScale))) {
+      previewOutputScaleSelect.value = String(outputScale);
+      if (outputScaleSelect) outputScaleSelect.value = String(outputScale);
+      storageSet(PRINT_OUTPUT_SCALE_STORAGE_KEY, String(outputScale));
+    }
+
+    if (previewResolutionSelect && resolutionScale && PRINT_RESOLUTION_SCALE_OPTIONS.has(String(resolutionScale))) {
+      previewResolutionSelect.value = String(resolutionScale);
+      if (resolutionSelect) resolutionSelect.value = String(resolutionScale);
+      storageSet(PRINT_RESOLUTION_SCALE_STORAGE_KEY, String(resolutionScale));
+    }
+
+    if (previewLegendToggle && typeof legendVisible === "boolean") {
+      previewLegendToggle.checked = !!legendVisible;
+      previewLegend?.classList.toggle("hidden", !previewLegendToggle.checked);
+    }
+  };
+
+  const notifyPreviewPopoutState = () => {
+    const popWin = previewState.popoutWindow;
+    if (!popWin || popWin.closed) return;
+    try {
+      popWin.postMessage(
+        {
+          type: "tds-pak-map-print-preview-state",
+          payload: getPreviewControlState()
+        },
+        "*"
+      );
+    } catch (_) {}
+  };
+
+  const openPreviewPopoutWindow = () => {
+    const existing = previewState.popoutWindow;
+    if (existing && !existing.closed) {
+      existing.focus();
+      setPreviewPopoutMode(true);
+      previewState.popoutOpen = true;
+      notifyPreviewPopoutState();
+      return;
+    }
+
+    const pop = window.open("", "tdsPakMapPrintPreviewControls", "width=380,height=650,resizable=yes,scrollbars=yes");
+    if (!pop) {
+      setStatus("Could not open popout controls window (popup blocked).", "error");
+      return;
+    }
+    previewState.popoutWindow = pop;
+    previewState.popoutOpen = true;
+    setPreviewPopoutMode(true);
+
+    const stateSeed = JSON.stringify(getPreviewControlState()).replace(/</g, "\\u003c");
+    pop.document.write(`
+      <html>
+        <head>
+          <title>Map Print Preview Controls</title>
+          <meta charset="UTF-8" />
+          <style>
+            :root { --bg:#1a1510; --panel:#2a2017; --line:#6f5a40; --text:#f4e3cf; --muted:#dcc3a5; --btn:#4d3a29; --btnLine:#7c6549; --accent:#73bfff; }
+            * { box-sizing:border-box; }
+            body { margin:0; padding:10px; background:var(--bg); color:var(--text); font-family:"Segoe UI", Roboto, Arial, sans-serif; }
+            .shell { border:1px solid var(--line); border-radius:12px; background:linear-gradient(180deg,#302419 0%, #241c14 100%); padding:10px; }
+            h3 { margin:0; font-size:16px; }
+            p { margin:6px 0 10px; font-size:12px; color:var(--muted); line-height:1.4; }
+            .guide { border:1px solid var(--line); border-radius:10px; padding:8px 9px; background:rgba(39,30,21,.75); margin-bottom:10px; }
+            .guide-row { display:flex; justify-content:space-between; gap:8px; font-size:11px; margin-bottom:6px; color:#ecd5b7; }
+            .guide-row:last-child { margin-bottom:0; }
+            label { display:block; margin:8px 0 4px; font-size:11px; font-weight:700; letter-spacing:.02em; text-transform:uppercase; color:#f0d8bb; }
+            select { width:100%; min-height:34px; border:1px solid #7b654a; border-radius:8px; background:#2a2117; color:#fff2e2; padding:0 10px; }
+            .check { display:inline-flex; align-items:center; gap:8px; margin-top:10px; font-size:12px; font-weight:600; color:#ecd6ba; }
+            .actions { margin-top:10px; display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+            button { min-height:32px; border-radius:8px; border:1px solid var(--btnLine); background:linear-gradient(165deg,#5f4933 0%, #4a3928 100%); color:#fff3e3; font-size:12px; font-weight:700; cursor:pointer; }
+            button:hover { background:linear-gradient(165deg,#6d5338 0%, #59442f 100%); }
+            .danger { border-color:#95625f; background:linear-gradient(165deg,#6b3d3a 0%, #55312f 100%); }
+            .status { margin-top:8px; border:1px solid rgba(111,90,64,.7); border-radius:8px; background:rgba(34,26,18,.75); color:#ebd7c0; font-size:11px; padding:6px 8px; min-height:16px; }
+          </style>
+        </head>
+        <body>
+          <div class="shell">
+            <h3>Map Print Preview</h3>
+            <p>This control window stays out of the map so you can edit print layout without blocking view.</p>
+            <div class="guide">
+              <div class="guide-row"><span>Move frame</span><strong>Drag blue header</strong></div>
+              <div class="guide-row"><span>Resize frame</span><strong>Drag corner handle</strong></div>
+              <div class="guide-row"><span>Move legend</span><strong>Drag legend card</strong></div>
+            </div>
+            <label for="mapSpan">Map Span</label>
+            <select id="mapSpan">
+              <option value="legend-right">Legend Right Span</option>
+              <option value="legend-left">Legend Left Span</option>
+              <option value="full">Full Page</option>
+              <option value="wide">Wide</option>
+              <option value="standard">Standard</option>
+              <option value="compact">Compact</option>
+            </select>
+            <label for="legendPos">Legend Preset</label>
+            <select id="legendPos">
+              <option value="outside-right">Outside Right</option>
+              <option value="outside-left">Outside Left</option>
+              <option value="top-right">Top Right</option>
+              <option value="top-left">Top Left</option>
+              <option value="bottom-right">Bottom Right</option>
+              <option value="bottom-left">Bottom Left</option>
+            </select>
+            <label for="outputScale">Print Size</label>
+            <select id="outputScale">
+              <option value="1">100% (Match Preview)</option>
+              <option value="0.95">95%</option>
+              <option value="0.9">90%</option>
+              <option value="0.85">85%</option>
+            </select>
+            <label for="resolutionScale">Map Resolution</label>
+            <select id="resolutionScale">
+              <option value="1">Standard</option>
+              <option value="1.5">High (1.5x)</option>
+              <option value="2">Very High (2x)</option>
+            </select>
+            <label class="check"><input id="legendVisible" type="checkbox" checked />Include legend in print</label>
+            <div class="actions">
+              <button id="resetFrame" type="button">Reset Frame</button>
+              <button id="resetLegend" type="button">Reset Legend</button>
+              <button id="printNow" type="button">Print</button>
+              <button id="dock" type="button">Dock Controls</button>
+              <button id="closePreview" class="danger" type="button">Close Preview</button>
+              <button id="closeWindow" class="danger" type="button">Close Window</button>
+            </div>
+            <div id="status" class="status">Connected.</div>
+          </div>
+          <script>
+            const stateSeed = ${stateSeed};
+            const mapSpan = document.getElementById("mapSpan");
+            const legendPos = document.getElementById("legendPos");
+            const outputScale = document.getElementById("outputScale");
+            const resolutionScale = document.getElementById("resolutionScale");
+            const legendVisible = document.getElementById("legendVisible");
+            const status = document.getElementById("status");
+
+            function api() {
+              return window.opener && window.opener.__mapPrintPreviewApi ? window.opener.__mapPrintPreviewApi : null;
+            }
+
+            function setStatus(msg) {
+              status.textContent = msg;
+            }
+
+            function applyState(s) {
+              if (!s) return;
+              if (s.mapSpan) mapSpan.value = s.mapSpan;
+              if (s.legendPosition) legendPos.value = s.legendPosition;
+              if (s.outputScale) outputScale.value = s.outputScale;
+              if (s.resolutionScale) resolutionScale.value = s.resolutionScale;
+              legendVisible.checked = !!s.legendVisible;
+            }
+
+            applyState(stateSeed);
+
+            window.addEventListener("message", ev => {
+              if (!ev || !ev.data || ev.data.type !== "tds-pak-map-print-preview-state") return;
+              applyState(ev.data.payload || {});
+            });
+
+            mapSpan.addEventListener("change", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.setState({ mapSpan: mapSpan.value });
+              setStatus("Map span updated.");
+            });
+
+            legendPos.addEventListener("change", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.setState({ legendPosition: legendPos.value });
+              setStatus("Legend preset updated.");
+            });
+
+            outputScale.addEventListener("change", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.setState({ outputScale: outputScale.value });
+              setStatus("Print size updated.");
+            });
+
+            resolutionScale.addEventListener("change", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.setState({ resolutionScale: resolutionScale.value });
+              setStatus("Map resolution updated.");
+            });
+
+            legendVisible.addEventListener("change", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.setState({ legendVisible: !!legendVisible.checked });
+              setStatus("Legend visibility updated.");
+            });
+
+            document.getElementById("resetFrame").addEventListener("click", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.resetFrame();
+              setStatus("Frame reset.");
+            });
+
+            document.getElementById("resetLegend").addEventListener("click", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.resetLegend();
+              setStatus("Legend reset.");
+            });
+
+            document.getElementById("printNow").addEventListener("click", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.printNow();
+            });
+
+            document.getElementById("dock").addEventListener("click", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.setPopout(false);
+              setStatus("Docked controls back in main window.");
+            });
+
+            document.getElementById("closePreview").addEventListener("click", () => {
+              const a = api();
+              if (!a) return setStatus("Connection lost.");
+              a.closePreview();
+              window.close();
+            });
+
+            document.getElementById("closeWindow").addEventListener("click", () => {
+              window.close();
+            });
+
+            window.addEventListener("beforeunload", () => {
+              const a = api();
+              if (a) a.onPopoutClosed();
+            });
+          <\/script>
+        </body>
+      </html>
+    `);
+    pop.document.close();
+    pop.focus();
+    notifyPreviewPopoutState();
+  };
+
+  const closeMapPrintPreview = () => {
+    if (!previewOverlay) return;
+    if (previewToolbarHandle && previewState.toolbarPointerId !== null && typeof previewToolbarHandle.releasePointerCapture === "function") {
+      try { previewToolbarHandle.releasePointerCapture(previewState.toolbarPointerId); } catch (_) {}
+    }
+    if (previewFrameMoveHandle && previewState.framePointerId !== null && typeof previewFrameMoveHandle.releasePointerCapture === "function") {
+      try { previewFrameMoveHandle.releasePointerCapture(previewState.framePointerId); } catch (_) {}
+    }
+    if (previewFrameResizeHandle && previewState.frameResizePointerId !== null && typeof previewFrameResizeHandle.releasePointerCapture === "function") {
+      try { previewFrameResizeHandle.releasePointerCapture(previewState.frameResizePointerId); } catch (_) {}
+    }
+    if (previewLegend && previewState.dragPointerId !== null && typeof previewLegend.releasePointerCapture === "function") {
+      try { previewLegend.releasePointerCapture(previewState.dragPointerId); } catch (_) {}
+    }
+    previewOverlay.classList.remove("show");
+    previewOverlay.setAttribute("aria-hidden", "true");
+    setPreviewPopoutMode(false);
+    previewState.active = false;
+    previewState.frameDragging = false;
+    previewState.frameResizing = false;
+    previewState.framePointerId = null;
+    previewState.frameResizePointerId = null;
+    previewState.toolbarDragging = false;
+    previewState.toolbarPointerId = null;
+    previewState.dragging = false;
+    previewState.dragPointerId = null;
+    previewFrame?.classList.remove("moving", "resizing");
+    previewLegend?.classList.remove("dragging");
+    const popWin = previewState.popoutWindow;
+    if (popWin && !popWin.closed) {
+      try { popWin.close(); } catch (_) {}
+    }
+    previewState.popoutWindow = null;
+    previewState.popoutOpen = false;
+  };
+
+  const openMapPrintPreview = ({ withLegend }) => {
+    if (!previewOverlay || !previewFrame || !previewLegend || !previewMapSpanSelect || !previewLegendPositionSelect || !previewOutputScaleSelect || !previewResolutionSelect || !previewLegendToggle) {
+      runMapPrintFlow({
+        withLegend: !!withLegend,
+        mapSpan: getMapSpan(),
+        legendPosition: getLegendPosition(),
+        outputScale: getOutputScale(),
+        resolutionScale: getResolutionScale()
+      });
+      return;
+    }
+
+    previewState.active = true;
+    previewState.withLegend = !!withLegend;
+    previewState.frameMoved = false;
+    previewState.frameResized = false;
+    previewState.legendMoved = false;
+
+    const startSpan = getMapSpan();
+    const startLegendPosition = getLegendPosition();
+    const startOutputScale = getOutputScaleValue();
+    const startResolutionScale = getResolutionScaleValue();
+
+    previewMapSpanSelect.value = startSpan;
+    previewLegendPositionSelect.value = startLegendPosition;
+    previewOutputScaleSelect.value = startOutputScale;
+    previewResolutionSelect.value = startResolutionScale;
+    previewLegendToggle.checked = !!withLegend;
+    previewLegend.innerHTML = buildMapLegendHtmlForPrint();
+
+    previewOverlay.classList.add("show");
+    previewOverlay.setAttribute("aria-hidden", "false");
+    setPreviewPopoutMode(!!previewState.popoutOpen);
+    previewFrame.classList.remove("moving", "resizing");
+    applyPreviewFrameRectPreset();
+    previewLegend.classList.toggle("hidden", !previewLegendToggle.checked);
+
+    requestAnimationFrame(() => {
+      applyPreviewLegendPreset(previewLegendPositionSelect.value, { markMoved: false });
+      try { map.invalidateSize({ pan: false }); } catch (_) {}
+      notifyPreviewPopoutState();
+    });
+  };
+
+  openBtn.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+
+  legendPositionSelect?.addEventListener("change", () => {
+    storageSet(PRINT_LEGEND_POSITION_STORAGE_KEY, getLegendPosition());
+  });
+
+  mapSpanSelect?.addEventListener("change", () => {
+    storageSet(PRINT_MAP_SPAN_STORAGE_KEY, getMapSpan());
+  });
+
+  outputScaleSelect?.addEventListener("change", () => {
+    storageSet(PRINT_OUTPUT_SCALE_STORAGE_KEY, getOutputScaleValue());
+    if (previewOutputScaleSelect) previewOutputScaleSelect.value = getOutputScaleValue();
+    notifyPreviewPopoutState();
+  });
+
+  resolutionSelect?.addEventListener("change", () => {
+    storageSet(PRINT_RESOLUTION_SCALE_STORAGE_KEY, getResolutionScaleValue());
+    if (previewResolutionSelect) previewResolutionSelect.value = getResolutionScaleValue();
+    notifyPreviewPopoutState();
+  });
+
+  syncLayoutControlsFromStorage();
+
+  previewMapSpanSelect?.addEventListener("change", () => {
+    if (mapSpanSelect) mapSpanSelect.value = previewMapSpanSelect.value;
+    storageSet(PRINT_MAP_SPAN_STORAGE_KEY, getMapSpan());
+    applyPreviewFrameRectPreset();
+    if (!previewState.legendMoved) {
+      applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+    }
+    notifyPreviewPopoutState();
+  });
+
+  previewLegendPositionSelect?.addEventListener("change", () => {
+    if (legendPositionSelect) legendPositionSelect.value = previewLegendPositionSelect.value;
+    storageSet(PRINT_LEGEND_POSITION_STORAGE_KEY, getLegendPosition());
+    previewState.legendMoved = false;
+    applyPreviewLegendPreset(previewLegendPositionSelect.value, { markMoved: false });
+    notifyPreviewPopoutState();
+  });
+
+  previewOutputScaleSelect?.addEventListener("change", () => {
+    if (!PRINT_OUTPUT_SCALE_OPTIONS.has(String(previewOutputScaleSelect.value))) {
+      previewOutputScaleSelect.value = getOutputScaleValue();
+    }
+    if (outputScaleSelect) outputScaleSelect.value = previewOutputScaleSelect.value;
+    storageSet(PRINT_OUTPUT_SCALE_STORAGE_KEY, previewOutputScaleSelect.value);
+    notifyPreviewPopoutState();
+  });
+
+  previewResolutionSelect?.addEventListener("change", () => {
+    if (!PRINT_RESOLUTION_SCALE_OPTIONS.has(String(previewResolutionSelect.value))) {
+      previewResolutionSelect.value = getResolutionScaleValue();
+    }
+    if (resolutionSelect) resolutionSelect.value = previewResolutionSelect.value;
+    storageSet(PRINT_RESOLUTION_SCALE_STORAGE_KEY, previewResolutionSelect.value);
+    notifyPreviewPopoutState();
+  });
+
+  previewLegendToggle?.addEventListener("change", () => {
+    if (!previewLegend) return;
+    previewLegend.classList.toggle("hidden", !previewLegendToggle.checked);
+    notifyPreviewPopoutState();
+  });
+
+  const resetPreviewFrame = () => {
+    applyPreviewFrameRectPreset();
+    if (!previewState.legendMoved) {
+      applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+    }
+    notifyPreviewPopoutState();
+  };
+
+  const resetPreviewLegend = () => {
+    previewState.legendMoved = false;
+    applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+    notifyPreviewPopoutState();
+  };
+
+  previewResetFrameBtn?.addEventListener("click", resetPreviewFrame);
+  previewResetLegendBtn?.addEventListener("click", resetPreviewLegend);
+
+  previewCloseBtn?.addEventListener("click", () => {
+    closeMapPrintPreview();
+  });
+
+  const printFromPreview = () => {
+    if (!previewMapSpanSelect || !previewLegendPositionSelect || !previewOutputScaleSelect || !previewResolutionSelect || !previewLegendToggle || !previewLegend || !previewFrame) {
+      closeMapPrintPreview();
+      runMapPrintFlow({
+        withLegend: !!previewState.withLegend,
+        mapSpan: getMapSpan(),
+        legendPosition: getLegendPosition(),
+        outputScale: getOutputScale(),
+        resolutionScale: getResolutionScale()
+      });
+      return;
+    }
+
+    const mapSpan = previewMapSpanSelect.value;
+    const legendPosition = previewLegendPositionSelect.value;
+    const outputScaleValue = PRINT_OUTPUT_SCALE_OPTIONS.has(String(previewOutputScaleSelect.value))
+      ? String(previewOutputScaleSelect.value)
+      : getOutputScaleValue();
+    const resolutionScaleValue = PRINT_RESOLUTION_SCALE_OPTIONS.has(String(previewResolutionSelect.value))
+      ? String(previewResolutionSelect.value)
+      : getResolutionScaleValue();
+    const outputScale = Number(outputScaleValue);
+    const resolutionScale = Number(resolutionScaleValue);
+    const withLegend = !!previewLegendToggle.checked;
+    if (mapSpanSelect) mapSpanSelect.value = mapSpan;
+    if (legendPositionSelect) legendPositionSelect.value = legendPosition;
+    if (outputScaleSelect) outputScaleSelect.value = outputScaleValue;
+    if (resolutionSelect) resolutionSelect.value = resolutionScaleValue;
+    storageSet(PRINT_MAP_SPAN_STORAGE_KEY, getMapSpan());
+    storageSet(PRINT_LEGEND_POSITION_STORAGE_KEY, getLegendPosition());
+    storageSet(PRINT_OUTPUT_SCALE_STORAGE_KEY, outputScaleValue);
+    storageSet(PRINT_RESOLUTION_SCALE_STORAGE_KEY, resolutionScaleValue);
+
+    let customLegendLeftPx = NaN;
+    let customLegendTopPx = NaN;
+    let customLegendLeftRatio = NaN;
+    let customLegendTopRatio = NaN;
+    if (withLegend) {
+      const legendRect = previewLegend.getBoundingClientRect();
+      customLegendLeftPx = legendRect.left;
+      customLegendTopPx = legendRect.top;
+      if (window.innerWidth > 0 && window.innerHeight > 0) {
+        customLegendLeftRatio = legendRect.left / window.innerWidth;
+        customLegendTopRatio = legendRect.top / window.innerHeight;
+      }
+    }
+
+    let customMapLeftPx = NaN;
+    let customMapTopPx = NaN;
+    let customMapWidthPx = NaN;
+    let customMapHeightPx = NaN;
+    let customMapLeftRatio = NaN;
+    let customMapTopRatio = NaN;
+    let customMapWidthRatio = NaN;
+    let customMapHeightRatio = NaN;
+    const frameRect = previewFrame.getBoundingClientRect();
+    if (frameRect && frameRect.width > 120 && frameRect.height > 120) {
+      customMapLeftPx = frameRect.left;
+      customMapTopPx = frameRect.top;
+      customMapWidthPx = frameRect.width;
+      customMapHeightPx = frameRect.height;
+      if (window.innerWidth > 0 && window.innerHeight > 0) {
+        customMapLeftRatio = frameRect.left / window.innerWidth;
+        customMapTopRatio = frameRect.top / window.innerHeight;
+        customMapWidthRatio = frameRect.width / window.innerWidth;
+        customMapHeightRatio = frameRect.height / window.innerHeight;
+      }
+    }
+
+    closeMapPrintPreview();
+    runMapPrintFlow({
+      withLegend,
+      mapSpan,
+      legendPosition,
+      customLegendLeftPx,
+      customLegendTopPx,
+      customLegendLeftRatio,
+      customLegendTopRatio,
+      customMapLeftPx,
+      customMapTopPx,
+      customMapWidthPx,
+      customMapHeightPx,
+      customMapLeftRatio,
+      customMapTopRatio,
+      customMapWidthRatio,
+      customMapHeightRatio,
+      outputScale,
+      resolutionScale
+    });
+  };
+
+  previewPrintBtn?.addEventListener("click", printFromPreview);
+
+  const setPreviewPopout = enabled => {
+    const next = !!enabled;
+    if (!previewState.active) return;
+    if (next) {
+      openPreviewPopoutWindow();
+      return;
+    }
+    const popWin = previewState.popoutWindow;
+    if (popWin && !popWin.closed) {
+      try { popWin.close(); } catch (_) {}
+    }
+    previewState.popoutWindow = null;
+    previewState.popoutOpen = false;
+    setPreviewPopoutMode(false);
+    notifyPreviewPopoutState();
+  };
+
+  window.__mapPrintPreviewApi = {
+    getState: () => getPreviewControlState(),
+    setState: next => {
+      setPreviewControlState(next || {});
+      notifyPreviewPopoutState();
+    },
+    resetFrame: () => {
+      resetPreviewFrame();
+    },
+    resetLegend: () => {
+      resetPreviewLegend();
+    },
+    printNow: () => {
+      printFromPreview();
+    },
+    closePreview: () => {
+      closeMapPrintPreview();
+    },
+    setPopout: enabled => {
+      setPreviewPopout(!!enabled);
+    },
+    onPopoutClosed: () => {
+      previewState.popoutWindow = null;
+      previewState.popoutOpen = false;
+      if (previewState.active) {
+        setPreviewPopoutMode(false);
+      }
+    }
+  };
+
+  previewPopoutBtn?.addEventListener("click", () => {
+    setPreviewPopout(true);
+  });
+
+  previewOverlay?.addEventListener("click", event => {
+    if (event.target === previewOverlay) closeMapPrintPreview();
+  });
+
+  previewToolbarHandle?.addEventListener("pointerdown", event => {
+    if (!previewState.active || !previewToolbar || !previewToolbarHandle) return;
+    if (event.button !== 0) return;
+    if (event.target && event.target.closest("button")) return;
+    const toolbarRect = previewToolbar.getBoundingClientRect();
+    previewState.toolbarDragging = true;
+    previewState.toolbarPointerId = event.pointerId;
+    previewState.toolbarDragOffsetX = event.clientX - toolbarRect.left;
+    previewState.toolbarDragOffsetY = event.clientY - toolbarRect.top;
+    if (typeof previewToolbarHandle.setPointerCapture === "function") {
+      try { previewToolbarHandle.setPointerCapture(event.pointerId); } catch (_) {}
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  });
+
+  const onPreviewToolbarPointerMove = event => {
+    if (!previewState.toolbarDragging || !previewToolbar) return;
+    if (previewState.toolbarPointerId !== null && event.pointerId !== previewState.toolbarPointerId) return;
+    const left = event.clientX - previewState.toolbarDragOffsetX;
+    const top = event.clientY - previewState.toolbarDragOffsetY;
+    setPreviewToolbarPosition({ left, top, right: "auto" });
+    event.preventDefault();
+  };
+
+  const endPreviewToolbarPointer = event => {
+    if (!previewState.toolbarDragging) return;
+    if (previewState.toolbarPointerId !== null && event && event.pointerId !== undefined && event.pointerId !== previewState.toolbarPointerId) {
+      return;
+    }
+    previewState.toolbarDragging = false;
+    previewState.toolbarPointerId = null;
+    if (event && previewToolbarHandle && typeof previewToolbarHandle.releasePointerCapture === "function") {
+      try { previewToolbarHandle.releasePointerCapture(event.pointerId); } catch (_) {}
+    }
+  };
+
+  previewToolbarHandle?.addEventListener("pointermove", onPreviewToolbarPointerMove);
+  previewToolbarHandle?.addEventListener("pointerup", endPreviewToolbarPointer);
+  previewToolbarHandle?.addEventListener("pointercancel", endPreviewToolbarPointer);
+
+  previewFrameMoveHandle?.addEventListener("pointerdown", event => {
+    if (!previewState.active || !previewFrame) return;
+    if (event.button !== 0) return;
+    const rect = getCurrentPreviewFrameRect();
+    if (!rect) return;
+    previewState.frameResizing = false;
+    previewState.frameResizePointerId = null;
+    previewState.frameStartRect = null;
+    previewFrame.classList.remove("resizing");
+    previewState.frameDragging = true;
+    previewState.framePointerId = event.pointerId;
+    previewState.frameDragOffsetX = event.clientX - rect.left;
+    previewState.frameDragOffsetY = event.clientY - rect.top;
+    previewFrame.classList.add("moving");
+    if (typeof previewFrameMoveHandle.setPointerCapture === "function") {
+      try { previewFrameMoveHandle.setPointerCapture(event.pointerId); } catch (_) {}
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  });
+
+  previewFrameResizeHandle?.addEventListener("pointerdown", event => {
+    if (!previewState.active || !previewFrame) return;
+    if (event.button !== 0) return;
+    const rect = getCurrentPreviewFrameRect();
+    if (!rect) return;
+    previewState.frameDragging = false;
+    previewState.framePointerId = null;
+    previewFrame.classList.remove("moving");
+    previewState.frameResizing = true;
+    previewState.frameResizePointerId = event.pointerId;
+    previewState.frameStartRect = rect;
+    previewState.frameResizeStartX = event.clientX;
+    previewState.frameResizeStartY = event.clientY;
+    previewFrame.classList.add("resizing");
+    if (typeof previewFrameResizeHandle.setPointerCapture === "function") {
+      try { previewFrameResizeHandle.setPointerCapture(event.pointerId); } catch (_) {}
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  });
+
+  const onPreviewFramePointerMove = event => {
+    if (!previewState.active || !previewFrame) return;
+
+    if (previewState.frameDragging) {
+      if (previewState.framePointerId !== null && event.pointerId !== previewState.framePointerId) return;
+      const current = getCurrentPreviewFrameRect();
+      if (!current) return;
+      const left = event.clientX - previewState.frameDragOffsetX;
+      const top = event.clientY - previewState.frameDragOffsetY;
+      setPreviewFrameRect({ left, top, width: current.width, height: current.height }, { markMoved: true, markResized: false });
+      if (!previewState.legendMoved) {
+        applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (previewState.frameResizing) {
+      if (previewState.frameResizePointerId !== null && event.pointerId !== previewState.frameResizePointerId) return;
+      const start = previewState.frameStartRect;
+      if (!start) return;
+      const width = start.width + (event.clientX - previewState.frameResizeStartX);
+      const height = start.height + (event.clientY - previewState.frameResizeStartY);
+      setPreviewFrameRect({ left: start.left, top: start.top, width, height }, { markMoved: false, markResized: true });
+      if (!previewState.legendMoved) {
+        applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+      }
+      event.preventDefault();
+    }
+  };
+
+  const endPreviewFramePointer = event => {
+    if (previewState.frameDragging) {
+      if (previewState.framePointerId !== null && event && event.pointerId !== undefined && event.pointerId !== previewState.framePointerId) {
+        return;
+      }
+      previewState.frameDragging = false;
+      previewState.framePointerId = null;
+      previewFrame?.classList.remove("moving");
+      if (event && previewFrameMoveHandle && typeof previewFrameMoveHandle.releasePointerCapture === "function") {
+        try { previewFrameMoveHandle.releasePointerCapture(event.pointerId); } catch (_) {}
+      }
+    }
+
+    if (previewState.frameResizing) {
+      if (previewState.frameResizePointerId !== null && event && event.pointerId !== undefined && event.pointerId !== previewState.frameResizePointerId) {
+        return;
+      }
+      previewState.frameResizing = false;
+      previewState.frameResizePointerId = null;
+      previewState.frameStartRect = null;
+      previewFrame?.classList.remove("resizing");
+      if (event && previewFrameResizeHandle && typeof previewFrameResizeHandle.releasePointerCapture === "function") {
+        try { previewFrameResizeHandle.releasePointerCapture(event.pointerId); } catch (_) {}
+      }
+    }
+  };
+
+  previewFrameMoveHandle?.addEventListener("pointermove", onPreviewFramePointerMove);
+  previewFrameResizeHandle?.addEventListener("pointermove", onPreviewFramePointerMove);
+  previewFrameMoveHandle?.addEventListener("pointerup", endPreviewFramePointer);
+  previewFrameResizeHandle?.addEventListener("pointerup", endPreviewFramePointer);
+  previewFrameMoveHandle?.addEventListener("pointercancel", endPreviewFramePointer);
+  previewFrameResizeHandle?.addEventListener("pointercancel", endPreviewFramePointer);
+
+  previewLegend?.addEventListener("pointerdown", event => {
+    if (!previewState.active || !previewFrame || !previewLegend || previewLegend.classList.contains("hidden")) return;
+    if (event.button !== 0) return;
+    const frameRect = previewFrame.getBoundingClientRect();
+    const legendRect = previewLegend.getBoundingClientRect();
+    previewState.dragging = true;
+    previewState.dragPointerId = event.pointerId;
+    previewState.dragOffsetX = event.clientX - legendRect.left;
+    previewState.dragOffsetY = event.clientY - legendRect.top;
+    previewLegend.classList.add("dragging");
+    if (typeof previewLegend.setPointerCapture === "function") {
+      try { previewLegend.setPointerCapture(event.pointerId); } catch (_) {}
+    }
+    const currentLeft = legendRect.left - frameRect.left;
+    const currentTop = legendRect.top - frameRect.top;
+    setPreviewLegendPosition(currentLeft, currentTop, { markMoved: false });
+    event.preventDefault();
+    event.stopPropagation();
+  });
+
+  const onPreviewLegendPointerMove = event => {
+    if (!previewState.dragging || !previewFrame || !previewLegend) return;
+    if (previewState.dragPointerId !== null && event.pointerId !== previewState.dragPointerId) return;
+    const frameRect = previewFrame.getBoundingClientRect();
+    const left = event.clientX - frameRect.left - previewState.dragOffsetX;
+    const top = event.clientY - frameRect.top - previewState.dragOffsetY;
+    setPreviewLegendPosition(left, top, { markMoved: true });
+    event.preventDefault();
+  };
+
+  const endPreviewLegendDrag = event => {
+    if (!previewState.dragging) return;
+    if (previewState.dragPointerId !== null && event && event.pointerId !== undefined && event.pointerId !== previewState.dragPointerId) {
+      return;
+    }
+    previewState.dragging = false;
+    previewState.dragPointerId = null;
+    previewLegend?.classList.remove("dragging");
+    if (event && previewLegend && typeof previewLegend.releasePointerCapture === "function") {
+      try { previewLegend.releasePointerCapture(event.pointerId); } catch (_) {}
+    }
+  };
+
+  previewLegend?.addEventListener("pointermove", onPreviewLegendPointerMove);
+  previewLegend?.addEventListener("pointerup", endPreviewLegendDrag);
+  previewLegend?.addEventListener("pointercancel", endPreviewLegendDrag);
+
+  window.addEventListener("resize", () => {
+    if (!previewState.active) return;
+    if (previewToolbar && !previewState.popoutOpen) {
+      const toolbarRect = previewToolbar.getBoundingClientRect();
+      setPreviewToolbarPosition({
+        left: toolbarRect.left,
+        top: toolbarRect.top,
+        right: "auto"
+      });
+    }
+    if (previewState.frameMoved || previewState.frameResized) {
+      const current = getCurrentPreviewFrameRect();
+      if (current) {
+        setPreviewFrameRect(current, {
+          markMoved: previewState.frameMoved,
+          markResized: previewState.frameResized
+        });
+      } else {
+        applyPreviewFrameRectPreset();
+      }
+    } else {
+      applyPreviewFrameRectPreset();
+    }
+    if (!previewState.legendMoved) {
+      applyPreviewLegendPreset(previewLegendPositionSelect?.value || getLegendPosition(), { markMoved: false });
+    } else if (previewLegend && previewFrame) {
+      const frameRect = previewFrame.getBoundingClientRect();
+      const legendRect = previewLegend.getBoundingClientRect();
+      setPreviewLegendPosition(legendRect.left - frameRect.left, legendRect.top - frameRect.top, { markMoved: true });
+    }
+  });
+
+  window.addEventListener("keydown", event => {
+    if (!previewState.active) return;
+    if (event.key === "Escape") {
+      closeMapPrintPreview();
+    }
+  });
+
+  printMapOnlyBtn?.addEventListener("click", () => {
+    closeModal();
+    openMapPrintPreview({ withLegend: false });
+  });
+
+  printMapLegendBtn?.addEventListener("click", () => {
+    closeModal();
+    openMapPrintPreview({ withLegend: true });
+  });
+
+  printSummaryTableBtn?.addEventListener("click", () => {
+    const html = buildSummaryTablePrintDocumentHtml();
+    openWindowAndPrint("Route Summary Table", html, "No route summary table is loaded.");
+  });
+
+  printSummaryVizBtn?.addEventListener("click", () => {
+    const html = buildSummaryVisualizationPrintDocumentHtml();
+    openWindowAndPrint("Route Summary Visualization", html, "No summary data is loaded for visualization printing.");
+  });
+
+  printAttributeTableBtn?.addEventListener("click", () => {
+    const html = buildAttributeTablePrintDocumentHtml();
+    openWindowAndPrint("Attribute Table", html, "No attribute rows are available to print.");
+  });
+
+  printSelectionReportBtn?.addEventListener("click", () => {
+    const html = buildSelectionReportPrintDocumentHtml();
+    openWindowAndPrint("Selection Report", html, "No selected records or street segments to print.");
+  });
+
+  printOperationalReportBtn?.addEventListener("click", () => {
+    const html = buildOperationalReportPrintDocumentHtml();
+    openWindowAndPrint("Operational Report", html, "Unable to build operational report.");
+  });
+}
+
+function initLayerManagerControls() {
+  const openBtn = document.getElementById("layerManagerBtn");
+  const modal = document.getElementById("layerManagerModal");
+  const closeBtn = document.getElementById("layerManagerCloseBtn");
+  const showAllBtn = document.getElementById("layerManagerShowAllBtn");
+  const hideAllBtn = document.getElementById("layerManagerHideAllBtn");
+  const listNode = document.getElementById("layerManagerList");
+  const statusNode = document.getElementById("layerManagerStatus");
+
+  if (!openBtn || !modal || !closeBtn || !listNode) return;
+  if (openBtn.dataset.layerManagerBound === "1") return;
+  openBtn.dataset.layerManagerBound = "1";
+
+  ensureLayerManagerOrder();
+  let draggingEntryId = "";
+
+  const setStatus = message => {
+    if (!statusNode) return;
+    statusNode.textContent = String(message || "");
+  };
+
+  const isModalOpen = () => modal.style.display === "flex";
+
+  const buildRouteDayLabel = key => {
+    const [route = "", dayToken = ""] = String(key || "").split("|");
+    const dayNumber = Number(dayToken);
+    const dayLabel = Number.isFinite(dayNumber) ? (dayName(dayNumber) || String(dayToken)) : String(dayToken || "No Day");
+    return `Route ${route || "Unassigned"} - ${dayLabel}`;
+  };
+
+  const buildEntryMeta = entryId => {
+    if (entryId === LAYER_MANAGER_STREET_KEY) {
+      const sourceToggle = document.getElementById("useLocalStreetSource");
+      const sourceOn = !!sourceToggle?.checked;
+      const visibleOnMap = map.hasLayer(streetAttributeLayerGroup);
+      const count = streetAttributeById.size;
+      if (!sourceOn) return `Source off - ${count.toLocaleString()} segments loaded`;
+      return `${visibleOnMap ? "Visible" : "Hidden"} - ${count.toLocaleString()} segments loaded`;
+    }
+    const group = routeDayGroups[entryId];
+    const count = Array.isArray(group?.layers) ? group.layers.length : 0;
+    const visible = isRouteDayLayerVisibleOnMap(entryId);
+    return `${visible ? "Visible" : "Hidden"} - ${count.toLocaleString()} stops`;
+  };
+
+  const isEntryVisible = entryId => {
+    if (entryId === LAYER_MANAGER_STREET_KEY) return isStreetNetworkLayerVisibleEnabled();
+    if (Object.prototype.hasOwnProperty.call(layerVisibilityState, entryId)) {
+      return !!layerVisibilityState[entryId];
+    }
+    return isRouteDayLayerVisibleOnMap(entryId);
+  };
+
+  const applyEntryVisibility = (entryId, visible) => {
+    if (entryId === LAYER_MANAGER_STREET_KEY) {
+      setStreetNetworkLayerVisibilityFromManager(visible);
+      return;
+    }
+    setRouteDayLayerVisibilityFromManager(entryId, visible);
+  };
+
+  const createSwatchNode = entryId => {
+    const swatch = document.createElement("span");
+    swatch.className = "layer-manager-swatch";
+
+    if (entryId === LAYER_MANAGER_STREET_KEY) {
+      swatch.classList.add("line");
+      swatch.style.background = "#4ea2f5";
+      return swatch;
+    }
+
+    const symbol = symbolMap[entryId] || getSymbol(entryId);
+    swatch.style.background = symbol.color;
+    if (symbol.shape === "circle") {
+      swatch.style.borderRadius = "50%";
+    } else if (symbol.shape === "square") {
+      swatch.style.borderRadius = "2px";
+    } else if (symbol.shape === "triangle") {
+      swatch.style.width = "0";
+      swatch.style.height = "0";
+      swatch.style.borderLeft = "6px solid transparent";
+      swatch.style.borderRight = "6px solid transparent";
+      swatch.style.borderBottom = `12px solid ${symbol.color}`;
+      swatch.style.borderRadius = "0";
+      swatch.style.background = "transparent";
+      swatch.style.borderTop = "0";
+    } else if (symbol.shape === "diamond") {
+      swatch.style.borderRadius = "2px";
+      swatch.style.transform = "rotate(45deg)";
+    }
+    return swatch;
+  };
+
+  const updateOrderAndRender = message => {
+    applyLayerManagerOrder();
+    renderLayerManagerList();
+    if (message) setStatus(message);
+  };
+
+  function renderLayerManagerList() {
+    const orderTop = ensureLayerManagerOrder();
+    listNode.innerHTML = "";
+
+    if (!orderTop.length) {
+      const empty = document.createElement("div");
+      empty.className = "layer-manager-empty";
+      empty.textContent = "No layers available yet. Load a route file to manage map layers.";
+      listNode.appendChild(empty);
+      return;
+    }
+
+    const routeOrderTop = orderTop.filter(isRouteDayLayerManagerEntry);
+    const hasStreetEntry = orderTop.includes(LAYER_MANAGER_STREET_KEY);
+    const streetOnTop = orderTop[0] === LAYER_MANAGER_STREET_KEY;
+
+    const createRowsForEntries = (entryIds, sectionBody) => {
+      entryIds.forEach(entryId => {
+        const row = document.createElement("div");
+        row.className = "layer-manager-row";
+        row.dataset.entryId = entryId;
+        row.draggable = true;
+
+        const dragHandle = document.createElement("span");
+        dragHandle.className = "layer-manager-drag";
+        dragHandle.title = "Drag to reorder";
+        dragHandle.textContent = "::";
+
+        const swatch = createSwatchNode(entryId);
+
+        const labelWrap = document.createElement("div");
+        labelWrap.className = "layer-manager-label-wrap";
+        const label = document.createElement("span");
+        label.className = "layer-manager-label";
+        label.textContent = entryId === LAYER_MANAGER_STREET_KEY ? "Street Network" : buildRouteDayLabel(entryId);
+        const meta = document.createElement("span");
+        meta.className = "layer-manager-meta";
+        meta.textContent = buildEntryMeta(entryId);
+        labelWrap.append(label, meta);
+
+        const visLabel = document.createElement("label");
+        visLabel.className = "layer-manager-vis-check";
+        const visInput = document.createElement("input");
+        visInput.type = "checkbox";
+        visInput.checked = isEntryVisible(entryId);
+        const visText = document.createElement("span");
+        visText.textContent = "Show";
+        visLabel.append(visInput, visText);
+
+        visInput.addEventListener("change", () => {
+          applyEntryVisibility(entryId, visInput.checked);
+          refreshLayerManagerUiIfOpen();
+          setStatus(`Updated visibility: ${label.textContent}`);
+        });
+
+        const orderActions = document.createElement("div");
+        orderActions.className = "layer-manager-order-actions";
+        const upBtn = document.createElement("button");
+        upBtn.type = "button";
+        upBtn.className = "layer-manager-order-btn";
+        upBtn.title = "Move layer up";
+        upBtn.textContent = "^";
+        const downBtn = document.createElement("button");
+        downBtn.type = "button";
+        downBtn.className = "layer-manager-order-btn";
+        downBtn.title = "Move layer down";
+        downBtn.textContent = "v";
+
+        if (entryId === LAYER_MANAGER_STREET_KEY) {
+          upBtn.disabled = streetOnTop || !routeOrderTop.length;
+          downBtn.disabled = !streetOnTop || !routeOrderTop.length;
+        } else {
+          const routeIndex = routeOrderTop.indexOf(entryId);
+          upBtn.disabled = routeIndex <= 0;
+          downBtn.disabled = routeIndex < 0 || routeIndex >= routeOrderTop.length - 1;
+        }
+
+        upBtn.addEventListener("click", () => {
+          if (!moveLayerManagerEntryByOffset(entryId, -1)) return;
+          updateOrderAndRender(`Moved up: ${label.textContent}`);
+        });
+
+        downBtn.addEventListener("click", () => {
+          if (!moveLayerManagerEntryByOffset(entryId, 1)) return;
+          updateOrderAndRender(`Moved down: ${label.textContent}`);
+        });
+
+        orderActions.append(upBtn, downBtn);
+
+        row.addEventListener("dragstart", event => {
+          draggingEntryId = entryId;
+          row.classList.add("dragging");
+          try { event.dataTransfer?.setData("text/plain", entryId); } catch (_) {}
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+        });
+
+        row.addEventListener("dragend", () => {
+          draggingEntryId = "";
+          row.classList.remove("dragging");
+          listNode.querySelectorAll(".layer-manager-row.drop-target").forEach(node => node.classList.remove("drop-target"));
+        });
+
+        row.addEventListener("dragover", event => {
+          event.preventDefault();
+          if (!draggingEntryId || draggingEntryId === entryId) return;
+          row.classList.add("drop-target");
+        });
+
+        row.addEventListener("dragleave", () => {
+          row.classList.remove("drop-target");
+        });
+
+        row.addEventListener("drop", event => {
+          event.preventDefault();
+          row.classList.remove("drop-target");
+          if (!draggingEntryId || draggingEntryId === entryId) return;
+          if (!moveLayerManagerEntryBefore(draggingEntryId, entryId)) return;
+          updateOrderAndRender("Layer draw order updated.");
+        });
+
+        row.append(dragHandle, swatch, labelWrap, visLabel, orderActions);
+        sectionBody.appendChild(row);
+      });
+    };
+
+    const appendSection = (title, subtitle, entryIds) => {
+      if (!entryIds.length) return;
+      const section = document.createElement("section");
+      section.className = "layer-manager-section";
+
+      const head = document.createElement("div");
+      head.className = "layer-manager-section-head";
+      const titleNode = document.createElement("span");
+      titleNode.className = "layer-manager-section-title";
+      titleNode.textContent = title;
+      const subtitleNode = document.createElement("span");
+      subtitleNode.className = "layer-manager-section-meta";
+      subtitleNode.textContent = subtitle;
+      head.append(titleNode, subtitleNode);
+
+      const body = document.createElement("div");
+      body.className = "layer-manager-section-body";
+      createRowsForEntries(entryIds, body);
+
+      section.append(head, body);
+      listNode.appendChild(section);
+    };
+
+    if (streetOnTop && hasStreetEntry) {
+      appendSection("Map Layers", "Move this above or below the Route + Day group.", [LAYER_MANAGER_STREET_KEY]);
+    }
+
+    appendSection(
+      "Route + Day Layers",
+      "These layers are grouped together. Drag rows here to set top-to-bottom order.",
+      routeOrderTop
+    );
+
+    if (!streetOnTop && hasStreetEntry) {
+      appendSection("Map Layers", "Move this above or below the Route + Day group.", [LAYER_MANAGER_STREET_KEY]);
+    }
+  }
+
+  const openModal = () => {
+    ensureLayerManagerOrder();
+    renderLayerManagerList();
+    setStatus("Drag and drop rows to order layers. Route + Day layers stay grouped.");
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  showAllBtn?.addEventListener("click", () => {
+    ensureLayerManagerOrder().forEach(entryId => {
+      applyEntryVisibility(entryId, true);
+    });
+    renderLayerManagerList();
+    setStatus("All layers turned on.");
+  });
+
+  hideAllBtn?.addEventListener("click", () => {
+    ensureLayerManagerOrder().forEach(entryId => {
+      applyEntryVisibility(entryId, false);
+    });
+    renderLayerManagerList();
+    setStatus("All layers turned off.");
+  });
+
+  openBtn.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+
+  window.addEventListener("keydown", event => {
+    if (!isModalOpen()) return;
+    if (event.key === "Escape") closeModal();
+  });
+
+  window.__refreshLayerManagerList = () => {
+    if (!isModalOpen()) return;
+    renderLayerManagerList();
+  };
 }
 
 function getFilteredAttributeRows() {
@@ -8085,6 +10662,8 @@ tryRestoreSavedStreetSourceOnStartup().catch(err => {
 });
 initStreetNetworkToggle();
 initSelectByAttributesControls();
+initPrintCenterControls();
+initLayerManagerControls();
 
 
 

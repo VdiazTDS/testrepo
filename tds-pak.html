@@ -54,8 +54,21 @@
 
 
 
-  <p>Periodically export a backend Excel backup (top-left download button)</p>
+  <p>Download backend backup (top-left button)</p>
   <div class="header-import-selection-row">
+    <button id="printCenterBtn" class="primary-btn print-center-btn" type="button">
+      <span class="print-center-icon" aria-hidden="true"></span>
+      <span>Print</span>
+    </button>
+    <button
+      id="layerManagerBtn"
+      class="primary-btn layer-manager-btn layer-manager-icon-btn"
+      type="button"
+      aria-label="Open layer manager"
+      title="Layer Manager"
+    >
+      <span class="layer-manager-icon" aria-hidden="true"></span>
+    </button>
     <button id="importWizardBtn" class="primary-btn import-wizard-btn" type="button">
       <span class="import-wizard-icon" aria-hidden="true"></span>
       <span>Import Wizard</span>
@@ -461,6 +474,182 @@
     </div>
     <div class="modal-actions">
       <button id="streetNetworkManagerClose">Close</button>
+    </div>
+  </div>
+</div>
+<div id="printCenterModal" class="modal">
+  <div class="modal-content print-center-modal-content">
+    <div class="print-center-head">
+      <h3>Print Center</h3>
+      <p>Choose exactly what you want to print from the current map, summary, and tables.</p>
+    </div>
+
+    <div class="print-center-layout-controls">
+      <div class="print-center-layout-field">
+        <label for="printLegendPositionSelect">Legend Position</label>
+        <select id="printLegendPositionSelect">
+          <option value="outside-right">Outside Right</option>
+          <option value="outside-left">Outside Left</option>
+          <option value="top-right">Top Right</option>
+          <option value="top-left">Top Left</option>
+          <option value="bottom-right">Bottom Right</option>
+          <option value="bottom-left">Bottom Left</option>
+        </select>
+      </div>
+      <div class="print-center-layout-field">
+        <label for="printMapSpanSelect">Map Span</label>
+        <select id="printMapSpanSelect">
+          <option value="legend-right">Legend Right Span</option>
+          <option value="legend-left">Legend Left Span</option>
+          <option value="full">Full Page</option>
+          <option value="wide">Wide</option>
+          <option value="standard">Standard</option>
+          <option value="compact">Compact</option>
+        </select>
+      </div>
+      <div class="print-center-layout-field">
+        <label for="printOutputScaleSelect">Print Size</label>
+        <select id="printOutputScaleSelect">
+          <option value="1">100% (Match Preview)</option>
+          <option value="0.95">95%</option>
+          <option value="0.9">90%</option>
+          <option value="0.85">85%</option>
+        </select>
+      </div>
+      <div class="print-center-layout-field">
+        <label for="printResolutionSelect">Map Resolution</label>
+        <select id="printResolutionSelect">
+          <option value="1">Standard</option>
+          <option value="1.5">High (1.5x)</option>
+          <option value="2">Very High (2x)</option>
+        </select>
+      </div>
+    </div>
+    <p class="print-center-layout-tip">Tip: use <strong>Outside Right</strong> + <strong>Legend Right Span</strong> to keep the legend off your routes.</p>
+    <div class="print-center-guide" aria-label="How to use print preview">
+      <div class="print-center-guide-title">How To Use Print Preview</div>
+      <div class="print-center-guide-step"><span class="print-center-guide-num">1</span><span>Click <strong>Map Only</strong> or <strong>Map + Legend</strong>.</span></div>
+      <div class="print-center-guide-step"><span class="print-center-guide-num">2</span><span>Pan/zoom the map to the area you want printed.</span></div>
+      <div class="print-center-guide-step"><span class="print-center-guide-num">3</span><span>Drag the blue frame to move it, then drag its corner to resize.</span></div>
+      <div class="print-center-guide-step"><span class="print-center-guide-num">4</span><span>Drag the legend if needed, then click <strong>Print</strong>.</span></div>
+    </div>
+
+    <div class="print-center-grid">
+      <button id="printMapOnlyBtn" class="primary-btn print-center-action-btn" type="button">
+        <span class="print-center-action-title">Map Only</span>
+        <span class="print-center-action-subtitle">Print the current map extent with visible layers.</span>
+      </button>
+      <button id="printMapLegendBtn" class="primary-btn print-center-action-btn" type="button">
+        <span class="print-center-action-title">Map + Legend</span>
+        <span class="print-center-action-subtitle">Print map view with basemap and visible layer legend.</span>
+      </button>
+      <button id="printSummaryTableBtn" class="primary-btn print-center-action-btn" type="button">
+        <span class="print-center-action-title">Route Summary Table</span>
+        <span class="print-center-action-subtitle">Print the summary table tied to the current open route file.</span>
+      </button>
+      <button id="printSummaryVizBtn" class="primary-btn print-center-action-btn" type="button">
+        <span class="print-center-action-title">Summary Visualization</span>
+        <span class="print-center-action-subtitle">Print KPI cards and chart-style bars from summary data.</span>
+      </button>
+      <button id="printAttributeTableBtn" class="primary-btn print-center-action-btn" type="button">
+        <span class="print-center-action-title">Attribute Table</span>
+        <span class="print-center-action-subtitle">Print the current table mode and visible rows.</span>
+      </button>
+      <button id="printSelectionReportBtn" class="primary-btn print-center-action-btn" type="button">
+        <span class="print-center-action-title">Selection Report</span>
+        <span class="print-center-action-subtitle">Print selected stops/segments with key route details.</span>
+      </button>
+      <button id="printOperationalReportBtn" class="primary-btn print-center-action-btn is-primary-path" type="button">
+        <span class="print-center-action-title">Operational Report</span>
+        <span class="print-center-action-subtitle">Print a full report with map context, KPIs, and summary details.</span>
+      </button>
+    </div>
+
+    <div id="printCenterStatus" class="print-center-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="printCenterClose">Close</button>
+    </div>
+  </div>
+</div>
+<div id="mapPrintPreviewOverlay" class="map-print-preview-overlay" aria-hidden="true">
+  <div id="mapPrintPreviewToolbar" class="map-print-preview-toolbar">
+    <div id="mapPrintPreviewToolbarHandle" class="map-print-preview-toolbar-head">
+      <div class="map-print-preview-toolbar-title">
+        <h3>Map Print Preview</h3>
+        <span class="map-print-preview-toolbar-subtitle">Drag this bar to move controls</span>
+      </div>
+      <div class="map-print-preview-toolbar-head-actions">
+        <button id="mapPrintPreviewPopoutBtn" class="primary-btn" type="button">Pop Out</button>
+      </div>
+    </div>
+    <p>Pan/zoom the map in the background. Drag the frame to move print area, drag frame corner to resize, and drag legend to position it.</p>
+    <div class="map-print-preview-guide">
+      <div class="map-print-preview-guide-row"><span>Move frame:</span><strong>Drag blue header</strong></div>
+      <div class="map-print-preview-guide-row"><span>Resize frame:</span><strong>Drag corner handle</strong></div>
+      <div class="map-print-preview-guide-row"><span>Move legend:</span><strong>Drag legend card</strong></div>
+    </div>
+    <label for="mapPrintPreviewMapSpan">Map Span</label>
+    <select id="mapPrintPreviewMapSpan">
+      <option value="legend-right">Legend Right Span</option>
+      <option value="legend-left">Legend Left Span</option>
+      <option value="full">Full Page</option>
+      <option value="wide">Wide</option>
+      <option value="standard">Standard</option>
+      <option value="compact">Compact</option>
+    </select>
+    <label for="mapPrintPreviewLegendPosition">Legend Preset</label>
+    <select id="mapPrintPreviewLegendPosition">
+      <option value="outside-right">Outside Right</option>
+      <option value="outside-left">Outside Left</option>
+      <option value="top-right">Top Right</option>
+      <option value="top-left">Top Left</option>
+      <option value="bottom-right">Bottom Right</option>
+      <option value="bottom-left">Bottom Left</option>
+    </select>
+    <label for="mapPrintPreviewOutputScale">Print Size</label>
+    <select id="mapPrintPreviewOutputScale">
+      <option value="1">100% (Match Preview)</option>
+      <option value="0.95">95%</option>
+      <option value="0.9">90%</option>
+      <option value="0.85">85%</option>
+    </select>
+    <label for="mapPrintPreviewResolution">Map Resolution</label>
+    <select id="mapPrintPreviewResolution">
+      <option value="1">Standard</option>
+      <option value="1.5">High (1.5x)</option>
+      <option value="2">Very High (2x)</option>
+    </select>
+    <label class="map-print-preview-check">
+      <input type="checkbox" id="mapPrintPreviewLegendToggle" checked />
+      Include legend in printed map
+    </label>
+    <div class="map-print-preview-actions">
+      <button id="mapPrintPreviewResetFrame" class="primary-btn" type="button">Reset Frame</button>
+      <button id="mapPrintPreviewResetLegend" class="primary-btn" type="button">Reset Legend</button>
+      <button id="mapPrintPreviewPrintBtn" class="primary-btn" type="button">Print</button>
+      <button id="mapPrintPreviewCloseBtn" class="primary-btn" type="button">Close</button>
+    </div>
+  </div>
+  <div id="mapPrintPreviewFrame" class="map-print-preview-frame" aria-hidden="true">
+    <div id="mapPrintPreviewFrameMoveHandle" class="map-print-preview-frame-move-handle">Drag to move print area</div>
+    <div id="mapPrintPreviewFrameResizeHandle" class="map-print-preview-frame-resize-handle" aria-hidden="true"></div>
+    <div id="mapPrintPreviewLegend" class="map-print-preview-legend"></div>
+  </div>
+</div>
+<div id="layerManagerModal" class="modal">
+  <div class="modal-content layer-manager-modal-content">
+    <div class="layer-manager-head">
+      <h3>Layer Manager</h3>
+      <p>Show/hide layers and drag to reorder. Top of the list draws on top of lower layers.</p>
+    </div>
+    <div class="layer-manager-toolbar">
+      <button id="layerManagerShowAllBtn" class="primary-btn" type="button">Show All</button>
+      <button id="layerManagerHideAllBtn" class="primary-btn" type="button">Hide All</button>
+    </div>
+    <div id="layerManagerList" class="layer-manager-list" role="listbox" aria-label="Layer order and visibility"></div>
+    <div id="layerManagerStatus" class="layer-manager-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="layerManagerCloseBtn" type="button">Close</button>
     </div>
   </div>
 </div>
