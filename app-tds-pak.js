@@ -616,9 +616,2263 @@ const satelliteLabelsLayer = L.tileLayer(
   }
 );
 const streetAttributeLayerGroup = L.layerGroup();
+const streetLoadPolygonLayerGroup = new L.FeatureGroup();
+map.addLayer(streetLoadPolygonLayerGroup);
+let streetPolygonLoadPending = false;
+let lastStreetLoadPolygonSnapshot = null;
+const LOCAL_STREET_GRID_SIZE_DEG = 0.025;
+const LOCAL_STREET_SAVED_POLYGONS_KEY = "localStreetSavedPolygons";
+const LOCAL_STREET_SAVED_POLYGONS_MAX = 60;
+const localStreetSourceState = {
+  loaded: false,
+  sourceName: "",
+  cellSizeDeg: LOCAL_STREET_GRID_SIZE_DEG,
+  elementsById: new Map(),
+  cellIndex: new Map(),
+  chunkMode: false,
+  chunkBounds: null,
+  sourceDescriptor: null
+};
+let localStreetStatusResetTimer = null;
+const TEXAS_STREETS_DOWNLOAD_URL = "https://download.geofabrik.de/north-america/us/texas-latest-free.shp.zip";
+const LOCAL_STREET_ZIP_RX = /\.zip$/i;
+const LOCAL_STREET_JSON_RX = /\.(geojson|json)$/i;
+const LOCAL_STREET_ROAD_LAYER_RX = /(road|street|highway)/i;
+const LOCAL_STREET_FCLASS_WHITELIST = new Set([
+  "motorway",
+  "motorway_link",
+  "trunk",
+  "trunk_link",
+  "primary",
+  "primary_link",
+  "secondary",
+  "secondary_link",
+  "tertiary",
+  "tertiary_link",
+  "residential",
+  "unclassified",
+  "living_street",
+  "service",
+  "track",
+  "road",
+  "pedestrian",
+  "footway",
+  "cycleway",
+  "bridleway",
+  "path",
+  "steps"
+]);
+const LOCAL_STREET_SOURCE_META_KEY = "localStreetSourceMeta";
+const LOCAL_STREET_HANDLE_DB_NAME = "tdsPakLocalStreetSource";
+const LOCAL_STREET_HANDLE_STORE_NAME = "handles";
+const LOCAL_STREET_HANDLE_PRIMARY_KEY = "primary";
+const LOCAL_STREET_ZIP_WORKER_SCRIPT = "tds-pak-street-zip-worker.js?v=20260306-2";
+const LOCAL_STREET_BROWSER_ZIP_LIMIT_MB = 140;
+const LOCAL_STREET_JSON_PARSE_WARN_MB = 420;
+const LOCAL_STREET_JSON_STREAM_THRESHOLD_MB = 260;
+const LOCAL_STREET_STREAM_YIELD_FEATURE_STEP = 300;
+const LOCAL_STREET_OFFLINE_CONVERTER_PACKAGE = "tds-streets-offline-converter-package.zip?v=20260306-8";
+const LOCAL_STREET_AUTO_SETUP_PACKAGE = "tds-streets-auto-setup-package.zip?v=20260306-6";
+const LOCAL_STREET_BACKEND_URL_KEY = "localStreetBackendUrl";
+const LOCAL_STREET_BACKEND_URL_DEFAULT = "http://127.0.0.1:8787";
+const LOCAL_STREET_BACKEND_HEALTH_TTL_MS = 12000;
+const LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS = 25000;
+const LOCAL_STREET_BACKEND_QUERY_LIMIT = 220000;
+const localStreetBackendState = {
+  baseUrl: LOCAL_STREET_BACKEND_URL_DEFAULT,
+  available: false,
+  hasIndex: false,
+  sourceName: "",
+  lastError: "",
+  checking: false,
+  lastCheckedAt: 0
+};
+
+function localStreetCellKey(latIdx, lonIdx) {
+  return `${latIdx}:${lonIdx}`;
+}
+
+function normalizeLocalStreetBackendUrl(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return LOCAL_STREET_BACKEND_URL_DEFAULT;
+  const withProto = /^https?:\/\//i.test(text) ? text : `http://${text}`;
+  return withProto.replace(/\/+$/, "");
+}
+
+function getStoredLocalStreetBackendUrl() {
+  const stored = storageGet(LOCAL_STREET_BACKEND_URL_KEY);
+  return normalizeLocalStreetBackendUrl(stored || LOCAL_STREET_BACKEND_URL_DEFAULT);
+}
+
+function setStoredLocalStreetBackendUrl(urlValue) {
+  const normalized = normalizeLocalStreetBackendUrl(urlValue);
+  storageSet(LOCAL_STREET_BACKEND_URL_KEY, normalized);
+  localStreetBackendState.baseUrl = normalized;
+}
+
+function localStreetHasProvider() {
+  return !!localStreetSourceState.loaded || (!!localStreetBackendState.available && !!localStreetBackendState.hasIndex);
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS))
+    : null;
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller ? controller.signal : undefined
+    });
+    return response;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function checkLocalStreetBackendAvailability(force = false) {
+  const now = Date.now();
+  if (!force && !localStreetBackendState.checking && (now - localStreetBackendState.lastCheckedAt) < LOCAL_STREET_BACKEND_HEALTH_TTL_MS) {
+    return localStreetBackendState.available;
+  }
+  if (localStreetBackendState.checking) return localStreetBackendState.available;
+
+  localStreetBackendState.checking = true;
+  localStreetBackendState.lastCheckedAt = now;
+  try {
+    const healthUrl = `${localStreetBackendState.baseUrl}/api/health`;
+    const response = await fetchJsonWithTimeout(healthUrl, { cache: "no-store" }, 5000);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json().catch(() => ({}));
+    localStreetBackendState.available = true;
+    localStreetBackendState.hasIndex = !!payload?.has_index;
+    localStreetBackendState.sourceName = String(payload?.source_name || "");
+    localStreetBackendState.lastError = localStreetBackendState.hasIndex
+      ? ""
+      : "Backend is running but no streets index is loaded.";
+  } catch (err) {
+    localStreetBackendState.available = false;
+    localStreetBackendState.hasIndex = false;
+    localStreetBackendState.sourceName = "";
+    localStreetBackendState.lastError = String(err?.message || err || "Backend unavailable");
+  } finally {
+    localStreetBackendState.checking = false;
+    updateLocalStreetSourceStatus();
+  }
+  return localStreetBackendState.available;
+}
+
+function resetLocalStreetSourceState(options = {}) {
+  const preserveSourceDescriptor = !!options.preserveSourceDescriptor;
+  localStreetSourceState.loaded = false;
+  localStreetSourceState.sourceName = "";
+  localStreetSourceState.elementsById.clear();
+  localStreetSourceState.cellIndex.clear();
+  localStreetSourceState.chunkMode = false;
+  localStreetSourceState.chunkBounds = null;
+  if (!preserveSourceDescriptor) {
+    localStreetSourceState.sourceDescriptor = null;
+  }
+}
+
+function shouldUseLocalStreetSource() {
+  const toggle = document.getElementById("useLocalStreetSource");
+  return !!toggle?.checked && localStreetHasProvider();
+}
+
+function updateLocalStreetSourceStatus(message = "") {
+  const node = document.getElementById("localStreetsStatus");
+  const useLocalToggle = document.getElementById("useLocalStreetSource");
+  const hasProvider = localStreetHasProvider();
+  updateStreetSetupGuide();
+  if (useLocalToggle) {
+    useLocalToggle.disabled = !hasProvider;
+    if (!hasProvider) useLocalToggle.checked = false;
+  }
+  if (!node) return;
+  if (message) {
+    node.textContent = message;
+    return;
+  }
+  if (!hasProvider) {
+    node.textContent = "Street layer: Off. Click Street Setup Wizard, then complete steps 1-3.";
+    return;
+  }
+
+  if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
+    const backendName = localStreetBackendState.sourceName ? ` (${localStreetBackendState.sourceName})` : "";
+    if (shouldUseLocalStreetSource()) {
+      node.textContent = `Street layer: On (Local backend${backendName})`;
+    } else {
+      node.textContent = `Street layer: Off (Local backend ready${backendName}). Turn on Street Segments, then draw a polygon.`;
+    }
+    return;
+  }
+
+  const usingLocal = shouldUseLocalStreetSource();
+  const count = localStreetSourceState.elementsById.size.toLocaleString();
+  const chunkMode = !!localStreetSourceState.chunkMode;
+  if (usingLocal) {
+    node.textContent = chunkMode
+      ? `Street layer: On (Chunk mode, ${count} segments indexed for current region from ${localStreetSourceState.sourceName})`
+      : `Street layer: On (Local file: ${localStreetSourceState.sourceName}, ${count} segments indexed)`;
+  } else {
+    node.textContent = chunkMode
+      ? `Street layer: Off (Chunk mode ready: ${localStreetSourceState.sourceName}, ${count} region segments indexed)`
+      : `Street layer: Off (Local file loaded: ${localStreetSourceState.sourceName}, ${count} segments indexed)`;
+  }
+}
+
+function addLocalStreetElementToIndex(element) {
+  const id = Number(element?.id);
+  if (!Number.isFinite(id)) return false;
+  const geom = Array.isArray(element?.geom) ? element.geom : [];
+  if (geom.length < 2) return false;
+
+  localStreetSourceState.elementsById.set(id, element);
+
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  geom.forEach(p => {
+    const lat = Number(p?.lat);
+    const lon = Number(p?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+  });
+  if (!Number.isFinite(minLat) || !Number.isFinite(minLon)) return false;
+
+  const s = localStreetSourceState.cellSizeDeg;
+  const minLatIdx = Math.floor((minLat + 90) / s);
+  const maxLatIdx = Math.floor((maxLat + 90) / s);
+  const minLonIdx = Math.floor((minLon + 180) / s);
+  const maxLonIdx = Math.floor((maxLon + 180) / s);
+
+  for (let latIdx = minLatIdx; latIdx <= maxLatIdx; latIdx++) {
+    for (let lonIdx = minLonIdx; lonIdx <= maxLonIdx; lonIdx++) {
+      const key = localStreetCellKey(latIdx, lonIdx);
+      let bucket = localStreetSourceState.cellIndex.get(key);
+      if (!bucket) {
+        bucket = [];
+        localStreetSourceState.cellIndex.set(key, bucket);
+      }
+      bucket.push(id);
+    }
+  }
+  return true;
+}
+
+function getLocalStreetCandidateIds(bounds) {
+  const ids = new Set();
+  if (!bounds || !localStreetSourceState.loaded) return ids;
+
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+  const s = localStreetSourceState.cellSizeDeg;
+  const minLatIdx = Math.floor((south + 90) / s);
+  const maxLatIdx = Math.floor((north + 90) / s);
+  const minLonIdx = Math.floor((west + 180) / s);
+  const maxLonIdx = Math.floor((east + 180) / s);
+
+  for (let latIdx = minLatIdx; latIdx <= maxLatIdx; latIdx++) {
+    for (let lonIdx = minLonIdx; lonIdx <= maxLonIdx; lonIdx++) {
+      const key = localStreetCellKey(latIdx, lonIdx);
+      const bucket = localStreetSourceState.cellIndex.get(key);
+      if (!bucket?.length) continue;
+      bucket.forEach(id => ids.add(id));
+    }
+  }
+  return ids;
+}
+
+function getLocalStreetSourceMeta() {
+  const raw = storageGet(LOCAL_STREET_SOURCE_META_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function setLocalStreetSourceMeta(meta) {
+  storageSet(LOCAL_STREET_SOURCE_META_KEY, JSON.stringify(meta || {}));
+}
+
+function clearLocalStreetSourceMeta() {
+  localStorage.removeItem(storageKey(LOCAL_STREET_SOURCE_META_KEY));
+}
+
+function openLocalStreetHandleDb() {
+  if (!window.indexedDB) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const req = window.indexedDB.open(LOCAL_STREET_HANDLE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(LOCAL_STREET_HANDLE_STORE_NAME)) {
+        db.createObjectStore(LOCAL_STREET_HANDLE_STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function readStoredLocalStreetHandle() {
+  const db = await openLocalStreetHandleDb();
+  if (!db) return null;
+  return new Promise(resolve => {
+    const tx = db.transaction(LOCAL_STREET_HANDLE_STORE_NAME, "readonly");
+    const store = tx.objectStore(LOCAL_STREET_HANDLE_STORE_NAME);
+    const req = store.get(LOCAL_STREET_HANDLE_PRIMARY_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  });
+}
+
+async function writeStoredLocalStreetHandle(handle) {
+  const db = await openLocalStreetHandleDb();
+  if (!db) return false;
+  return new Promise(resolve => {
+    const tx = db.transaction(LOCAL_STREET_HANDLE_STORE_NAME, "readwrite");
+    const store = tx.objectStore(LOCAL_STREET_HANDLE_STORE_NAME);
+    store.put(handle, LOCAL_STREET_HANDLE_PRIMARY_KEY);
+    tx.oncomplete = () => {
+      db.close();
+      resolve(true);
+    };
+    tx.onerror = () => {
+      db.close();
+      resolve(false);
+    };
+  });
+}
+
+async function clearStoredLocalStreetHandle() {
+  const db = await openLocalStreetHandleDb();
+  if (!db) return false;
+  return new Promise(resolve => {
+    const tx = db.transaction(LOCAL_STREET_HANDLE_STORE_NAME, "readwrite");
+    const store = tx.objectStore(LOCAL_STREET_HANDLE_STORE_NAME);
+    store.delete(LOCAL_STREET_HANDLE_PRIMARY_KEY);
+    tx.oncomplete = () => {
+      db.close();
+      resolve(true);
+    };
+    tx.onerror = () => {
+      db.close();
+      resolve(false);
+    };
+  });
+}
+
+async function rememberLocalStreetSourceForAutoLoad({ sourceName = "", sourcePath = "", handle = null } = {}) {
+  const cleanedPath = String(sourcePath || "").trim();
+  if (!handle && !cleanedPath) {
+    clearLocalStreetSourceMeta();
+    await clearStoredLocalStreetHandle();
+    return;
+  }
+  setLocalStreetSourceMeta({
+    sourceName: String(sourceName || ""),
+    sourcePath: cleanedPath,
+    hasHandle: !!handle,
+    updatedAt: new Date().toISOString()
+  });
+  if (handle) {
+    await writeStoredLocalStreetHandle(handle);
+  } else {
+    await clearStoredLocalStreetHandle();
+  }
+}
+
+async function forgetRememberedLocalStreetSource() {
+  clearLocalStreetSourceMeta();
+  await clearStoredLocalStreetHandle();
+}
+
+function isLikelyLocalFilesystemPath(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (/^[a-z]:[\\/]/i.test(raw)) return true;
+  if (raw.startsWith("\\\\")) return true;
+  if (raw.startsWith("/")) return true;
+  return false;
+}
+
+function normalizeLocalStreetSourcePathToUrl(pathInput) {
+  const raw = String(pathInput || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw) || /^file:\/\//i.test(raw)) return raw;
+  if (/^[a-z]:[\\/]/i.test(raw)) {
+    return `file:///${encodeURI(raw.replace(/\\/g, "/"))}`;
+  }
+  if (raw.startsWith("\\\\")) {
+    return `file:${encodeURI(raw.replace(/\\/g, "/"))}`;
+  }
+  if (raw.startsWith("/")) {
+    return `file://${encodeURI(raw)}`;
+  }
+  return raw;
+}
+
+function collectLocalStreetFeatureCollections(parsedSource) {
+  const collections = [];
+  const pushCollection = (value, layerName = "") => {
+    if (!value || value.type !== "FeatureCollection" || !Array.isArray(value.features)) return;
+    collections.push({ layerName: String(layerName || ""), features: value.features });
+  };
+
+  if (!parsedSource || typeof parsedSource !== "object") return collections;
+
+  if (parsedSource.type === "FeatureCollection") {
+    pushCollection(parsedSource, parsedSource.name || "");
+    return collections;
+  }
+
+  if (Array.isArray(parsedSource)) {
+    parsedSource.forEach((item, idx) => {
+      if (item?.type === "FeatureCollection") {
+        pushCollection(item, item.name || `layer_${idx + 1}`);
+      } else if (item?.type === "Feature") {
+        pushCollection({ type: "FeatureCollection", features: [item] }, `layer_${idx + 1}`);
+      }
+    });
+    return collections;
+  }
+
+  Object.entries(parsedSource).forEach(([key, value]) => {
+    if (value?.type === "FeatureCollection") {
+      pushCollection(value, key);
+      return;
+    }
+    if (Array.isArray(value) && value.length && value.every(feature => feature?.type === "Feature")) {
+      pushCollection({ type: "FeatureCollection", features: value }, key);
+    }
+  });
+
+  return collections;
+}
+
+function isLocalStreetFeature(feature, layerName = "") {
+  const geometryType = feature?.geometry?.type;
+  if (geometryType !== "LineString" && geometryType !== "MultiLineString") return false;
+
+  const props = feature?.properties || {};
+  const highway = String(props.highway || props.HIGHWAY || "").trim();
+  if (highway) return true;
+
+  const fclass = String(props.fclass || props.FCLASS || "").trim().toLowerCase();
+  if (fclass) return LOCAL_STREET_FCLASS_WHITELIST.has(fclass);
+
+  if (LOCAL_STREET_ROAD_LAYER_RX.test(String(layerName || ""))) return true;
+  return true;
+}
+
+function pickLocalStreetFeaturesFromParsedSource(parsedSource, preferRoadLayers = false) {
+  const collections = collectLocalStreetFeatureCollections(parsedSource);
+  if (!collections.length) return [];
+
+  const roadCollections = collections.filter(c => LOCAL_STREET_ROAD_LAYER_RX.test(c.layerName));
+  const sourceCollections = preferRoadLayers && roadCollections.length ? roadCollections : collections;
+  const features = [];
+
+  sourceCollections.forEach(({ layerName, features: layerFeatures }) => {
+    layerFeatures.forEach(feature => {
+      if (!isLocalStreetFeature(feature, layerName)) return;
+      features.push(feature);
+    });
+  });
+
+  return features;
+}
+
+function formatLocalStreetElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function ensureZipSizeWithinBrowserLimit(byteLength, sourceLabel = "ZIP file") {
+  const bytes = Number(byteLength || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return;
+  const maxBytes = LOCAL_STREET_BROWSER_ZIP_LIMIT_MB * 1024 * 1024;
+  if (bytes <= maxBytes) return;
+
+  const sizeMb = (bytes / (1024 * 1024)).toFixed(1);
+  throw new Error(
+    `${sourceLabel} is ${sizeMb} MB, which is above the in-browser conversion limit ` +
+    `(${LOCAL_STREET_BROWSER_ZIP_LIMIT_MB} MB).\n\n` +
+    "Large statewide ZIPs freeze browser tabs. Use one of these options:\n" +
+    "1) Convert offline once with GDAL/mapshaper and load the resulting roads GeoJSON.\n" +
+    "2) Create a roads-only ZIP (gis_osm_roads_free_1.*) and use ZIP -> JSON."
+  );
+}
+
+function parseZipStreetFeaturesWithWorker(sourceZip, label = "streets ZIP") {
+  if (typeof Worker !== "function") {
+    return Promise.reject(new Error("Web Worker is not supported in this browser."));
+  }
+
+  return new Promise((resolve, reject) => {
+    let worker;
+    let pulseLabel = `Converting ${label} to GeoJSON...`;
+    let pulsePercent = 12;
+    let pulseCeiling = 69.5;
+    let stageKind = "convert";
+    const startedAt = Date.now();
+    const maxRuntimeMs = 12 * 60 * 1000;
+    let lastWorkerMessageAt = startedAt;
+    showLocalStreetLoadPercent(pulsePercent, `${pulseLabel} (working 00:00)`);
+    const pulseTimer = setInterval(() => {
+      if (stageKind === "extract") {
+        pulseCeiling = 89.5;
+      } else {
+        pulseCeiling = 69.5;
+      }
+      const silentForMs = Date.now() - lastWorkerMessageAt;
+      if (stageKind === "convert" && silentForMs > 90000) {
+        pulseCeiling = 85;
+      }
+      if (stageKind === "convert" && silentForMs > 240000) {
+        pulseCeiling = 92;
+      }
+      if (pulsePercent < pulseCeiling) {
+        const remaining = pulseCeiling - pulsePercent;
+        const step = Math.max(0.15, remaining * 0.08);
+        pulsePercent = Math.min(pulseCeiling, pulsePercent + step);
+      }
+      const elapsed = formatLocalStreetElapsed(Date.now() - startedAt);
+      const stale = (Date.now() - lastWorkerMessageAt) > 30000;
+      const suffix = stale ? ` (still working ${elapsed})` : ` (working ${elapsed})`;
+      showLocalStreetLoadPercent(pulsePercent, `${pulseLabel}${suffix}`);
+
+      if ((Date.now() - startedAt) > maxRuntimeMs) {
+        const timeoutMinutes = Math.round(maxRuntimeMs / 60000);
+        cleanup();
+        reject(new Error(
+          `Street ZIP conversion timed out after ${timeoutMinutes} minutes. ` +
+          "Use a roads-only ZIP (gis_osm_roads_free_1.*) for reliable loading."
+        ));
+      }
+    }, 1000);
+    try {
+      worker = new Worker(LOCAL_STREET_ZIP_WORKER_SCRIPT);
+    } catch (err) {
+      clearInterval(pulseTimer);
+      reject(err);
+      return;
+    }
+
+    const cleanup = () => {
+      clearInterval(pulseTimer);
+      if (worker) {
+        worker.terminate();
+      }
+    };
+
+    worker.onmessage = (event) => {
+      const data = event?.data || {};
+      if (data.type === "progress") {
+        lastWorkerMessageAt = Date.now();
+        const reported = Number(data.percent);
+        const stageText = String(data.stage || pulseLabel);
+        pulseLabel = stageText;
+        if (stageText.toLowerCase().includes("extract")) {
+          stageKind = "extract";
+          pulseCeiling = 89.5;
+        } else if (stageText.toLowerCase().includes("convert")) {
+          stageKind = "convert";
+          pulseCeiling = 69.5;
+        }
+        if (Number.isFinite(reported)) {
+          pulsePercent = Math.max(pulsePercent, Math.min(reported, 89.9));
+        }
+        const elapsed = formatLocalStreetElapsed(Date.now() - startedAt);
+        showLocalStreetLoadPercent(
+          Number.isFinite(reported) ? Math.max(reported, pulsePercent) : pulsePercent,
+          `${pulseLabel} (working ${elapsed})`
+        );
+        return;
+      }
+      if (data.type === "result") {
+        const features = Array.isArray(data.features) ? data.features : [];
+        cleanup();
+        resolve(features);
+        return;
+      }
+      if (data.type === "error") {
+        cleanup();
+        reject(new Error(data.message || "ZIP worker conversion failed."));
+      }
+    };
+
+    worker.onerror = (err) => {
+      cleanup();
+      reject(new Error(err?.message || "ZIP worker conversion failed."));
+    };
+
+    worker.postMessage({
+      type: "parseZip",
+      buffer: sourceZip,
+      label: String(label || "streets ZIP")
+    });
+  });
+}
+
+async function extractStreetFeaturesFromZipBuffer(sourceZip, sourceLabel) {
+  const label = String(sourceLabel || "streets ZIP");
+  ensureZipSizeWithinBrowserLimit(sourceZip?.byteLength, label);
+  showLocalStreetLoadPercent(10, `Preparing ${label} for conversion...`);
+  await sleep(20);
+
+  return parseZipStreetFeaturesWithWorker(sourceZip, label);
+}
+
+function makeGeoJsonDownloadName(sourceName = "") {
+  const raw = String(sourceName || "local-streets");
+  const noPath = raw.split(/[\\/]/).pop() || raw;
+  const noExt = noPath.replace(/\.[^.]+$/, "");
+  const safe = noExt
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${safe || "local-streets"}-roads.geojson`;
+}
+
+function triggerGeoJsonDownloadFromFeatures(features, sourceName = "") {
+  if (!Array.isArray(features) || !features.length) return false;
+  const collection = {
+    type: "FeatureCollection",
+    features
+  };
+  const blob = new Blob([JSON.stringify(collection)], { type: "application/geo+json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = makeGeoJsonDownloadName(sourceName);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return true;
+}
+
+async function convertZipToGeoJsonAndDownload(file) {
+  if (!file) return false;
+  const fileName = file.name || "streets.zip";
+  if (!LOCAL_STREET_ZIP_RX.test(fileName)) {
+    alert("Select a .zip streets file.");
+    return false;
+  }
+  if (typeof file.arrayBuffer !== "function") {
+    alert("Unable to read selected ZIP file.");
+    return false;
+  }
+
+  showLocalStreetLoadPercent(4, `Reading ${fileName}...`);
+  await sleep(20);
+
+  let features = [];
+  try {
+    const sourceZip = await file.arrayBuffer();
+    ensureZipSizeWithinBrowserLimit(sourceZip?.byteLength, fileName);
+    features = await extractStreetFeaturesFromZipBuffer(sourceZip, fileName);
+  } catch (err) {
+    finishLocalStreetLoadProgress("Could not convert ZIP to GeoJSON.", true);
+    alert(`Could not convert ZIP to GeoJSON.\n\n${err?.message || err}`);
+    return false;
+  }
+
+  if (!Array.isArray(features) || !features.length) {
+    finishLocalStreetLoadProgress("No street features found in ZIP.", true);
+    alert("No street features found in ZIP.");
+    return false;
+  }
+
+  showLocalStreetLoadPercent(95, `Creating GeoJSON download (${features.length.toLocaleString()} roads)...`);
+  await sleep(0);
+  const ok = triggerGeoJsonDownloadFromFeatures(features, fileName);
+  if (!ok) {
+    finishLocalStreetLoadProgress("GeoJSON download failed.", true);
+    alert("GeoJSON download failed.");
+    return false;
+  }
+
+  finishLocalStreetLoadProgress(
+    `100% - Downloaded ${features.length.toLocaleString()} roads as GeoJSON`,
+    false
+  );
+  return true;
+}
+
+function normalizeLocalStreetTags(props = {}) {
+  const normalizeTagValue = (value, fallback = "Unknown") => {
+    if (value === null || value === undefined) return fallback;
+    const text = String(value).trim();
+    return text ? text : fallback;
+  };
+
+  return {
+    name: normalizeTagValue(props.name ?? props.NAME),
+    highway: normalizeTagValue(props.highway ?? props.HIGHWAY ?? props.road_class ?? props.fclass ?? props.FCLASS),
+    ref: normalizeTagValue(props.ref ?? props.REF ?? props.ref_name ?? props.REF_NAME),
+    maxspeed: normalizeTagValue(props.maxspeed ?? props.MAXSPEED ?? props.max_speed ?? props.MAX_SPEED),
+    lanes: normalizeTagValue(props.lanes ?? props.LANES ?? props.num_lanes ?? props.NUM_LANES),
+    surface: normalizeTagValue(props.surface ?? props.SURFACE ?? props.surf_type ?? props.SURF_TYPE),
+    oneway: normalizeTagValue(props.oneway ?? props.ONEWAY ?? props.one_way ?? props.ONE_WAY)
+  };
+}
+
+function isUnknownStreetTagValue(value) {
+  const text = String(value ?? "").trim();
+  return !text || text.toLowerCase() === "unknown";
+}
+
+function mergeStreetAttributeRows(existingRow, incomingRow) {
+  if (!existingRow) return incomingRow;
+  const merged = { ...incomingRow };
+  ["name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"].forEach(key => {
+    const nextVal = incomingRow?.[key];
+    if (isUnknownStreetTagValue(nextVal) && !isUnknownStreetTagValue(existingRow?.[key])) {
+      merged[key] = existingRow[key];
+    }
+  });
+  return merged;
+}
+
+function rowHasKnownStreetAttributes(row) {
+  return ["name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"]
+    .some(key => !isUnknownStreetTagValue(row?.[key]));
+}
+
+function normalizeLocalLineCoords(coords) {
+  if (!Array.isArray(coords)) return [];
+  const geom = [];
+  coords.forEach(pt => {
+    if (!Array.isArray(pt) || pt.length < 2) return;
+    const lon = Number(pt[0]);
+    const lat = Number(pt[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    geom.push({ lat, lon });
+  });
+  return geom.length >= 2 ? geom : [];
+}
+
+function sanitizeLocalStreetJsonText(raw) {
+  if (typeof raw !== "string") return "";
+  // Remove UTF-8 BOM and stray trailing null bytes from external converters.
+  return raw.replace(/^\uFEFF/, "").replace(/\u0000+$/g, "");
+}
+
+function tryRepairTruncatedFeatureCollection(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trimEnd();
+  if (!trimmed) return null;
+  if (!/^\s*\{/.test(trimmed)) return null;
+  if (!/\"type\"\s*:\s*\"FeatureCollection\"/i.test(trimmed)) return null;
+  if (!/\"features\"\s*:\s*\[/i.test(trimmed)) return null;
+  if (/\]\}\s*$/.test(trimmed)) return null;
+
+  const repaired = `${trimmed.replace(/,\s*$/, "")}]}`;
+  try {
+    return JSON.parse(repaired);
+  } catch {
+    return null;
+  }
+}
+
+function parseLocalStreetJsonPayload(raw, sourceLabel = "street file", sourceSizeBytes = 0) {
+  const cleaned = sanitizeLocalStreetJsonText(raw);
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    const message = String(err?.message || err || "Invalid JSON");
+    const repaired = /Unexpected end of JSON input/i.test(message)
+      ? tryRepairTruncatedFeatureCollection(cleaned)
+      : null;
+    if (repaired) {
+      console.warn(`Recovered truncated FeatureCollection while loading ${sourceLabel}.`);
+      return repaired;
+    }
+
+    const sizeMb = Number.isFinite(sourceSizeBytes) ? (sourceSizeBytes / (1024 * 1024)) : 0;
+    const sizeHint = sizeMb >= LOCAL_STREET_JSON_PARSE_WARN_MB
+      ? `\n\nFile size is ${sizeMb.toFixed(1)} MB. Very large GeoJSON files are fragile in browsers.`
+      : "";
+    const truncHint = /Unexpected end of JSON input/i.test(message)
+      ? "\n\nThis file appears incomplete. Re-run the offline converter and use the new output file."
+      : "";
+    throw new Error(`${message}${truncHint}${sizeHint}`);
+  }
+}
+
+function isValidLeafletBounds(bounds) {
+  return !!bounds &&
+    typeof bounds.getSouth === "function" &&
+    typeof bounds.getWest === "function" &&
+    typeof bounds.getNorth === "function" &&
+    typeof bounds.getEast === "function";
+}
+
+function cloneLocalStreetBounds(bounds) {
+  if (!isValidLeafletBounds(bounds)) return null;
+  return L.latLngBounds(
+    [bounds.getSouth(), bounds.getWest()],
+    [bounds.getNorth(), bounds.getEast()]
+  );
+}
+
+function boundsContainsBounds(outerBounds, innerBounds) {
+  if (!isValidLeafletBounds(outerBounds) || !isValidLeafletBounds(innerBounds)) return false;
+  return (
+    innerBounds.getSouth() >= outerBounds.getSouth() &&
+    innerBounds.getNorth() <= outerBounds.getNorth() &&
+    innerBounds.getWest() >= outerBounds.getWest() &&
+    innerBounds.getEast() <= outerBounds.getEast()
+  );
+}
+
+function buildLocalStreetChunkBounds(targetBounds) {
+  const base = isValidLeafletBounds(targetBounds)
+    ? targetBounds
+    : (map?.getBounds?.() || null);
+  if (!isValidLeafletBounds(base)) return null;
+
+  const south = base.getSouth();
+  const west = base.getWest();
+  const north = base.getNorth();
+  const east = base.getEast();
+  const spanLat = Math.max(0.0001, Math.abs(north - south));
+  const spanLng = Math.max(0.0001, Math.abs(east - west));
+  const padLat = Math.min(0.35, Math.max(0.015, spanLat * 0.2));
+  const padLng = Math.min(0.35, Math.max(0.015, spanLng * 0.2));
+
+  const chunkSouth = Math.max(-89.999999, south - padLat);
+  const chunkWest = Math.max(-179.999999, west - padLng);
+  const chunkNorth = Math.min(89.999999, north + padLat);
+  const chunkEast = Math.min(179.999999, east + padLng);
+  return L.latLngBounds([chunkSouth, chunkWest], [chunkNorth, chunkEast]);
+}
+
+function localStreetFeatureIntersectsBounds(feature, bounds) {
+  if (!isValidLeafletBounds(bounds)) return true;
+
+  const minTargetLat = bounds.getSouth();
+  const maxTargetLat = bounds.getNorth();
+  const minTargetLon = bounds.getWest();
+  const maxTargetLon = bounds.getEast();
+
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+
+  const scanCoord = (coord) => {
+    if (!Array.isArray(coord) || coord.length < 2) return;
+    const lon = Number(coord[0]);
+    const lat = Number(coord[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+  };
+
+  const geometry = feature?.geometry || {};
+  if (geometry.type === "LineString" && Array.isArray(geometry.coordinates)) {
+    geometry.coordinates.forEach(scanCoord);
+  } else if (geometry.type === "MultiLineString" && Array.isArray(geometry.coordinates)) {
+    geometry.coordinates.forEach(line => {
+      if (!Array.isArray(line)) return;
+      line.forEach(scanCoord);
+    });
+  } else {
+    return false;
+  }
+
+  if (!Number.isFinite(minLat) || !Number.isFinite(minLon)) return false;
+  return !(
+    maxLat < minTargetLat ||
+    minLat > maxTargetLat ||
+    maxLon < minTargetLon ||
+    minLon > maxTargetLon
+  );
+}
+
+function importLocalStreetFeatureIntoState(feature, nextIdState, filterBounds = null) {
+  if (!feature || typeof feature !== "object") return 0;
+  if (filterBounds && !localStreetFeatureIntersectsBounds(feature, filterBounds)) return 0;
+  const geometry = feature.geometry || {};
+  const props = feature.properties || {};
+  const lineSets = geometry.type === "LineString"
+    ? [geometry.coordinates]
+    : (geometry.type === "MultiLineString" ? geometry.coordinates : []);
+  if (!lineSets?.length) return 0;
+
+  let imported = 0;
+  const idState = nextIdState || { value: 1 };
+  if (!Number.isFinite(idState.value) || idState.value < 1) idState.value = 1;
+  const baseRawId = feature.id ?? props.id ?? props.osm_id ?? props.osm_way_id ?? props.way_id ?? null;
+
+  lineSets.forEach((coords, partIdx) => {
+    const geom = normalizeLocalLineCoords(coords);
+    if (geom.length < 2) return;
+
+    let candidateId = Number(baseRawId);
+    if (!Number.isFinite(candidateId)) {
+      candidateId = idState.value++;
+    } else if (partIdx > 0) {
+      const composite = Number(`${candidateId}${partIdx}`);
+      candidateId = Number.isFinite(composite) ? composite : idState.value++;
+    }
+
+    while (localStreetSourceState.elementsById.has(candidateId)) {
+      candidateId = idState.value++;
+    }
+
+    const element = {
+      type: "way",
+      id: candidateId,
+      tags: normalizeLocalStreetTags(props),
+      geom
+    };
+
+    if (addLocalStreetElementToIndex(element)) {
+      imported += 1;
+    }
+  });
+
+  return imported;
+}
+
+async function parseFeatureCollectionStreamFromReader(reader, options = {}) {
+  const sourceLabel = String(options.sourceLabel || "GeoJSON stream");
+  const totalBytes = Number(options.totalBytes || 0);
+  const onFeature = typeof options.onFeature === "function" ? options.onFeature : null;
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const featureYieldStep = Math.max(
+    25,
+    Number(options.featureYieldStep || LOCAL_STREET_STREAM_YIELD_FEATURE_STEP)
+  );
+  const decoder = new TextDecoder("utf-8");
+  const headerSearchLimit = 1024 * 1024;
+  const progressByteStep = 4 * 1024 * 1024;
+
+  let buffer = "";
+  let bytesRead = 0;
+  let featuresParsed = 0;
+  let featuresStarted = false;
+  let arrayClosed = false;
+  let objectDepth = 0;
+  let featureStart = -1;
+  let inString = false;
+  let escapeNext = false;
+  let lastProgressBytes = 0;
+
+  const emitProgress = (force = false) => {
+    if (!onProgress) return;
+    if (!force && (bytesRead - lastProgressBytes) < progressByteStep) return;
+    lastProgressBytes = bytesRead;
+    onProgress({
+      bytesRead,
+      totalBytes,
+      featuresParsed
+    });
+  };
+
+  const emitFeature = async (featureJson) => {
+    let parsedFeature;
+    try {
+      parsedFeature = JSON.parse(featureJson);
+    } catch (err) {
+      throw new Error(`Invalid feature JSON while streaming ${sourceLabel}: ${err?.message || err}`);
+    }
+    featuresParsed += 1;
+    if (onFeature) {
+      // Allow async feature handlers so indexing can yield without locking the page.
+      // eslint-disable-next-line no-await-in-loop
+      await onFeature(parsedFeature, featuresParsed);
+    }
+    if ((featuresParsed % featureYieldStep) === 0) {
+      emitProgress(false);
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(0);
+    }
+  };
+
+  const parseBuffer = async (isFinalChunk) => {
+    if (!featuresStarted) {
+      const match = /"features"\s*:\s*\[/i.exec(buffer);
+      if (!match) {
+        if (buffer.length > headerSearchLimit) {
+          throw new Error(
+            `Could not find a FeatureCollection "features" array in ${sourceLabel}.`
+          );
+        }
+        if (isFinalChunk) {
+          throw new Error(`Could not find a FeatureCollection "features" array in ${sourceLabel}.`);
+        }
+        return;
+      }
+      const afterMatchIdx = match.index + match[0].length;
+      buffer = buffer.slice(afterMatchIdx);
+      featuresStarted = true;
+    }
+
+    let i = 0;
+    while (i < buffer.length) {
+      if (arrayClosed) {
+        buffer = "";
+        return;
+      }
+
+      if (objectDepth === 0) {
+        while (i < buffer.length) {
+          const ch = buffer[i];
+          if (ch === "," || ch === " " || ch === "\n" || ch === "\r" || ch === "\t") {
+            i += 1;
+            continue;
+          }
+          break;
+        }
+
+        if (i >= buffer.length) break;
+
+        const ch = buffer[i];
+        if (ch === "]") {
+          arrayClosed = true;
+          i += 1;
+          continue;
+        }
+        if (ch !== "{") {
+          if (isFinalChunk) {
+            throw new Error(`Unexpected token "${ch}" while reading features in ${sourceLabel}.`);
+          }
+          i += 1;
+          continue;
+        }
+        featureStart = i;
+        objectDepth = 1;
+        inString = false;
+        escapeNext = false;
+        i += 1;
+        continue;
+      }
+
+      const ch = buffer[i];
+      if (inString) {
+        if (escapeNext) {
+          escapeNext = false;
+        } else if (ch === "\\") {
+          escapeNext = true;
+        } else if (ch === "\"") {
+          inString = false;
+        }
+      } else if (ch === "\"") {
+        inString = true;
+      } else if (ch === "{") {
+        objectDepth += 1;
+      } else if (ch === "}") {
+        objectDepth -= 1;
+        if (objectDepth === 0) {
+          const featureJson = buffer.slice(featureStart, i + 1);
+          // eslint-disable-next-line no-await-in-loop
+          await emitFeature(featureJson);
+          buffer = buffer.slice(i + 1);
+          i = 0;
+          featureStart = -1;
+          continue;
+        }
+      }
+      i += 1;
+    }
+
+    if (objectDepth === 0) {
+      if (i > 0) {
+        buffer = buffer.slice(i);
+      }
+      if (!arrayClosed && buffer.length > 65536) {
+        buffer = buffer.slice(-65536);
+      }
+    } else if (featureStart > 0) {
+      buffer = buffer.slice(featureStart);
+      featureStart = 0;
+    }
+
+    if (isFinalChunk && !arrayClosed) {
+      throw new Error(`Unexpected end of JSON input while reading ${sourceLabel}.`);
+    }
+  };
+
+  try {
+    while (true) {
+      // eslint-disable-next-line no-await-in-loop
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || !value.byteLength) continue;
+      bytesRead += value.byteLength;
+      buffer += decoder.decode(value, { stream: true });
+      // eslint-disable-next-line no-await-in-loop
+      await parseBuffer(false);
+      emitProgress(false);
+    }
+    buffer += decoder.decode();
+    await parseBuffer(true);
+    emitProgress(true);
+  } finally {
+    if (typeof reader.releaseLock === "function") {
+      try {
+        reader.releaseLock();
+      } catch {}
+    }
+  }
+
+  if (!featuresStarted) {
+    throw new Error(`Could not find a FeatureCollection "features" array in ${sourceLabel}.`);
+  }
+  if (!arrayClosed) {
+    throw new Error(`Unexpected end of JSON input while reading ${sourceLabel}.`);
+  }
+
+  return { featuresParsed, bytesRead };
+}
+
+async function importLocalStreetFeaturesFromGeoJsonStream(reader, sourceName, options = {}) {
+  const useLocalToggle = document.getElementById("useLocalStreetSource");
+  const persistHandle = options.persistHandle || null;
+  let persistPath = String(options.persistPath || "").trim();
+  const skipRemember = !!options.skipRemember;
+  const quiet = !!options.quiet;
+  const filterBounds = isValidLeafletBounds(options.filterBounds) ? options.filterBounds : null;
+  const chunkMode = !!filterBounds;
+  const sourceSizeBytes = Number(options.sourceSizeBytes || 0);
+  const preserveSourceDescriptor = !!options.preserveSourceDescriptor;
+  const sourceDescriptor = options.sourceDescriptor || null;
+  const preserveToggleState = !!options.preserveToggleState;
+
+  resetLocalStreetSourceState({ preserveSourceDescriptor });
+  if (sourceDescriptor) {
+    localStreetSourceState.sourceDescriptor = sourceDescriptor;
+  }
+  const nextIdState = { value: 1 };
+  let imported = 0;
+  let lastProgressTs = 0;
+
+  showLocalStreetLoadPercent(8, `Streaming ${sourceName}...`);
+  await sleep(20);
+
+  await parseFeatureCollectionStreamFromReader(reader, {
+    sourceLabel: sourceName,
+    totalBytes: sourceSizeBytes,
+    onFeature: async (feature) => {
+      if (!isLocalStreetFeature(feature, "")) return;
+      imported += importLocalStreetFeatureIntoState(feature, nextIdState, filterBounds);
+      if ((imported % LOCAL_STREET_STREAM_YIELD_FEATURE_STEP) === 0) {
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(0);
+      }
+    },
+    onProgress: ({ bytesRead, totalBytes, featuresParsed }) => {
+      const now = Date.now();
+      if ((now - lastProgressTs) < 250) return;
+      lastProgressTs = now;
+
+      const ratio = (Number.isFinite(totalBytes) && totalBytes > 0)
+        ? Math.max(0, Math.min(1, bytesRead / totalBytes))
+        : 0;
+      const progress = 8 + (ratio * 90);
+      showLocalStreetLoadPercent(
+        progress,
+        `Streaming ${sourceName}... ${featuresParsed.toLocaleString()} scanned, ${imported.toLocaleString()} indexed`
+      );
+    }
+  });
+
+  if (!imported) {
+    if (chunkMode) {
+      localStreetSourceState.loaded = true;
+      localStreetSourceState.sourceName = sourceName;
+      localStreetSourceState.chunkMode = true;
+      localStreetSourceState.chunkBounds = cloneLocalStreetBounds(filterBounds);
+      if (useLocalToggle && !preserveToggleState) useLocalToggle.checked = false;
+      updateLocalStreetSourceStatus();
+      finishLocalStreetLoadProgress("Chunk loaded, but no streets were found in this region.", true);
+      return true;
+    }
+    finishLocalStreetLoadProgress("Street file did not contain valid street lines.", true);
+    if (!quiet) alert("No valid street line features were found in this file.");
+    updateLocalStreetSourceStatus();
+    return false;
+  }
+
+  localStreetSourceState.loaded = true;
+  localStreetSourceState.sourceName = sourceName;
+  localStreetSourceState.chunkMode = chunkMode;
+  localStreetSourceState.chunkBounds = chunkMode ? cloneLocalStreetBounds(filterBounds) : null;
+
+  if (useLocalToggle && !preserveToggleState) useLocalToggle.checked = false;
+  updateLocalStreetSourceStatus();
+
+  if (!skipRemember && !persistHandle && !persistPath && !quiet) {
+    const pastedPath = window.prompt(
+      "To auto-open this streets file next time, paste its file path or URL (optional):",
+      ""
+    );
+    persistPath = String(pastedPath || "").trim();
+  }
+
+  if (localStreetSourceState.sourceDescriptor && typeof localStreetSourceState.sourceDescriptor === "object") {
+    localStreetSourceState.sourceDescriptor.sourceName = sourceName;
+    localStreetSourceState.sourceDescriptor.sourcePath = persistPath;
+    if (persistHandle) {
+      localStreetSourceState.sourceDescriptor.sourceHandle = persistHandle;
+    }
+  }
+
+  if (!skipRemember) {
+    try {
+      await rememberLocalStreetSourceForAutoLoad({
+        sourceName,
+        sourcePath: persistPath,
+        handle: persistHandle
+      });
+    } catch (err) {
+      console.warn("Unable to persist local streets source for auto-load:", err);
+    }
+  }
+
+  showLocalStreetLoadPercent(100, `Loaded ${imported.toLocaleString()} local street segments`);
+  finishLocalStreetLoadProgress(`100% - Loaded ${imported.toLocaleString()} local street segments`, false);
+  return true;
+}
+
+function startTexasStreetsDownload(skipConfirm = false) {
+  if (!skipConfirm) {
+    const proceed = window.confirm(
+      "Download the Geofabrik Texas streets source ZIP now?\n\nhttps://download.geofabrik.de/north-america/us/texas-latest-free.shp.zip"
+    );
+    if (!proceed) return false;
+  }
+
+  const link = document.createElement("a");
+  link.href = TEXAS_STREETS_DOWNLOAD_URL;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.download = "texas-latest-free.shp.zip";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  updateLocalStreetSourceStatus("Downloading Texas source ZIP from Geofabrik... then click Load File and select that .zip file.");
+  return true;
+}
+
+function downloadOfflineStreetConverter() {
+  const link = document.createElement("a");
+  link.href = LOCAL_STREET_OFFLINE_CONVERTER_PACKAGE;
+  link.download = "tds-streets-offline-converter-package.zip";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  updateLocalStreetSourceStatus("Downloaded converter package. Extract it, then run tds-streets-offline-converter-launcher.cmd.");
+}
+
+function downloadLocalStreetAutoSetupPackage() {
+  const link = document.createElement("a");
+  link.href = LOCAL_STREET_AUTO_SETUP_PACKAGE;
+  link.download = "tds-streets-auto-setup-package.zip";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  updateLocalStreetSourceStatus(
+    "Downloaded setup program package. Extract it, then run tds-local-streets-auto-setup-launcher.cmd."
+  );
+}
+
+function showLocalStreetLoadProgress(message) {
+  if (localStreetStatusResetTimer) {
+    clearTimeout(localStreetStatusResetTimer);
+    localStreetStatusResetTimer = null;
+  }
+  if (typeof window.hideLoading === "function") {
+    window.hideLoading();
+  }
+  setStreetLoadBarVisible(true);
+  updateLocalStreetSourceStatus(message || "Loading local streets...");
+}
+
+function finishLocalStreetLoadProgress(message = "", isError = false) {
+  if (localStreetStatusResetTimer) {
+    clearTimeout(localStreetStatusResetTimer);
+    localStreetStatusResetTimer = null;
+  }
+  setStreetLoadBarVisible(false);
+  if (!message) {
+    updateLocalStreetSourceStatus();
+    return;
+  }
+  updateLocalStreetSourceStatus(message);
+  localStreetStatusResetTimer = setTimeout(() => {
+    updateLocalStreetSourceStatus();
+  }, isError ? 4200 : 2600);
+}
+
+function clampLocalStreetPercent(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value * 10) / 10));
+}
+
+function showLocalStreetLoadPercent(percent, label) {
+  const pct = clampLocalStreetPercent(percent);
+  const pctText = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+  const text = String(label || "Loading local streets...");
+  showLocalStreetLoadProgress(`${pctText}% - ${text}`);
+}
+
+function startLocalStreetProgressPulse(startPercent, endPercent, label) {
+  let current = Number.isFinite(startPercent) ? startPercent : 0;
+  const cap = Number.isFinite(endPercent) ? endPercent : 95;
+  showLocalStreetLoadPercent(current, label);
+  const timer = setInterval(() => {
+    current = Math.min(cap, current + 1);
+    showLocalStreetLoadPercent(current, label);
+  }, 320);
+  return () => {
+    clearInterval(timer);
+  };
+}
+
+async function importLocalStreetFeatures(features, sourceName, options = {}) {
+  const useLocalToggle = document.getElementById("useLocalStreetSource");
+  const persistHandle = options.persistHandle || null;
+  const persistPath = String(options.persistPath || "").trim();
+  const skipRemember = !!options.skipRemember;
+  const filterBounds = isValidLeafletBounds(options.filterBounds) ? options.filterBounds : null;
+  const chunkMode = !!filterBounds;
+  const preserveSourceDescriptor = !!options.preserveSourceDescriptor;
+  const sourceDescriptor = options.sourceDescriptor || null;
+  const preserveToggleState = !!options.preserveToggleState;
+  const progressStartPct = Number.isFinite(options.progressStartPct) ? options.progressStartPct : 70;
+  const progressEndPct = Number.isFinite(options.progressEndPct) ? options.progressEndPct : 99;
+  const progressLabel = String(options.progressLabel || "Indexing local streets...");
+
+  resetLocalStreetSourceState({ preserveSourceDescriptor });
+  if (sourceDescriptor) {
+    localStreetSourceState.sourceDescriptor = sourceDescriptor;
+  }
+  const nextIdState = { value: 1 };
+  let imported = 0;
+  const reportStep = Math.max(250, Math.floor(features.length / 80));
+
+  for (let i = 0; i < features.length; i++) {
+    const feature = features[i];
+    imported += importLocalStreetFeatureIntoState(feature, nextIdState, filterBounds);
+
+    if (i % reportStep === 0) {
+      const ratio = features.length > 0 ? (i / features.length) : 0;
+      const progress = progressStartPct + ((progressEndPct - progressStartPct) * ratio);
+      showLocalStreetLoadPercent(
+        progress,
+        `${progressLabel} ${i.toLocaleString()}/${features.length.toLocaleString()}`
+      );
+      // Yield to keep UI responsive while indexing large files.
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(0);
+    }
+  }
+
+  localStreetSourceState.loaded = imported > 0 || chunkMode;
+  localStreetSourceState.sourceName = sourceName;
+  localStreetSourceState.chunkMode = chunkMode;
+  localStreetSourceState.chunkBounds = chunkMode ? cloneLocalStreetBounds(filterBounds) : null;
+
+  if (!localStreetSourceState.loaded) {
+    finishLocalStreetLoadProgress("Street file did not contain valid street lines.", true);
+    alert("No valid street line features were found in this file.");
+    updateLocalStreetSourceStatus();
+    return false;
+  }
+
+  if (chunkMode && imported === 0) {
+    if (useLocalToggle && !preserveToggleState) useLocalToggle.checked = false;
+    updateLocalStreetSourceStatus();
+    finishLocalStreetLoadProgress("Chunk loaded, but no streets were found in this region.", true);
+    return true;
+  }
+
+  if (useLocalToggle && !preserveToggleState) useLocalToggle.checked = false;
+  updateLocalStreetSourceStatus();
+
+  if (localStreetSourceState.sourceDescriptor && typeof localStreetSourceState.sourceDescriptor === "object") {
+    localStreetSourceState.sourceDescriptor.sourceName = sourceName;
+    localStreetSourceState.sourceDescriptor.sourcePath = persistPath;
+    if (persistHandle) {
+      localStreetSourceState.sourceDescriptor.sourceHandle = persistHandle;
+    }
+  }
+
+  if (!skipRemember) {
+    try {
+      await rememberLocalStreetSourceForAutoLoad({
+        sourceName,
+        sourcePath: persistPath,
+        handle: persistHandle
+      });
+    } catch (err) {
+      console.warn("Unable to persist local streets source for auto-load:", err);
+    }
+  }
+
+  showLocalStreetLoadPercent(100, `Loaded ${imported.toLocaleString()} local street segments`);
+  finishLocalStreetLoadProgress(`100% - Loaded ${imported.toLocaleString()} local street segments`, false);
+  return true;
+}
+
+async function loadLocalStreetSourceFile(file, options = {}) {
+  if (!file) return false;
+
+  const fileName = file.name || "local streets file";
+  const fileSizeBytes = Number(file.size || 0);
+  const streamThresholdBytes = LOCAL_STREET_JSON_STREAM_THRESHOLD_MB * 1024 * 1024;
+  const persistHandle = options.persistHandle || null;
+  const persistPathValue = String(options.persistPath || "").trim();
+  const chunkFilterBounds = isValidLeafletBounds(options.forceChunkBounds)
+    ? cloneLocalStreetBounds(options.forceChunkBounds)
+    : (fileSizeBytes >= streamThresholdBytes ? buildLocalStreetChunkBounds(map?.getBounds?.()) : null);
+  const sourceDescriptor = {
+    sourceName: fileName,
+    sourceSizeBytes: fileSizeBytes,
+    sourcePath: persistPathValue,
+    sourceHandle: persistHandle || null,
+    sourceFile: file,
+    isChunkCapable: true
+  };
+  const lowerFileName = fileName.toLowerCase();
+  const isZipSource = LOCAL_STREET_ZIP_RX.test(lowerFileName);
+  const isJsonSource = LOCAL_STREET_JSON_RX.test(lowerFileName);
+  const textReader = typeof file.text === "function" ? file.text.bind(file) : null;
+  const bufferReader = typeof file.arrayBuffer === "function" ? file.arrayBuffer.bind(file) : null;
+  const quiet = !!options.quiet;
+
+  if (!isZipSource && !isJsonSource) {
+    if (!quiet) alert("Unsupported file type. Select a .geojson/.json file or a Geofabrik .zip shapefile.");
+    return false;
+  }
+  if (isZipSource && !bufferReader) {
+    if (!quiet) alert("Unable to read selected ZIP file.");
+    return false;
+  }
+  if (isJsonSource && !textReader) {
+    if (!quiet) alert("Unable to read selected JSON/GeoJSON file.");
+    return false;
+  }
+  if (
+    isJsonSource &&
+    fileSizeBytes >= streamThresholdBytes &&
+    (!file || typeof file.stream !== "function")
+  ) {
+    if (!quiet) {
+      alert(
+        "This JSON file is very large and your browser does not support streamed file reads for it.\n\n" +
+        "Use the offline converter again, then open the result in a Chromium-based browser."
+      );
+    }
+    return false;
+  }
+
+  if (
+    isJsonSource &&
+    fileSizeBytes >= streamThresholdBytes &&
+    file &&
+    typeof file.stream === "function"
+  ) {
+    showLocalStreetLoadPercent(4, `Reading ${fileName}...`);
+    await sleep(20);
+    try {
+      return await importLocalStreetFeaturesFromGeoJsonStream(file.stream().getReader(), fileName, {
+        persistHandle,
+        persistPath: persistPathValue,
+        skipRemember: !!options.skipRemember,
+        quiet,
+        sourceSizeBytes: fileSizeBytes,
+        filterBounds: chunkFilterBounds,
+        preserveSourceDescriptor: true,
+        sourceDescriptor,
+        preserveToggleState: !!options.preserveToggleState
+      });
+    } catch (err) {
+      finishLocalStreetLoadProgress("Could not load streets file.", true);
+      if (!quiet) alert(`Could not load local streets file.\n\n${err?.message || err}`);
+      return false;
+    }
+  }
+
+  showLocalStreetLoadPercent(4, `Reading ${fileName}...`);
+  await sleep(20);
+  let features = [];
+  let progressStartPct = 35;
+  try {
+    if (isZipSource) {
+      progressStartPct = 90;
+      ensureZipSizeWithinBrowserLimit(file.size, fileName);
+      const sourceZip = await bufferReader();
+      features = await extractStreetFeaturesFromZipBuffer(sourceZip, fileName);
+    } else {
+      const raw = await textReader();
+      showLocalStreetLoadPercent(14, `Parsing ${fileName}...`);
+      await sleep(20);
+      const parsed = parseLocalStreetJsonPayload(raw, fileName, fileSizeBytes);
+      showLocalStreetLoadPercent(24, `Extracting road features from ${fileName}...`);
+      features = pickLocalStreetFeaturesFromParsedSource(parsed, false);
+    }
+  } catch (err) {
+    finishLocalStreetLoadProgress("Could not load streets file.", true);
+    if (!quiet) alert(`Could not load local streets file.\n\n${err?.message || err}`);
+    return false;
+  }
+
+  if (!features.length) {
+    finishLocalStreetLoadProgress("No street line features found.", true);
+    if (!quiet) alert("No street line features were found in this file.");
+    return false;
+  }
+
+  let persistPath = persistPathValue;
+  if (!options.skipRemember && !persistHandle && !persistPath && !quiet) {
+    const pastedPath = window.prompt(
+      "To auto-open this streets file next time, paste its file path or URL (optional):",
+      ""
+    );
+    persistPath = String(pastedPath || "").trim();
+  }
+
+  return importLocalStreetFeatures(features, fileName, {
+    persistHandle,
+    persistPath,
+    skipRemember: !!options.skipRemember,
+    filterBounds: chunkFilterBounds,
+    preserveSourceDescriptor: true,
+    sourceDescriptor: {
+      ...sourceDescriptor,
+      sourcePath: persistPath
+    },
+    preserveToggleState: !!options.preserveToggleState,
+    progressStartPct,
+    progressEndPct: 99,
+    progressLabel: "Indexing local streets..."
+  });
+}
+
+async function loadLocalStreetSourceFromPath(pathInput, options = {}) {
+  const sourcePath = String(pathInput || "").trim();
+  if (!sourcePath) {
+    throw new Error("No file path was provided.");
+  }
+
+  const sourceUrl = normalizeLocalStreetSourcePathToUrl(sourcePath);
+  const barePath = sourcePath.split(/[?#]/)[0];
+  const bareUrl = sourceUrl.split(/[?#]/)[0];
+  const isZipSource = LOCAL_STREET_ZIP_RX.test(barePath) || LOCAL_STREET_ZIP_RX.test(bareUrl);
+  const isJsonSource = LOCAL_STREET_JSON_RX.test(barePath) || LOCAL_STREET_JSON_RX.test(bareUrl) || !isZipSource;
+  if (!isZipSource && !isJsonSource) {
+    throw new Error("Only .zip, .geojson, or .json paths are supported.");
+  }
+
+  showLocalStreetLoadPercent(4, `Reading ${sourcePath}...`);
+  await sleep(20);
+
+  let response;
+  try {
+    response = await fetch(sourceUrl, { cache: "no-store" });
+  } catch (err) {
+    finishLocalStreetLoadProgress("Could not read saved streets path.", true);
+    const baseMsg = `Unable to open "${sourcePath}".`;
+    const localHint = isLikelyLocalFilesystemPath(sourcePath)
+      ? "\n\nBrowsers usually block direct local filesystem paths. Use the Load File button instead."
+      : "";
+    throw new Error(`${baseMsg}\n${err?.message || err}${localHint}`);
+  }
+
+  if (!response.ok) {
+    finishLocalStreetLoadProgress("Could not read saved streets path.", true);
+    throw new Error(`File request failed with HTTP ${response.status}.`);
+  }
+  const responseSizeBytes = Number(response.headers.get("content-length") || 0);
+  const streamThresholdBytes = LOCAL_STREET_JSON_STREAM_THRESHOLD_MB * 1024 * 1024;
+  const displayName = sourcePath.split(/[\\/]/).pop() || sourcePath;
+  const shouldPreferChunkedStream = !Number.isFinite(responseSizeBytes) ||
+    responseSizeBytes <= 0 ||
+    responseSizeBytes >= streamThresholdBytes ||
+    isValidLeafletBounds(options.forceChunkBounds);
+  const chunkFilterBounds = isValidLeafletBounds(options.forceChunkBounds)
+    ? cloneLocalStreetBounds(options.forceChunkBounds)
+    : (
+      shouldPreferChunkedStream
+        ? buildLocalStreetChunkBounds(map?.getBounds?.())
+        : null
+    );
+  const sourceDescriptor = {
+    sourceName: displayName,
+    sourceSizeBytes: responseSizeBytes,
+    sourcePath,
+    sourceHandle: null,
+    sourceFile: null,
+    isChunkCapable: true
+  };
+
+  if (
+    isJsonSource &&
+    shouldPreferChunkedStream &&
+    (!response.body || typeof response.body.getReader !== "function")
+  ) {
+    finishLocalStreetLoadProgress("Could not stream saved streets file.", true);
+    throw new Error(
+      "Saved streets JSON is too large for non-stream parsing in this browser. " +
+      "Use Load File in a Chromium-based browser or provide a smaller regional file."
+    );
+  }
+
+  if (
+    isJsonSource &&
+    shouldPreferChunkedStream &&
+    response.body &&
+    typeof response.body.getReader === "function"
+  ) {
+    try {
+      return await importLocalStreetFeaturesFromGeoJsonStream(response.body.getReader(), displayName, {
+        persistPath: sourcePath,
+        skipRemember: !!options.skipRemember,
+        sourceSizeBytes: responseSizeBytes,
+        filterBounds: chunkFilterBounds,
+        preserveSourceDescriptor: true,
+        sourceDescriptor,
+        preserveToggleState: !!options.preserveToggleState
+      });
+    } catch (err) {
+      finishLocalStreetLoadProgress("Could not parse saved streets file.", true);
+      throw new Error(err?.message || err);
+    }
+  }
+
+  let features = [];
+  let progressStartPct = 35;
+  try {
+    if (isZipSource) {
+      progressStartPct = 90;
+      const contentLength = Number(response.headers.get("content-length") || 0);
+      if (Number.isFinite(contentLength) && contentLength > 0) {
+        ensureZipSizeWithinBrowserLimit(contentLength, sourcePath);
+      }
+      const sourceZip = await response.arrayBuffer();
+      ensureZipSizeWithinBrowserLimit(sourceZip?.byteLength, sourcePath);
+      features = await extractStreetFeaturesFromZipBuffer(sourceZip, sourcePath);
+    } else {
+      const raw = await response.text();
+      showLocalStreetLoadPercent(14, `Parsing ${sourcePath}...`);
+      await sleep(20);
+      const parsed = parseLocalStreetJsonPayload(raw, sourcePath, responseSizeBytes);
+      showLocalStreetLoadPercent(24, `Extracting road features from ${sourcePath}...`);
+      features = pickLocalStreetFeaturesFromParsedSource(parsed, false);
+    }
+  } catch (err) {
+    finishLocalStreetLoadProgress("Could not parse saved streets file.", true);
+    throw new Error(err?.message || err);
+  }
+
+  if (!features.length) {
+    finishLocalStreetLoadProgress("No street line features found in saved path.", true);
+    throw new Error("No street line features were found in that file.");
+  }
+
+  return importLocalStreetFeatures(features, displayName, {
+    persistPath: sourcePath,
+    skipRemember: !!options.skipRemember,
+    filterBounds: chunkFilterBounds,
+    preserveSourceDescriptor: true,
+    sourceDescriptor,
+    preserveToggleState: !!options.preserveToggleState,
+    progressStartPct,
+    progressEndPct: 99,
+    progressLabel: "Indexing local streets..."
+  });
+}
+
+async function promptForMissingSavedStreetSource(error = null) {
+  const reason = error?.message
+    ? `\n\nSaved streets file could not be opened:\n${error.message}`
+    : "";
+  const wantsDownload = window.confirm(
+    `Saved streets file was not found.${reason}\n\nPress OK to download a new Texas streets file.\nPress Cancel to paste a file path.`
+  );
+  if (wantsDownload) {
+    startTexasStreetsDownload(true);
+    return;
+  }
+
+  const pastedPath = window.prompt(
+    "Paste the streets file path or URL (.zip, .geojson, or .json):",
+    ""
+  );
+  if (!pastedPath) return;
+
+  try {
+    await loadLocalStreetSourceFromPath(pastedPath);
+  } catch (err) {
+    alert(`Could not load streets from that path.\n\n${err?.message || err}\n\nYou can use Load File instead.`);
+  }
+}
+
+async function tryRestoreSavedStreetSourceOnStartup() {
+  const meta = getLocalStreetSourceMeta();
+  if (!meta) return;
+
+  updateLocalStreetSourceStatus("Reopening saved local streets source...");
+  let restoreError = null;
+
+  if (meta.hasHandle) {
+    try {
+      const handle = await readStoredLocalStreetHandle();
+      if (!handle) throw new Error("Saved local streets file handle is unavailable.");
+
+      if (typeof handle.queryPermission === "function") {
+        const permission = await handle.queryPermission({ mode: "read" });
+        if (permission !== "granted") {
+          throw new Error("Saved local streets file permission was not granted.");
+        }
+      }
+
+      const savedFile = await handle.getFile();
+      const ok = await loadLocalStreetSourceFile(savedFile, {
+        quiet: true,
+        persistHandle: handle,
+        persistPath: meta.sourcePath || ""
+      });
+      if (ok) return;
+      throw new Error("Saved local streets file could not be loaded.");
+    } catch (err) {
+      restoreError = err;
+    }
+  }
+
+  if (meta.sourcePath) {
+    try {
+      const ok = await loadLocalStreetSourceFromPath(meta.sourcePath, { skipRemember: false });
+      if (ok) return;
+      throw new Error("Saved local streets path could not be loaded.");
+    } catch (err) {
+      restoreError = err;
+    }
+  }
+
+  updateLocalStreetSourceStatus();
+  await promptForMissingSavedStreetSource(restoreError);
+}
+
+async function openLocalStreetSourcePicker(fileInput) {
+  if (typeof window.showOpenFilePicker !== "function") {
+    fileInput?.click();
+    return;
+  }
+
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      multiple: false,
+      types: [
+        {
+          description: "Street source files",
+          accept: {
+            "application/zip": [".zip"],
+            "application/json": [".json", ".geojson"]
+          }
+        }
+      ]
+    });
+    if (!handle) return;
+    const file = await handle.getFile();
+    await loadLocalStreetSourceFile(file, { persistHandle: handle });
+  } catch (err) {
+    if (err?.name === "AbortError") return;
+    console.warn("showOpenFilePicker failed, falling back to file input.", err);
+    fileInput?.click();
+  }
+}
+
+function updateStreetSetupGuide() {
+  const step1 = document.getElementById("streetSetupStep1");
+  const step2 = document.getElementById("streetSetupStep2");
+  const step3 = document.getElementById("streetSetupStep3");
+  const hasSource = !!localStreetSourceState.loaded || (!!localStreetBackendState.available && !!localStreetBackendState.hasIndex);
+  const backendReady = !!localStreetBackendState.available && !!localStreetBackendState.hasIndex;
+  const toggle = document.getElementById("useLocalStreetSource");
+  const streetsVisible = !!toggle?.checked && streetAttributeById.size > 0;
+
+  step1?.classList.toggle("done", hasSource);
+  step2?.classList.toggle("done", backendReady);
+  step3?.classList.toggle("done", streetsVisible);
+}
+
+function setStreetWizardStatus(message = "Ready.") {
+  const node = document.getElementById("streetWizardStatus");
+  if (!node) return;
+  node.textContent = message || "Ready.";
+}
+
+function openStreetSetupWizardModal() {
+  const modal = document.getElementById("streetSetupWizardModal");
+  if (!modal) return;
+  updateStreetSetupGuide();
+  setStreetWizardStatus(
+    localStreetBackendState.available && localStreetBackendState.hasIndex
+      ? "Backend is ready. Next: Turn on Street Segments, then draw a polygon."
+      : "Use buttons below in order: get data, check backend, then start polygon load."
+  );
+  modal.style.display = "flex";
+}
+
+function closeStreetSetupWizardModal() {
+  const modal = document.getElementById("streetSetupWizardModal");
+  if (modal) modal.style.display = "none";
+}
+
+function initLocalStreetSourceControls() {
+  const openStreetSetupWizardBtn = document.getElementById("openStreetSetupWizardBtn");
+  const loadLocalStreetFileBtn = document.getElementById("loadLocalStreetFileBtn");
+  const downloadTexasZipBtn = document.getElementById("downloadTexasZipBtn");
+  const downloadAutoSetupPackageBtn = document.getElementById("downloadAutoSetupPackageBtn");
+  const checkLocalBackendBtn = document.getElementById("checkLocalBackendBtn");
+  const setLocalBackendUrlBtn = document.getElementById("setLocalBackendUrlBtn");
+  const streetWizardModal = document.getElementById("streetSetupWizardModal");
+  const streetWizardClose = document.getElementById("streetSetupWizardClose");
+  const streetWizardDownloadTexasBtn = document.getElementById("streetWizardDownloadTexasBtn");
+  const streetWizardLoadFileBtn = document.getElementById("streetWizardLoadFileBtn");
+  const streetWizardAutoSetupBtn = document.getElementById("streetWizardAutoSetupBtn");
+  const streetWizardCheckBackendBtn = document.getElementById("streetWizardCheckBackendBtn");
+  const streetWizardStartBtn = document.getElementById("streetWizardStartBtn");
+  const useLocalToggle = document.getElementById("useLocalStreetSource");
+
+  let localStreetSourceFileInput = document.getElementById("localStreetSourceFileInput");
+  if (!localStreetSourceFileInput) {
+    localStreetSourceFileInput = document.createElement("input");
+    localStreetSourceFileInput.type = "file";
+    localStreetSourceFileInput.id = "localStreetSourceFileInput";
+    localStreetSourceFileInput.accept = ".zip,.json,.geojson";
+    localStreetSourceFileInput.hidden = true;
+    document.body.appendChild(localStreetSourceFileInput);
+  }
+
+  if (!localStreetSourceFileInput.dataset.bound) {
+    localStreetSourceFileInput.addEventListener("change", async e => {
+      const file = e.target?.files?.[0];
+      if (!file) return;
+      try {
+        await loadLocalStreetSourceFile(file);
+        setStreetWizardStatus(`Loaded ${file.name}.`);
+      } catch (err) {
+        console.error("Failed loading local street source file:", err);
+      } finally {
+        e.target.value = "";
+        updateStreetSetupGuide();
+      }
+    });
+    localStreetSourceFileInput.dataset.bound = "1";
+  }
+
+  const openStreetSourceFilePicker = async () => {
+    await openLocalStreetSourcePicker(localStreetSourceFileInput);
+    updateStreetSetupGuide();
+  };
+
+  const runLocalBackendCheck = async (showAlert = true) => {
+    updateLocalStreetSourceStatus("Checking local backend...");
+    setStreetWizardStatus("Checking local backend...");
+    await checkLocalStreetBackendAvailability(true);
+    updateStreetSetupGuide();
+    if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
+      setStreetWizardStatus("Backend is ready.");
+      if (showAlert) alert("Backend is ready.");
+      return true;
+    }
+    if (localStreetBackendState.available && !localStreetBackendState.hasIndex) {
+      setStreetWizardStatus("Backend is running but no streets index is loaded.");
+      if (showAlert) {
+        alert(
+          "Local backend is running, but no streets index is loaded.\n\n" +
+          "Run the setup program (or indexer) first, then click Check Backend again."
+        );
+      }
+      return false;
+    }
+
+    setStreetWizardStatus(`Backend not reachable at ${localStreetBackendState.baseUrl}.`);
+    if (showAlert) {
+      alert(
+        "Local backend is not reachable.\n\n" +
+        `URL: ${localStreetBackendState.baseUrl}\n` +
+        "Start the backend server locally, then check again."
+      );
+    }
+    return false;
+  };
+
+  localStreetBackendState.baseUrl = getStoredLocalStreetBackendUrl();
+
+  if (useLocalToggle) {
+    useLocalToggle.checked = false;
+    useLocalToggle.disabled = !localStreetHasProvider();
+  }
+
+  openStreetSetupWizardBtn?.addEventListener("click", () => {
+    openStreetSetupWizardModal();
+  });
+
+  loadLocalStreetFileBtn?.addEventListener("click", () => {
+    openStreetSourceFilePicker().catch(err => {
+      console.error("Street source picker failed:", err);
+    });
+  });
+
+  downloadTexasZipBtn?.addEventListener("click", () => {
+    startTexasStreetsDownload(false);
+    setStreetWizardStatus("Texas source ZIP download started.");
+  });
+
+  downloadAutoSetupPackageBtn?.addEventListener("click", () => {
+    downloadLocalStreetAutoSetupPackage();
+    setStreetWizardStatus("Auto setup package downloaded.");
+  });
+
+  checkLocalBackendBtn?.addEventListener("click", () => {
+    runLocalBackendCheck(true).catch(err => {
+      console.error("Backend check failed:", err);
+    });
+  });
+
+  setLocalBackendUrlBtn?.addEventListener("click", async () => {
+    const nextUrl = window.prompt(
+      "Enter local backend URL:",
+      localStreetBackendState.baseUrl || LOCAL_STREET_BACKEND_URL_DEFAULT
+    );
+    if (!nextUrl) return;
+    setStoredLocalStreetBackendUrl(nextUrl);
+    updateLocalStreetSourceStatus(`Backend URL set to ${localStreetBackendState.baseUrl}. Checking...`);
+    await runLocalBackendCheck(false);
+  });
+
+  streetWizardClose?.addEventListener("click", () => {
+    closeStreetSetupWizardModal();
+  });
+
+  streetWizardModal?.addEventListener("click", e => {
+    if (e.target !== streetWizardModal) return;
+    closeStreetSetupWizardModal();
+  });
+
+  streetWizardDownloadTexasBtn?.addEventListener("click", () => {
+    startTexasStreetsDownload(false);
+    setStreetWizardStatus("Texas source ZIP download started.");
+  });
+
+  streetWizardLoadFileBtn?.addEventListener("click", () => {
+    openStreetSourceFilePicker().catch(err => {
+      console.error("Street source picker failed:", err);
+    });
+  });
+
+  streetWizardAutoSetupBtn?.addEventListener("click", () => {
+    downloadLocalStreetAutoSetupPackage();
+    setStreetWizardStatus("Auto setup package downloaded. Run the launcher file, then click Check Backend.");
+  });
+
+  streetWizardCheckBackendBtn?.addEventListener("click", () => {
+    runLocalBackendCheck(true).catch(err => {
+      console.error("Backend check failed:", err);
+    });
+  });
+
+  streetWizardStartBtn?.addEventListener("click", () => {
+    if (!localStreetHasProvider()) {
+      setStreetWizardStatus("Street source is not ready yet. Complete steps 1 and 2 first.");
+      return;
+    }
+    closeStreetSetupWizardModal();
+    if (useLocalToggle && !useLocalToggle.checked) {
+      useLocalToggle.checked = true;
+      useLocalToggle.dispatchEvent(new Event("change"));
+      return;
+    }
+    if (!streetAttributeById.size) {
+      streetLoadPolygonLayerGroup.clearLayers();
+      streetPolygonLoadPending = false;
+      openStreetSegmentsPromptModal();
+    }
+  });
+
+  updateLocalStreetSourceStatus();
+  checkLocalStreetBackendAvailability(false).catch(err => {
+    console.warn("Local backend check failed:", err);
+    updateLocalStreetSourceStatus();
+    updateStreetSetupGuide();
+  });
+  updateStreetSetupGuide();
+}
+
+function clearRenderedStreetSegmentState() {
+  streetAttributeLayerGroup.clearLayers();
+  streetAttributeById.clear();
+  streetAttributesRows = [];
+  streetAttributeSelectedIds.clear();
+  if (attributeTableMode === "streets") renderAttributeTable();
+  updateStreetSetupGuide();
+}
+
+async function rebuildLocalStreetChunkForBounds(targetBounds) {
+  const source = localStreetSourceState.sourceDescriptor;
+  if (!source || typeof source !== "object") return false;
+  const chunkBounds = buildLocalStreetChunkBounds(targetBounds);
+  if (!isValidLeafletBounds(chunkBounds)) return false;
+
+  clearRenderedStreetSegmentState();
+  const sourceName = source.sourceName || localStreetSourceState.sourceName || "local streets source";
+  updateStreetLoadStatus(`Refreshing local street chunk for this region from ${sourceName}...`);
+
+  const runImportFromFile = async (file, handle = null) => {
+    if (!file) return false;
+    return loadLocalStreetSourceFile(file, {
+      quiet: true,
+      skipRemember: true,
+      preserveToggleState: true,
+      persistHandle: handle || source.sourceHandle || null,
+      persistPath: String(source.sourcePath || "").trim(),
+      forceChunkBounds: chunkBounds,
+      preserveSourceDescriptor: true
+    });
+  };
+
+  if (source.sourceHandle && typeof source.sourceHandle.getFile === "function") {
+    try {
+      const fileFromHandle = await source.sourceHandle.getFile();
+      source.sourceFile = fileFromHandle;
+      const ok = await runImportFromFile(fileFromHandle, source.sourceHandle);
+      if (ok) return true;
+    } catch (err) {
+      console.warn("Failed to rebuild chunk from saved handle:", err);
+    }
+  }
+
+  if (source.sourceFile) {
+    try {
+      const ok = await runImportFromFile(source.sourceFile, source.sourceHandle || null);
+      if (ok) return true;
+    } catch (err) {
+      console.warn("Failed to rebuild chunk from in-memory file:", err);
+    }
+  }
+
+  if (source.sourcePath) {
+    try {
+      const ok = await loadLocalStreetSourceFromPath(source.sourcePath, {
+        skipRemember: true,
+        preserveToggleState: true,
+        forceChunkBounds: chunkBounds
+      });
+      if (ok) return true;
+    } catch (err) {
+      console.warn("Failed to rebuild chunk from saved path:", err);
+    }
+  }
+
+  return false;
+}
+
+async function ensureLocalStreetChunkCoversBounds(targetBounds) {
+  if (!localStreetSourceState.chunkMode) return true;
+  const requested = isValidLeafletBounds(targetBounds)
+    ? targetBounds
+    : (map?.getBounds?.() || null);
+  if (!isValidLeafletBounds(requested)) return true;
+
+  if (
+    isValidLeafletBounds(localStreetSourceState.chunkBounds) &&
+    boundsContainsBounds(localStreetSourceState.chunkBounds, requested)
+  ) {
+    return true;
+  }
+
+  const rebuilt = await rebuildLocalStreetChunkForBounds(requested);
+  if (!rebuilt) return false;
+
+  return (
+    isValidLeafletBounds(localStreetSourceState.chunkBounds) &&
+    boundsContainsBounds(localStreetSourceState.chunkBounds, requested)
+  );
+}
+
+function normalizeBackendStreetElement(raw) {
+  const id = Number(raw?.id);
+  if (!Number.isFinite(id)) return null;
+  let tags = {};
+  if (raw?.tags && typeof raw.tags === "object") {
+    tags = raw.tags;
+  } else if (typeof raw?.tags === "string") {
+    try {
+      const parsed = JSON.parse(raw.tags);
+      if (parsed && typeof parsed === "object") tags = parsed;
+    } catch {
+      tags = {};
+    }
+  }
+  const sourceGeom = Array.isArray(raw?.geom) ? raw.geom : [];
+  const geom = [];
+  sourceGeom.forEach(pt => {
+    if (Array.isArray(pt) && pt.length >= 2) {
+      const lat = Number(pt[0]);
+      const lon = Number(pt[1]);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) geom.push({ lat, lon });
+      return;
+    }
+    const lat = Number(pt?.lat);
+    const lon = Number(pt?.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) geom.push({ lat, lon });
+  });
+  if (geom.length < 2) return null;
+  return {
+    type: "way",
+    id,
+    tags: normalizeLocalStreetTags(tags),
+    geom
+  };
+}
+
+async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polygonLayer = null) {
+  const bounds = boundsOverride || map.getBounds();
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+  const query = new URLSearchParams({
+    south: String(south),
+    west: String(west),
+    north: String(north),
+    east: String(east),
+    limit: String(LOCAL_STREET_BACKEND_QUERY_LIMIT)
+  });
+
+  const backendUrl = `${localStreetBackendState.baseUrl}/api/streets?${query.toString()}`;
+  const response = await fetchJsonWithTimeout(
+    backendUrl,
+    { cache: "no-store" },
+    LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS
+  );
+  if (!response.ok) {
+    throw new Error(`Backend HTTP ${response.status}`);
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  const rows = Array.isArray(payload?.elements) ? payload.elements : [];
+  if (!rows.length) {
+    return { addedCount: 0, totalCount: streetAttributeById.size, candidateCount: 0, knownCount: 0 };
+  }
+
+  let addedCount = 0;
+  let knownCount = 0;
+  const batchSize = 1200;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    batch.forEach(raw => {
+      const element = normalizeBackendStreetElement(raw);
+      if (!element) return;
+      if (polygonLayer && !streetElementIntersectsPolygon(element, polygonLayer)) return;
+      const normalizedTags = normalizeLocalStreetTags(element.tags || {});
+      element.tags = normalizedTags;
+      if (rowHasKnownStreetAttributes(normalizedTags)) knownCount += 1;
+      if (upsertStreetElement(element)) addedCount += 1;
+    });
+    updateStreetLoadStatus(
+      `Loading local backend streets... ${Math.min(i + batch.length, rows.length).toLocaleString()}/${rows.length.toLocaleString()}`
+    );
+    if (i + batchSize < rows.length) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(0);
+    }
+  }
+
+  streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
+  syncStreetNetworkOverlay();
+  if (attributeTableMode === "streets") renderAttributeTable();
+  applyStreetSelectionStyles();
+
+  return {
+    addedCount,
+    totalCount: streetAttributeById.size,
+    candidateCount: rows.length,
+    knownCount
+  };
+}
+
+async function loadStreetAttributesFromLocalDataset(boundsOverride = null, polygonLayer = null) {
+  const bounds = boundsOverride || map.getBounds();
+  const candidates = [...getLocalStreetCandidateIds(bounds)];
+  if (!candidates.length) {
+    return { addedCount: 0, totalCount: streetAttributeById.size, candidateCount: 0, knownCount: 0 };
+  }
+
+  let addedCount = 0;
+  let knownCount = 0;
+  const batchSize = 1500;
+  for (let i = 0; i < candidates.length; i += batchSize) {
+    const batch = candidates.slice(i, i + batchSize);
+    batch.forEach(id => {
+      const element = localStreetSourceState.elementsById.get(id);
+      if (!element) return;
+      if (polygonLayer && !streetElementIntersectsPolygon(element, polygonLayer)) return;
+      const normalizedTags = normalizeLocalStreetTags(element.tags || {});
+      element.tags = normalizedTags;
+      if (rowHasKnownStreetAttributes(normalizedTags)) knownCount += 1;
+      if (upsertStreetElement(element)) addedCount += 1;
+    });
+
+    updateStreetLoadStatus(
+      `Loading local street segments... ${Math.min(i + batch.length, candidates.length).toLocaleString()}/${candidates.length.toLocaleString()}`
+    );
+    if (i + batchSize < candidates.length) {
+      // Yield between batches for responsiveness on large local datasets.
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(0);
+    }
+  }
+
+  streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
+  syncStreetNetworkOverlay();
+  if (attributeTableMode === "streets") renderAttributeTable();
+  applyStreetSelectionStyles();
+
+  return {
+    addedCount,
+    totalCount: streetAttributeById.size,
+    candidateCount: candidates.length,
+    knownCount
+  };
+}
 
 function syncStreetNetworkOverlay() {
-  const toggle = document.getElementById("streetNetworkToggle");
+  const toggle = document.getElementById("useLocalStreetSource");
   const enabled = !!toggle && !!toggle.checked;
   if (enabled) {
     if (!map.hasLayer(streetAttributeLayerGroup)) {
@@ -628,6 +2882,8 @@ function syncStreetNetworkOverlay() {
     }
   } else {
     map.removeLayer(streetAttributeLayerGroup);
+    streetLoadPolygonLayerGroup.clearLayers();
+    streetPolygonLoadPending = false;
     pendingStreetReload = false;
     if (streetAutoLoadTimer) {
       clearTimeout(streetAutoLoadTimer);
@@ -637,22 +2893,382 @@ function syncStreetNetworkOverlay() {
   }
 }
 
+function roundStreetPolygonCoord(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.round(num * 1000000) / 1000000;
+}
+
+function encodeStreetPolygonLatLngs(value) {
+  if (!Array.isArray(value) || !value.length) return [];
+  const first = value[0];
+  if (first && typeof first.lat === "number" && typeof first.lng === "number") {
+    const coords = [];
+    value.forEach(pt => {
+      const lat = roundStreetPolygonCoord(pt?.lat);
+      const lng = roundStreetPolygonCoord(pt?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      coords.push([lat, lng]);
+    });
+    return coords;
+  }
+  if (Array.isArray(first) && first.length >= 2 && Number.isFinite(Number(first[0])) && Number.isFinite(Number(first[1]))) {
+    const coords = [];
+    value.forEach(pair => {
+      if (!Array.isArray(pair) || pair.length < 2) return;
+      const lat = roundStreetPolygonCoord(pair[0]);
+      const lng = roundStreetPolygonCoord(pair[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      coords.push([lat, lng]);
+    });
+    return coords;
+  }
+  const nested = value
+    .map(encodeStreetPolygonLatLngs)
+    .filter(part => Array.isArray(part) && part.length > 0);
+  return nested;
+}
+
+function decodeStreetPolygonLatLngs(value) {
+  if (!Array.isArray(value) || !value.length) return [];
+  const first = value[0];
+  if (Array.isArray(first) && first.length >= 2 && Number.isFinite(Number(first[0])) && Number.isFinite(Number(first[1]))) {
+    const latlngs = [];
+    value.forEach(pair => {
+      if (!Array.isArray(pair) || pair.length < 2) return;
+      const lat = Number(pair[0]);
+      const lng = Number(pair[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      latlngs.push(L.latLng(lat, lng));
+    });
+    return latlngs;
+  }
+  return value
+    .map(decodeStreetPolygonLatLngs)
+    .filter(part => Array.isArray(part) && part.length > 0);
+}
+
+function cloneStreetPolygonSnapshot(snapshot) {
+  try {
+    return JSON.parse(JSON.stringify(snapshot || []));
+  } catch {
+    return [];
+  }
+}
+
+function normalizeSavedStreetPolygonEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const normalizedName = String(entry.name || "").trim().slice(0, 120);
+  const rawSnapshot = entry.snapshot ?? entry.latlngs ?? [];
+  const encoded = encodeStreetPolygonLatLngs(rawSnapshot);
+  const decoded = decodeStreetPolygonLatLngs(encoded);
+  if (!Array.isArray(decoded) || !decoded.length) return null;
+  const layer = L.polygon(decoded);
+  const bounds = layer.getBounds?.();
+  if (!bounds || !bounds.isValid?.()) return null;
+  return {
+    id: String(entry.id || `street_poly_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+    name: normalizedName || "Saved Polygon",
+    snapshot: cloneStreetPolygonSnapshot(encoded),
+    updatedAt: Number(entry.updatedAt || Date.now())
+  };
+}
+
+function getSavedStreetPolygons() {
+  const raw = storageGet(LOCAL_STREET_SAVED_POLYGONS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const normalized = parsed
+      .map(normalizeSavedStreetPolygonEntry)
+      .filter(Boolean);
+    return normalized;
+  } catch {
+    return [];
+  }
+}
+
+function setSavedStreetPolygons(polygons) {
+  const normalized = (Array.isArray(polygons) ? polygons : [])
+    .map(normalizeSavedStreetPolygonEntry)
+    .filter(Boolean)
+    .slice(0, LOCAL_STREET_SAVED_POLYGONS_MAX);
+  storageSet(LOCAL_STREET_SAVED_POLYGONS_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+function formatStreetPolygonUpdatedAt(value) {
+  const ts = Number(value);
+  if (!Number.isFinite(ts)) return "Unknown date";
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return "Unknown date";
+  }
+}
+
+function createStreetPolygonLayerFromSnapshot(snapshot) {
+  const latlngs = decodeStreetPolygonLatLngs(snapshot);
+  if (!Array.isArray(latlngs) || !latlngs.length) return null;
+  const layer = L.polygon(latlngs);
+  const bounds = layer.getBounds?.();
+  if (!bounds || !bounds.isValid?.()) return null;
+  return layer;
+}
+
+async function loadStreetSegmentsFromSavedPolygon(savedPolygon) {
+  const normalized = normalizeSavedStreetPolygonEntry(savedPolygon);
+  if (!normalized) {
+    alert("Saved polygon is invalid.");
+    return;
+  }
+
+  if (!localStreetHasProvider()) {
+    alert("Start the local backend first, or run the setup program.");
+    return;
+  }
+
+  const polygonLayer = createStreetPolygonLayerFromSnapshot(normalized.snapshot);
+  if (!polygonLayer) {
+    alert("Saved polygon geometry is invalid.");
+    return;
+  }
+
+  const toggle = document.getElementById("useLocalStreetSource");
+  if (toggle && !toggle.checked) {
+    toggle.checked = true;
+    storageSet("streetSegmentsVisible", "on");
+  }
+
+  closeStreetSegmentsPromptModal();
+  closeStreetPolygonLibraryModal();
+  streetPolygonLoadPending = false;
+  streetLoadPolygonLayerGroup.clearLayers();
+  syncStreetNetworkOverlay();
+  updateLocalStreetSourceStatus();
+
+  lastStreetLoadPolygonSnapshot = cloneStreetPolygonSnapshot(normalized.snapshot);
+
+  streetAttributeLayerGroup.clearLayers();
+  streetAttributeById.clear();
+  streetAttributesRows = [];
+  streetAttributeSelectedIds.clear();
+  if (attributeTableMode === "streets") renderAttributeTable();
+
+  updateStreetLoadStatus(`Loading saved polygon "${normalized.name}"...`);
+  await loadStreetAttributesForCurrentView(polygonLayer.getBounds(), polygonLayer);
+}
+
+function closeStreetPolygonLibraryModal() {
+  const modal = document.getElementById("streetPolygonLibraryModal");
+  if (modal) modal.style.display = "none";
+}
+
+function renderStreetPolygonLibraryModal() {
+  const listNode = document.getElementById("streetPolygonLibraryList");
+  if (!listNode) return;
+  listNode.innerHTML = "";
+
+  const polygons = getSavedStreetPolygons();
+  if (!polygons.length) {
+    const empty = document.createElement("div");
+    empty.className = "street-polygon-empty";
+    empty.textContent = "No saved polygons yet. Draw one, then click Save Polygon.";
+    listNode.appendChild(empty);
+    return;
+  }
+
+  polygons.forEach(poly => {
+    const row = document.createElement("div");
+    row.className = "street-polygon-library-item";
+
+    const main = document.createElement("div");
+    main.className = "street-polygon-library-item-main";
+
+    const name = document.createElement("div");
+    name.className = "street-polygon-library-name";
+    name.textContent = poly.name;
+
+    const meta = document.createElement("div");
+    meta.className = "street-polygon-library-meta";
+    meta.textContent = `Updated ${formatStreetPolygonUpdatedAt(poly.updatedAt)}`;
+
+    main.appendChild(name);
+    main.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "street-polygon-library-item-actions";
+
+    const useBtn = document.createElement("button");
+    useBtn.type = "button";
+    useBtn.className = "mini-btn";
+    useBtn.textContent = "Use";
+    useBtn.addEventListener("click", () => {
+      loadStreetSegmentsFromSavedPolygon(poly).catch(err => {
+        console.error("Failed loading saved polygon:", err);
+        alert(`Unable to load saved polygon.\n\n${err?.message || err}`);
+      });
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "mini-btn";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.addEventListener("click", () => {
+      const confirmed = window.confirm(`Delete saved polygon "${poly.name}"?`);
+      if (!confirmed) return;
+      const next = getSavedStreetPolygons().filter(item => item.id !== poly.id);
+      setSavedStreetPolygons(next);
+      renderStreetPolygonLibraryModal();
+    });
+
+    actions.appendChild(useBtn);
+    actions.appendChild(deleteBtn);
+    row.appendChild(main);
+    row.appendChild(actions);
+    listNode.appendChild(row);
+  });
+}
+
+function openStreetPolygonLibraryModal() {
+  const modal = document.getElementById("streetPolygonLibraryModal");
+  if (!modal) return;
+  renderStreetPolygonLibraryModal();
+  modal.style.display = "flex";
+}
+
+function saveCurrentStreetPolygonSnapshot() {
+  const snapshot = cloneStreetPolygonSnapshot(lastStreetLoadPolygonSnapshot);
+  if (!Array.isArray(snapshot) || !snapshot.length) {
+    alert("Draw a street polygon first, then click Save Polygon.");
+    return;
+  }
+
+  const defaultName = `Polygon ${new Date().toLocaleString()}`;
+  const entered = window.prompt("Name this polygon:", defaultName);
+  if (entered === null) return;
+  const name = String(entered || "").trim();
+  if (!name) {
+    alert("Polygon name cannot be empty.");
+    return;
+  }
+
+  const polygons = getSavedStreetPolygons();
+  const next = [
+    {
+      id: `street_poly_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name: name.slice(0, 120),
+      snapshot,
+      updatedAt: Date.now()
+    },
+    ...polygons
+  ];
+  const saved = setSavedStreetPolygons(next);
+  updateLocalStreetSourceStatus(`Saved polygon "${name}" (${saved.length.toLocaleString()} total).`);
+}
+
+function openStreetSegmentsPromptModal() {
+  const modal = document.getElementById("streetSegmentsPromptModal");
+  if (modal) modal.style.display = "flex";
+}
+
+function closeStreetSegmentsPromptModal() {
+  const modal = document.getElementById("streetSegmentsPromptModal");
+  if (modal) modal.style.display = "none";
+}
+
+function beginStreetPolygonDraw() {
+  streetPolygonLoadPending = true;
+  const toolbarHandler = drawControl?._toolbars?.draw?._modes?.polygon?.handler;
+  if (toolbarHandler && typeof toolbarHandler.enable === "function") {
+    toolbarHandler.enable();
+    return;
+  }
+  const drawHandler = new L.Draw.Polygon(map, {});
+  drawHandler.enable();
+}
+
 function initStreetNetworkToggle() {
-  const toggle = document.getElementById("streetNetworkToggle");
+  const toggle = document.getElementById("useLocalStreetSource");
   if (!toggle) return;
+  const drawBtn = document.getElementById("streetSegmentsPromptDraw");
+  const cancelBtn = document.getElementById("streetSegmentsPromptCancel");
+  const promptModal = document.getElementById("streetSegmentsPromptModal");
+  const savePolygonBtn = document.getElementById("saveStreetPolygonBtn");
+  const choosePolygonBtn = document.getElementById("chooseStreetPolygonBtn");
+  const polygonLibraryModal = document.getElementById("streetPolygonLibraryModal");
+  const polygonLibraryCloseBtn = document.getElementById("streetPolygonLibraryClose");
   toggle.checked = false;
   storageSet("streetSegmentsVisible", "off");
-  toggle.addEventListener("change", async () => {
+  toggle.addEventListener("change", () => {
+    if (toggle.checked && !localStreetHasProvider()) {
+      toggle.checked = false;
+      storageSet("streetSegmentsVisible", "off");
+      updateLocalStreetSourceStatus("Street source is not ready. Open Street Setup Wizard and follow steps 1-3.");
+      openStreetSetupWizardModal();
+      return;
+    }
+
     storageSet("streetSegmentsVisible", toggle.checked ? "on" : "off");
     syncStreetNetworkOverlay();
-    if (toggle.checked && !streetAttributeById.size && !streetLoadInFlight) {
-      await loadStreetAttributesForCurrentView();
+    updateLocalStreetSourceStatus();
+    if (toggle.checked) {
+      if (!streetAttributeById.size) {
+        streetLoadPolygonLayerGroup.clearLayers();
+        streetPolygonLoadPending = false;
+        openStreetSegmentsPromptModal();
+      }
+    } else {
+      closeStreetSegmentsPromptModal();
+      closeStreetPolygonLibraryModal();
+      closeStreetSetupWizardModal();
     }
   });
+
+  savePolygonBtn?.addEventListener("click", () => {
+    saveCurrentStreetPolygonSnapshot();
+  });
+
+  choosePolygonBtn?.addEventListener("click", () => {
+    openStreetPolygonLibraryModal();
+  });
+
+  polygonLibraryCloseBtn?.addEventListener("click", () => {
+    closeStreetPolygonLibraryModal();
+  });
+
+  polygonLibraryModal?.addEventListener("click", (e) => {
+    if (e.target !== polygonLibraryModal) return;
+    closeStreetPolygonLibraryModal();
+  });
+
+  drawBtn?.addEventListener("click", () => {
+    if (!toggle.checked) return;
+    closeStreetSegmentsPromptModal();
+    streetLoadPolygonLayerGroup.clearLayers();
+    beginStreetPolygonDraw();
+  });
+
+  cancelBtn?.addEventListener("click", () => {
+    closeStreetSegmentsPromptModal();
+    closeStreetPolygonLibraryModal();
+    toggle.checked = false;
+    storageSet("streetSegmentsVisible", "off");
+    syncStreetNetworkOverlay();
+    updateLocalStreetSourceStatus();
+  });
+
+  promptModal?.addEventListener("click", (e) => {
+    if (e.target !== promptModal) return;
+    closeStreetSegmentsPromptModal();
+    closeStreetPolygonLibraryModal();
+    toggle.checked = false;
+    storageSet("streetSegmentsVisible", "off");
+    syncStreetNetworkOverlay();
+    updateLocalStreetSourceStatus();
+  });
   syncStreetNetworkOverlay();
-  if (toggle.checked && !streetAttributeById.size && !streetLoadInFlight) {
-    loadStreetAttributesForCurrentView().catch(() => {});
-  }
 }
 
 let attributeTableMode = "records";
@@ -664,7 +3280,8 @@ let lastStreetLoadAt = 0;
 let streetAutoLoadTimer = null;
 let pendingStreetReload = false;
 let streetLoadBarHideTimer = null;
-const STREET_MAX_LOAD_SPAN = 1.6;
+let streetLoadBarShownAt = 0;
+const STREET_MAX_LOAD_SPAN = 0.9;
 
 function isStreetLoadableView() {
   return true;
@@ -708,8 +3325,141 @@ function hasStreetSegmentsInView() {
   return found;
 }
 
+function getPolygonRings(latlngs) {
+  if (!Array.isArray(latlngs) || !latlngs.length) return [];
+  if (latlngs[0] && typeof latlngs[0].lat === "number" && typeof latlngs[0].lng === "number") {
+    return [latlngs];
+  }
+  return latlngs.flatMap(getPolygonRings);
+}
+
+const polygonIntersectionCache = new WeakMap();
+
+function getPolygonIntersectionData(polygonLayer) {
+  if (!polygonLayer || !(polygonLayer instanceof L.Polygon || polygonLayer instanceof L.Rectangle)) {
+    return null;
+  }
+  const cached = polygonIntersectionCache.get(polygonLayer);
+  if (cached) return cached;
+
+  const rings = getPolygonRings(polygonLayer.getLatLngs());
+  const edges = [];
+  rings.forEach(ring => {
+    if (!Array.isArray(ring) || ring.length < 2) return;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i];
+      const b = ring[(i + 1) % ring.length];
+      edges.push([a, b]);
+    }
+  });
+
+  const data = {
+    bounds: polygonLayer.getBounds?.() || null,
+    rings,
+    edges
+  };
+  polygonIntersectionCache.set(polygonLayer, data);
+  return data;
+}
+
+function isPointInRing(latlng, ring) {
+  const x = latlng.lng;
+  const y = latlng.lat;
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i].lng;
+    const yi = ring[i].lat;
+    const xj = ring[j].lng;
+    const yj = ring[j].lat;
+    const intersects = ((yi > y) !== (yj > y))
+      && (x < ((xj - xi) * (y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function isLatLngInsidePolygon(latlng, polygonLayer) {
+  if (!polygonLayer) return true;
+  const data = getPolygonIntersectionData(polygonLayer);
+  const bounds = data?.bounds || polygonLayer.getBounds?.();
+  if (bounds && !bounds.contains(latlng)) return false;
+  if (polygonLayer instanceof L.Rectangle) return true;
+  if (polygonLayer instanceof L.Polygon) {
+    const rings = data?.rings || getPolygonRings(polygonLayer.getLatLngs());
+    return rings.some(ring => isPointInRing(latlng, ring));
+  }
+  return true;
+}
+
+function cross2d(a, b, c) {
+  return (b.lng - a.lng) * (c.lat - a.lat) - (b.lat - a.lat) * (c.lng - a.lng);
+}
+
+function isPointOnSegment(a, b, p) {
+  const minX = Math.min(a.lng, b.lng) - 1e-10;
+  const maxX = Math.max(a.lng, b.lng) + 1e-10;
+  const minY = Math.min(a.lat, b.lat) - 1e-10;
+  const maxY = Math.max(a.lat, b.lat) + 1e-10;
+  if (p.lng < minX || p.lng > maxX || p.lat < minY || p.lat > maxY) return false;
+  return Math.abs(cross2d(a, b, p)) <= 1e-10;
+}
+
+function segmentsIntersect(a, b, c, d) {
+  const ab_c = cross2d(a, b, c);
+  const ab_d = cross2d(a, b, d);
+  const cd_a = cross2d(c, d, a);
+  const cd_b = cross2d(c, d, b);
+
+  if ((ab_c > 0 && ab_d < 0 || ab_c < 0 && ab_d > 0) &&
+      (cd_a > 0 && cd_b < 0 || cd_a < 0 && cd_b > 0)) {
+    return true;
+  }
+
+  if (Math.abs(ab_c) <= 1e-10 && isPointOnSegment(a, b, c)) return true;
+  if (Math.abs(ab_d) <= 1e-10 && isPointOnSegment(a, b, d)) return true;
+  if (Math.abs(cd_a) <= 1e-10 && isPointOnSegment(c, d, a)) return true;
+  if (Math.abs(cd_b) <= 1e-10 && isPointOnSegment(c, d, b)) return true;
+  return false;
+}
+
+function streetElementIntersectsPolygon(element, polygonLayer) {
+  if (!polygonLayer) return true;
+  const polygonData = getPolygonIntersectionData(polygonLayer);
+  const geometry = Array.isArray(element?.geom)
+    ? element.geom
+    : (Array.isArray(element?.geometry) ? element.geometry : []);
+  if (!geometry.length) return false;
+  const points = geometry
+    .map(pt => {
+      const lat = Number(pt?.lat);
+      const lon = Number(pt?.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+      return L.latLng(lat, lon);
+    })
+    .filter(Boolean);
+
+  if (!points.length) return false;
+  if (points.some(point => isLatLngInsidePolygon(point, polygonLayer))) return true;
+
+  const polygonEdges = polygonData?.edges || [];
+  if (!polygonEdges.length) return false;
+
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const segmentBounds = L.latLngBounds(a, b);
+    if (polygonData?.bounds && !polygonData.bounds.intersects(segmentBounds)) continue;
+    for (let j = 0; j < polygonEdges.length; j++) {
+      const edge = polygonEdges[j];
+      if (segmentsIntersect(a, b, edge[0], edge[1])) return true;
+    }
+  }
+
+  return false;
+}
+
 function maybeAutoLoadStreetSegments() {
-  const toggle = document.getElementById("streetNetworkToggle");
+  const toggle = document.getElementById("useLocalStreetSource");
   if (!toggle || !toggle.checked) return;
   if (streetLoadInFlight) {
     pendingStreetReload = true;
@@ -749,12 +3499,50 @@ function setStreetLoadBarVisible(visible) {
     streetLoadBarHideTimer = null;
   }
   if (visible) {
+    streetLoadBarShownAt = Date.now();
     bar.classList.add("active");
     return;
   }
+  const elapsed = Date.now() - streetLoadBarShownAt;
+  const wait = Math.max(180, 520 - elapsed);
   streetLoadBarHideTimer = setTimeout(() => {
     bar.classList.remove("active");
-  }, 180);
+  }, wait);
+}
+
+function buildStreetBoundsChunks(south, west, north, east, maxSpan = STREET_MAX_LOAD_SPAN) {
+  const latSpan = Math.max(0, north - south);
+  const lngSpan = Math.max(0, east - west);
+  const rows = Math.max(1, Math.ceil(latSpan / maxSpan));
+  const cols = Math.max(1, Math.ceil(lngSpan / maxSpan));
+  const latStep = latSpan / rows;
+  const lngStep = lngSpan / cols;
+  const chunks = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const s = south + (r * latStep);
+      const n = r === rows - 1 ? north : (south + ((r + 1) * latStep));
+      const w = west + (c * lngStep);
+      const e = c === cols - 1 ? east : (west + ((c + 1) * lngStep));
+      chunks.push({ south: s, west: w, north: n, east: e });
+    }
+  }
+
+  return chunks;
+}
+
+function sortStreetChunksByFocus(chunks, focusLatLng) {
+  if (!Array.isArray(chunks) || !chunks.length || !focusLatLng) return chunks || [];
+  return [...chunks].sort((a, b) => {
+    const aLat = (a.south + a.north) / 2;
+    const aLng = (a.west + a.east) / 2;
+    const bLat = (b.south + b.north) / 2;
+    const bLng = (b.west + b.east) / 2;
+    const da = ((aLat - focusLatLng.lat) ** 2) + ((aLng - focusLatLng.lng) ** 2);
+    const db = ((bLat - focusLatLng.lat) ** 2) + ((bLng - focusLatLng.lng) ** 2);
+    return da - db;
+  });
 }
 
 function updateStreetLoadStatus(message = "", isError = false) {
@@ -773,12 +3561,18 @@ function setAttributeTableMode(mode) {
   const streetBtnMobile = document.getElementById("streetAttributesBtnMobile");
   const attrBtn = document.getElementById("attributeTableBtn");
   const attrBtnMobile = document.getElementById("attributeTableBtnMobile");
+  const selectedOnlyToggle = document.getElementById("attributeSelectedOnly");
 
   if (title) title.textContent = attributeTableMode === "streets" ? "Street Attributes" : "Attribute Table";
   streetBtn?.classList.toggle("active", attributeTableMode === "streets");
   streetBtnMobile?.classList.toggle("active", attributeTableMode === "streets");
   attrBtn?.classList.toggle("active", attributeTableMode === "records");
   attrBtnMobile?.classList.toggle("active", attributeTableMode === "records");
+
+  if (attributeTableMode === "streets") {
+    attributeState.selectedOnly = false;
+    if (selectedOnlyToggle) selectedOnlyToggle.checked = false;
+  }
 
   if (attributeTableMode === "streets") updateStreetLoadStatus("Loading street segments...");
   else updateStreetLoadStatus("");
@@ -807,14 +3601,19 @@ function toggleStreetSegmentSelection(id, selected = null, rerender = true) {
   else streetAttributeSelectedIds.delete(wayId);
   const entry = streetAttributeById.get(wayId);
   setStreetSegmentStyle(entry, streetAttributeSelectedIds.has(wayId));
+  syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+  refreshAttributeStatus();
   if (rerender && attributeTableMode === "streets") renderAttributeTable();
 }
 
 function getFilteredStreetAttributeRows() {
   const needle = String(attributeState.filterText || "").trim().toLowerCase();
-  let rows = Array.from(streetAttributeSelectedIds)
-    .map(id => streetAttributeById.get(id)?.row)
-    .filter(Boolean);
+  const allRows = (Array.isArray(streetAttributesRows) && streetAttributesRows.length)
+    ? [...streetAttributesRows]
+    : Array.from(streetAttributeById.values()).map(entry => entry?.row).filter(Boolean);
+  let rows = attributeState.selectedOnly
+    ? allRows.filter(row => streetAttributeSelectedIds.has(Number(row?.id)))
+    : allRows;
   if (needle) {
     rows = rows.filter(r =>
       Object.values(r).some(v => String(v ?? "").toLowerCase().includes(needle))
@@ -846,7 +3645,7 @@ function renderStreetAttributeTable() {
 
   if (!streetAttributeById.size) {
     table.innerHTML = "";
-    empty.textContent = "No street data loaded. Click Street Attributes again after zooming in.";
+    empty.textContent = "No street data loaded. Turn on local streets and draw/load a polygon first.";
     empty.style.display = "block";
     if (pageInfo) pageInfo.textContent = "Page 1/1";
     if (prevBtn) prevBtn.disabled = true;
@@ -867,7 +3666,7 @@ function renderStreetAttributeTable() {
     oneway: "One Way"
   };
   const rows = getFilteredStreetAttributeRows();
-  attributeState.lastVisibleRows = rows.map(r => ({ row: r, rowId: r.id }));
+  attributeState.lastVisibleRows = rows.map(r => ({ row: r, rowId: Number(r.id) }));
   const totalPages = Math.max(1, Math.ceil(rows.length / attributeState.pageSize));
   if (attributeState.page > totalPages) attributeState.page = totalPages;
   if (attributeState.page < 1) attributeState.page = 1;
@@ -877,11 +3676,16 @@ function renderStreetAttributeTable() {
   if (pageInfo) pageInfo.textContent = `Page ${attributeState.page}/${totalPages}`;
   if (prevBtn) prevBtn.disabled = attributeState.page <= 1;
   if (nextBtn) nextBtn.disabled = attributeState.page >= totalPages;
-  if (status) status.textContent = `${streetAttributeSelectedIds.size} selected • ${rows.length} visible`;
+  if (status) {
+    const scopeLabel = attributeState.selectedOnly ? "selected scope" : "loaded scope";
+    status.textContent = `${streetAttributeSelectedIds.size} selected • ${rows.length} visible (${scopeLabel})`;
+  }
 
   if (!rows.length) {
     table.innerHTML = "";
-    empty.textContent = "No selected street segments. Click street lines on the map to add them here.";
+    empty.textContent = attributeState.selectedOnly
+      ? "No selected street segments. Use selection tools or click street lines on the map."
+      : "No street segments match the current filter.";
     empty.style.display = "block";
     return;
   }
@@ -895,9 +3699,10 @@ function renderStreetAttributeTable() {
   html += "</tr></thead><tbody>";
 
   pageRows.forEach((row, idx) => {
-    const checked = streetAttributeSelectedIds.has(row.id) ? " checked" : "";
-    html += `<tr data-row-id="${row.id}" class="${checked ? "selected" : ""}">`;
-    html += `<td><input type="checkbox" data-row-select="${row.id}"${checked}></td>`;
+    const rowId = Number(row?.id);
+    const checked = streetAttributeSelectedIds.has(rowId) ? " checked" : "";
+    html += `<tr data-row-id="${rowId}" class="${checked ? "selected" : ""}">`;
+    html += `<td><input type="checkbox" data-row-select="${rowId}"${checked}></td>`;
     html += `<td>${pageStart + idx + 1}</td>`;
     headers.forEach(h => {
       const value = row[h];
@@ -934,9 +3739,7 @@ function renderStreetAttributeTable() {
       if (e.target.closest("input")) return;
       const id = Number(tr.getAttribute("data-row-id"));
       const entry = streetAttributeById.get(id);
-      if (entry?.layer) {
-        map.fitBounds(entry.layer.getBounds().pad(0.35));
-      }
+      if (entry?.layer) map.fitBounds(entry.layer.getBounds().pad(0.35));
     });
   });
 }
@@ -950,9 +3753,20 @@ const STREET_TILE_CACHE_TTL_MS = 5 * 60 * 1000;
 const OVERPASS_BASE_COOLDOWN_MS = 60 * 1000;
 const OVERPASS_MAX_COOLDOWN_MS = 5 * 60 * 1000;
 const OVERPASS_ENDPOINT_TIMEOUT_MS = 9000;
+const STREET_DEFAULT_CONCURRENCY = 2;
+const STREET_CHUNK_CONCURRENCY = 1;
+const STREET_BATCH_GAP_MS = 90;
+const STREET_CHUNK_GAP_MS = 120;
+const STREET_POLYGON_CHUNK_SPAN = 0.35;
+const OSM_SPLIT_MAX_DEPTH = 2;
+const OSM_SPLIT_STATUS_CODES = new Set([400, 413]);
 const streetTileCache = new Map();
 let overpassCooldownUntil = 0;
 let overpass429Count = 0;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function makeStreetTileKey(tile) {
   return [tile.south, tile.west, tile.north, tile.east].map(v => Number(v).toFixed(5)).join("|");
@@ -1067,7 +3881,7 @@ async function fetchStreetElementsFromOsmApiRecursive(tile, depth = 0) {
   const response = await fetch(url, { method: "GET" });
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).trim().slice(0, 180);
-    const canSplit = (response.status === 400 || response.status === 413 || response.status === 429 || response.status === 509) && depth < 4;
+    const canSplit = OSM_SPLIT_STATUS_CODES.has(response.status) && depth < OSM_SPLIT_MAX_DEPTH;
     if (canSplit) {
       const chunks = splitStreetTile(tile);
       const merged = new Map();
@@ -1143,6 +3957,11 @@ async function fetchStreetElementsForTile(tile) {
     streetTileCache.set(key, { ts: Date.now(), elements });
     return elements;
   } catch (osmErr) {
+    const osmMsg = String(osmErr?.message || "");
+    if (osmMsg.includes("HTTP 509")) {
+      // Back off quickly from OSM API bandwidth throttling.
+      await sleep(120);
+    }
     const query = buildStreetOverpassQuery(tile);
     const data = await fetchOverpassJsonWithFallback(query);
     const elements = data.elements || [];
@@ -1151,15 +3970,19 @@ async function fetchStreetElementsForTile(tile) {
   }
 }
 
-async function collectStreetElementsForBounds(south, west, north, east) {
-  const tiles = buildStreetTileBounds(south, west, north, east);
+async function collectStreetElementsForBounds(south, west, north, east, options = {}) {
+  const tiles = options.singleTile
+    ? [{ south, west, north, east }]
+    : buildStreetTileBounds(south, west, north, east);
   const mergedById = new Map();
   const tileErrors = [];
   const hw = Number(navigator.hardwareConcurrency || 4);
   const saveData = !!(navigator.connection && navigator.connection.saveData);
-  const concurrency = saveData
-    ? 3
-    : Math.max(3, Math.min(10, Math.floor(hw * 1.5)));
+  const autoConcurrency = saveData
+    ? 1
+    : Math.max(1, Math.min(STREET_DEFAULT_CONCURRENCY, Math.floor(hw / 2)));
+  const concurrency = Math.max(1, Number(options.concurrency || autoConcurrency));
+  const batchGapMs = Math.max(0, Number(options.batchGapMs ?? STREET_BATCH_GAP_MS));
 
   for (let i = 0; i < tiles.length; i += concurrency) {
     const batch = tiles.slice(i, i + concurrency);
@@ -1167,20 +3990,18 @@ async function collectStreetElementsForBounds(south, west, north, east) {
       const tileIndex = i + idx;
       try {
         const elements = await fetchStreetElementsForTile(tile);
-        let changed = false;
         elements.forEach(e => {
           if (!e || e.type !== "way" || !e.tags?.highway || !Array.isArray(e.geom) || e.geom.length < 2) return;
           mergedById.set(e.id, e);
-          if (upsertStreetElement(e)) changed = true;
         });
-        if (changed) {
-          syncStreetNetworkOverlay();
-        }
       } catch (tileErr) {
         tileErrors.push(`tile ${tileIndex + 1}/${tiles.length}: ${tileErr?.message || tileErr}`);
       }
     }));
-    updateStreetLoadStatus(`Loading street segments... ${streetAttributeById.size} loaded`);
+    updateStreetLoadStatus(`Loading street segments... ${mergedById.size} fetched`);
+    if (i + concurrency < tiles.length && batchGapMs > 0) {
+      await sleep(batchGapMs);
+    }
   }
 
   return { mergedById, tileErrors, tilesCount: tiles.length };
@@ -1190,22 +4011,24 @@ function upsertStreetElement(e) {
   const id = Number(e?.id);
   if (!Number.isFinite(id) || !Array.isArray(e.geom) || e.geom.length < 2) return false;
   const latlngs = e.geom.map(g => [g.lat, g.lon]);
-  const row = {
+  const tags = normalizeLocalStreetTags(e.tags || {});
+  const incomingRow = {
     id,
-    name: e.tags?.name || "",
-    highway: e.tags?.highway || "",
-    ref: e.tags?.ref || "",
-    maxspeed: e.tags?.maxspeed || "",
-    lanes: e.tags?.lanes || "",
-    surface: e.tags?.surface || "",
-    oneway: e.tags?.oneway || ""
+    name: tags.name,
+    highway: tags.highway,
+    ref: tags.ref,
+    maxspeed: tags.maxspeed,
+    lanes: tags.lanes,
+    surface: tags.surface,
+    oneway: tags.oneway
   };
   const existing = streetAttributeById.get(id);
   if (existing?.layer) {
-    existing.row = row;
+    existing.row = mergeStreetAttributeRows(existing.row, incomingRow);
     if (typeof existing.layer.setLatLngs === "function") existing.layer.setLatLngs(latlngs);
     return false;
   }
+  const row = mergeStreetAttributeRows(null, incomingRow);
   const layer = L.polyline(latlngs, {
     color: "#4ea2f5",
     weight: 3,
@@ -1222,57 +4045,166 @@ function upsertStreetElement(e) {
   return true;
 }
 
-async function loadStreetAttributesForCurrentView() {
+async function loadStreetAttributesForCurrentView(boundsOverride = null, polygonLayer = null) {
   if (streetLoadInFlight) {
     pendingStreetReload = true;
     updateStreetLoadStatus("Street attributes are already loading...", false);
     return;
   }
-  const b = map.getBounds();
+  const b = boundsOverride || map.getBounds();
   const south = b.getSouth();
   const west = b.getWest();
   const north = b.getNorth();
   const east = b.getEast();
   const spanLat = Math.abs(north - south);
   const spanLng = Math.abs(east - west);
-  if (spanLat > 1.6 || spanLng > 1.6) {
+  const isPolygonScopedLoad = !!polygonLayer;
+  const useLocalSource = shouldUseLocalStreetSource();
+  if (!useLocalSource && !isPolygonScopedLoad && (spanLat > 1.6 || spanLng > 1.6)) {
     updateStreetLoadStatus("Zoom in more before loading street segments.", true);
     return;
   }
-  const now = Date.now();
-  if (now - lastStreetLoadAt < 900) {
-    const waitMs = 900 - (now - lastStreetLoadAt);
-    updateStreetLoadStatus(`Please wait ${Math.ceil(waitMs / 1000)}s before reloading (provider rate limit).`, true);
-    return;
+  if (!useLocalSource) {
+    const now = Date.now();
+    if (now - lastStreetLoadAt < 900) {
+      const waitMs = 900 - (now - lastStreetLoadAt);
+      updateStreetLoadStatus(`Please wait ${Math.ceil(waitMs / 1000)}s before reloading (provider rate limit).`, true);
+      return;
+    }
+    lastStreetLoadAt = now;
   }
   streetLoadInFlight = true;
   setStreetLoadBarVisible(true);
-  lastStreetLoadAt = now;
 
   try {
-    updateStreetLoadStatus("Loading street segments...");
-    let {
-      mergedById,
-      tileErrors,
-      tilesCount
-    } = await collectStreetElementsForBounds(south, west, north, east);
+    if (useLocalSource) {
+      await checkLocalStreetBackendAvailability(false);
+      if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
+        updateStreetLoadStatus("Loading street segments from local backend...");
+        const backendResult = await loadStreetAttributesFromLocalBackend(b, polygonLayer);
+        const { addedCount, totalCount, candidateCount, knownCount } = backendResult;
+        if (!candidateCount) {
+          updateStreetLoadStatus("No backend street segments found in this area.", true);
+        } else if (!totalCount) {
+          updateStreetLoadStatus("Backend streets loaded, but none intersect this polygon.", true);
+        } else if (!knownCount) {
+          updateStreetLoadStatus("Street geometry loaded, but local index attributes are empty. Re-run indexer with the latest converter to populate road fields.", true);
+        } else {
+          updateStreetLoadStatus(`Loaded ${addedCount} backend street segments (${totalCount} total on map).`, false);
+        }
+        return;
+      }
 
-    // Retry once with a slightly larger bbox to handle sparse/tile-edge results.
+      const chunkTargetBounds = polygonLayer?.getBounds?.() || b;
+      if (localStreetSourceState.chunkMode) {
+        updateStreetLoadStatus("Preparing local street chunk for this region...");
+        const chunkReady = await ensureLocalStreetChunkCoversBounds(chunkTargetBounds);
+        if (!chunkReady) {
+          updateStreetLoadStatus("Could not build local chunk for this region. Reload the local streets file.", true);
+          return;
+        }
+      }
+      updateStreetLoadStatus("Loading street segments from local file...");
+      const localResult = await loadStreetAttributesFromLocalDataset(b, polygonLayer);
+      const { addedCount, totalCount, candidateCount, knownCount } = localResult;
+      if (!candidateCount) {
+        if (localStreetSourceState.chunkMode) {
+          updateStreetLoadStatus("Chunk loaded, but no local street segments were found in this area.", true);
+        } else {
+          updateStreetLoadStatus("No local street segments found in this area.", true);
+        }
+      } else if (!totalCount) {
+        updateStreetLoadStatus("Local streets loaded, but none intersect this polygon.", true);
+      } else if (!knownCount) {
+        updateStreetLoadStatus("Street geometry loaded, but local file attributes are empty. Use a roads source that includes DBF properties.", true);
+      } else {
+        updateStreetLoadStatus(`Loaded ${addedCount} local street segments (${totalCount} total on map).`, false);
+      }
+      return;
+    }
+
+    updateStreetLoadStatus("Loading street segments...");
+    let mergedById = new Map();
+    let tileErrors = [];
+    let tilesCount = 0;
     let retriedWithExpandedBounds = false;
-    if (!mergedById.size) {
-      retriedWithExpandedBounds = true;
-      updateStreetLoadStatus("No segments found. Retrying with expanded area...");
-      const padLat = Math.max(spanLat * 0.16, 0.0035);
-      const padLng = Math.max(spanLng * 0.16, 0.0035);
-      const retryResult = await collectStreetElementsForBounds(
-        south - padLat,
-        west - padLng,
-        north + padLat,
-        east + padLng
-      );
-      mergedById = retryResult.mergedById;
-      tileErrors = tileErrors.concat(retryResult.tileErrors);
-      tilesCount += retryResult.tilesCount;
+    let addedCount = 0;
+    let streamedToMap = false;
+
+    const applyElementsToMap = (elementsMap) => {
+      let chunkAdded = 0;
+      elementsMap.forEach(e => {
+        if (polygonLayer && !streetElementIntersectsPolygon(e, polygonLayer)) return;
+        if (upsertStreetElement(e)) chunkAdded += 1;
+      });
+      if (chunkAdded > 0) {
+        streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
+        syncStreetNetworkOverlay();
+      }
+      return chunkAdded;
+    };
+
+    if (isPolygonScopedLoad && (spanLat > STREET_MAX_LOAD_SPAN || spanLng > STREET_MAX_LOAD_SPAN)) {
+      const focus = map?.getCenter?.() || null;
+      const rawChunks = buildStreetBoundsChunks(south, west, north, east, STREET_POLYGON_CHUNK_SPAN);
+      const chunks = sortStreetChunksByFocus(rawChunks, focus);
+      updateStreetLoadStatus(`Loading large polygon in ${chunks.length} chunks (nearest first)...`);
+      streamedToMap = true;
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        updateStreetLoadStatus(`Loading street segments... chunk ${i + 1}/${chunks.length}`);
+        const chunkResult = await collectStreetElementsForBounds(
+          chunk.south,
+          chunk.west,
+          chunk.north,
+          chunk.east,
+          {
+            concurrency: STREET_CHUNK_CONCURRENCY,
+            batchGapMs: STREET_BATCH_GAP_MS,
+            singleTile: true
+          }
+        );
+        chunkResult.mergedById.forEach((value, key) => mergedById.set(key, value));
+        tileErrors = tileErrors.concat(chunkResult.tileErrors);
+        tilesCount += chunkResult.tilesCount;
+        addedCount += applyElementsToMap(chunkResult.mergedById);
+        updateStreetLoadStatus(
+          `Loading street segments... chunk ${i + 1}/${chunks.length} (${streetAttributeById.size} on map)`
+        );
+        if (attributeTableMode === "streets") {
+          renderAttributeTable();
+        }
+        if (i < chunks.length - 1) {
+          await sleep(STREET_CHUNK_GAP_MS);
+        }
+      }
+    } else {
+      const first = await collectStreetElementsForBounds(south, west, north, east, {
+        concurrency: STREET_DEFAULT_CONCURRENCY,
+        batchGapMs: STREET_BATCH_GAP_MS
+      });
+      mergedById = first.mergedById;
+      tileErrors = first.tileErrors;
+      tilesCount = first.tilesCount;
+
+      // Retry once with a slightly larger bbox to handle sparse/tile-edge results.
+      if (!mergedById.size) {
+        retriedWithExpandedBounds = true;
+        updateStreetLoadStatus("No segments found. Retrying with expanded area...");
+        const padLat = Math.max(spanLat * 0.16, 0.0035);
+        const padLng = Math.max(spanLng * 0.16, 0.0035);
+        const retryResult = await collectStreetElementsForBounds(
+          south - padLat,
+          west - padLng,
+          north + padLat,
+          east + padLng,
+          { concurrency: STREET_DEFAULT_CONCURRENCY, batchGapMs: STREET_BATCH_GAP_MS }
+        );
+        mergedById = retryResult.mergedById;
+        tileErrors = tileErrors.concat(retryResult.tileErrors);
+        tilesCount += retryResult.tilesCount;
+      }
     }
 
     if (!mergedById.size) {
@@ -1283,10 +4215,12 @@ async function loadStreetAttributesForCurrentView() {
       return;
     }
 
-    let addedCount = 0;
-    [...mergedById.values()].forEach(e => {
-      if (upsertStreetElement(e)) addedCount += 1;
-    });
+    if (!streamedToMap) {
+      [...mergedById.values()].forEach(e => {
+        if (polygonLayer && !streetElementIntersectsPolygon(e, polygonLayer)) return;
+        if (upsertStreetElement(e)) addedCount += 1;
+      });
+    }
     streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
     syncStreetNetworkOverlay();
     if (attributeTableMode === "streets") renderAttributeTable();
@@ -1295,7 +4229,7 @@ async function loadStreetAttributesForCurrentView() {
     if (!totalCount) {
       updateStreetLoadStatus("No street segments returned for current view.", true);
     } else if (tileErrors.length) {
-      updateStreetLoadStatus(`Loaded ${addedCount} new segments (${totalCount} total, ${tileErrors.length} tile failures).`, false);
+      updateStreetLoadStatus(`Loaded ${addedCount} new segments (${totalCount} total). Some sources throttled (${tileErrors.length} failures).`, false);
       console.warn(`Street attributes loaded with partial tile failures (${tileErrors.length}).`, tileErrors);
     } else if (retriedWithExpandedBounds) {
       updateStreetLoadStatus(`Loaded ${addedCount} new street segments (${totalCount} total, expanded area retry).`, false);
@@ -1304,17 +4238,19 @@ async function loadStreetAttributesForCurrentView() {
     }
   } catch (err) {
     console.error("STREET ATTRIBUTES LOAD ERROR:", err);
-    updateStreetLoadStatus("Unable to load street segments from providers.", true);
+    const msg = String(err?.message || "");
+    const rateLimited = msg.includes("429") || msg.includes("509") || msg.toLowerCase().includes("cooling down");
+    if (rateLimited) {
+      updateStreetLoadStatus("Providers are rate-limiting. Try a smaller polygon or wait 1-2 minutes.", true);
+    } else {
+      updateStreetLoadStatus("Unable to load street segments from providers.", true);
+    }
     alert(`Unable to load street attributes.\n\nData providers are currently busy or rate-limited.\nTry zooming in more (smaller area) and run Street Attributes again.\n\nDetails: ${err.message}`);
   } finally {
     streetLoadInFlight = false;
     setStreetLoadBarVisible(false);
-    if (pendingStreetReload) {
-      pendingStreetReload = false;
-      setTimeout(() => {
-        maybeAutoLoadStreetSegments();
-      }, 120);
-    }
+    pendingStreetReload = false;
+    updateStreetSetupGuide();
   }
 }
 
@@ -1330,6 +4266,41 @@ function zoomToSelectedStreetSegments() {
   });
   if (!bounds.isValid()) return;
   map.fitBounds(bounds.pad(0.18));
+}
+
+function flattenStreetLayerLatLngs(raw, out = []) {
+  if (!raw) return out;
+  if (Array.isArray(raw)) {
+    if (raw.length && raw[0] && typeof raw[0].lat === "number" && typeof raw[0].lng === "number") {
+      raw.forEach(pt => {
+        const lat = Number(pt?.lat);
+        const lng = Number(pt?.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        out.push({ lat, lon: lng });
+      });
+      return out;
+    }
+    raw.forEach(part => flattenStreetLayerLatLngs(part, out));
+  }
+  return out;
+}
+
+function streetEntryIntersectsSelectionPolygon(entry, polygonLayer) {
+  const layer = entry?.layer;
+  if (!layer || !polygonLayer) return false;
+  const geom = flattenStreetLayerLatLngs(layer.getLatLngs?.(), []);
+  if (!geom.length) return false;
+  return streetElementIntersectsPolygon({ geom }, polygonLayer);
+}
+
+function replaceStreetSelection(nextSelectedIds) {
+  streetAttributeSelectedIds.clear();
+  (nextSelectedIds || []).forEach(id => {
+    const wayId = Number(id);
+    if (!Number.isFinite(wayId)) return;
+    if (!streetAttributeById.has(wayId)) return;
+    streetAttributeSelectedIds.add(wayId);
+  });
 }
 
 // ================= POLYGON SELECT =================
@@ -1359,6 +4330,38 @@ function updateSelectionCount() {
 const polygon = drawnLayer.getLayers()[0];
 let count = 0;
 const nextSelectedRowIds = new Set();
+
+if (attributeTableMode === "streets") {
+  if (!polygon) {
+    syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+    refreshAttributeStatus();
+    return;
+  }
+
+  const nextSelectedStreetIds = new Set();
+  streetAttributeById.forEach((entry, id) => {
+    if (!entry?.layer) return;
+    if (!map.hasLayer(entry.layer)) return;
+    if (streetEntryIntersectsSelectionPolygon(entry, polygon)) {
+      nextSelectedStreetIds.add(id);
+    }
+  });
+
+  const prevStreet = streetAttributeSelectedIds;
+  const changed =
+    prevStreet.size !== nextSelectedStreetIds.size ||
+    [...prevStreet].some(id => !nextSelectedStreetIds.has(id));
+
+  if (changed) {
+    replaceStreetSelection(nextSelectedStreetIds);
+    applyStreetSelectionStyles();
+    if (attributeTableMode === "streets") renderAttributeTable();
+  }
+
+  syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+  refreshAttributeStatus();
+  return;
+}
 
 Object.entries(routeDayGroups).forEach(([key, group]) => {
  group.layers.forEach(marker => {
@@ -1408,11 +4411,56 @@ if (changed) renderAttributeTable();
 
 // ===== WHEN POLYGON IS DRAWN =====
 map.on(L.Draw.Event.CREATED, e => {
+  const streetToggle = document.getElementById("useLocalStreetSource");
+  if (streetPolygonLoadPending && streetToggle?.checked) {
+    streetPolygonLoadPending = false;
+    closeStreetSegmentsPromptModal();
+    lastStreetLoadPolygonSnapshot = encodeStreetPolygonLatLngs(e.layer.getLatLngs());
+    streetLoadPolygonLayerGroup.clearLayers();
+    streetLoadPolygonLayerGroup.addLayer(e.layer);
+    // Keep polygon geometry for this load, but hide the drawn shape from the map.
+    setTimeout(() => {
+      streetLoadPolygonLayerGroup.clearLayers();
+    }, 0);
+    // Replace old streets only after user confirms a new polygon.
+    streetAttributeLayerGroup.clearLayers();
+    streetAttributeById.clear();
+    streetAttributesRows = [];
+    streetAttributeSelectedIds.clear();
+    if (attributeTableMode === "streets") renderAttributeTable();
+    updateStreetLoadStatus("Polygon captured. Loading street segments...");
+    loadStreetAttributesForCurrentView(e.layer.getBounds(), e.layer).catch(err => {
+      console.error("Street polygon load failed:", err);
+    });
+    return;
+  }
   selectedLayerKey = null;
   drawnLayer.clearLayers();
   drawnLayer.addLayer(e.layer);
   updateSelectionCount();
   updateUndoButtonState();   // 🔥 ADD THIS
+});
+
+map.on(L.Draw.Event.DRAWSTOP, () => {
+  if (!streetPolygonLoadPending) return;
+  // Leaflet draw can emit DRAWSTOP before CREATED on some paths.
+  // Defer cancel handling so CREATED can clear this flag first.
+  setTimeout(() => {
+    if (!streetPolygonLoadPending) return;
+    if (streetLoadInFlight || streetLoadPolygonLayerGroup.getLayers().length > 0) {
+      streetPolygonLoadPending = false;
+      return;
+    }
+    streetPolygonLoadPending = false;
+    const streetToggle = document.getElementById("useLocalStreetSource");
+    closeStreetSegmentsPromptModal();
+    if (streetToggle) {
+      streetToggle.checked = false;
+      storageSet("streetSegmentsVisible", "off");
+    }
+    syncStreetNetworkOverlay();
+    updateLocalStreetSourceStatus();
+  }, 0);
 });
 
 // Default map
@@ -3846,6 +6894,7 @@ const toggleAttributePanel = () => {
 
 const openStreetAttributesPanel = async () => {
   if (!attributePanel) return;
+  const layerToggle = document.getElementById("useLocalStreetSource");
   const isClosed = attributePanel.classList.contains("closed");
   // Toggle close when Street Attributes is already the active open panel.
   if (!isClosed && attributeTableMode === "streets") {
@@ -3854,7 +6903,23 @@ const openStreetAttributesPanel = async () => {
   }
   setAttributeTableMode("streets");
   if (isClosed) openAttributePanel();
-  await loadStreetAttributesForCurrentView();
+  if (layerToggle?.checked) {
+    if (streetAttributeById.size) {
+      updateStreetLoadStatus(`Showing ${streetAttributeById.size.toLocaleString()} loaded street segments.`);
+    } else {
+      const scopedPolygonFromSnapshot = createStreetPolygonLayerFromSnapshot(lastStreetLoadPolygonSnapshot);
+      const selectionPolygonLayer = (drawnLayer?.getLayers?.() || [])
+        .find(layer => layer instanceof L.Polygon || layer instanceof L.Rectangle) || null;
+      const scopedPolygon = scopedPolygonFromSnapshot || selectionPolygonLayer || null;
+      if (scopedPolygon) {
+        await loadStreetAttributesForCurrentView(scopedPolygon.getBounds(), scopedPolygon);
+      } else {
+        updateStreetLoadStatus("No street segments loaded yet. Turn on 'Use Local Streets File' and draw a polygon.", true);
+      }
+    }
+  } else {
+    updateStreetLoadStatus("Enable 'Street Segments (Local Source)' to load and view street segments.", true);
+  }
   renderAttributeTable();
 };
 
@@ -3884,7 +6949,10 @@ attributeSelectedOnly?.addEventListener("change", () => {
 
 attributeSelectVisibleBtn?.addEventListener("click", () => {
   if (attributeTableMode === "streets") {
-    streetAttributeById.forEach(entry => streetAttributeSelectedIds.add(entry.id));
+    const visibleStreetIds = (attributeState.lastVisibleRows || [])
+      .map(item => Number(item?.rowId))
+      .filter(id => Number.isFinite(id) && streetAttributeById.has(id));
+    visibleStreetIds.forEach(id => streetAttributeSelectedIds.add(id));
     applyStreetSelectionStyles();
   } else {
     getFilteredAttributeRows().forEach(({ rowId }) => attributeState.selectedRowIds.add(rowId));
@@ -4020,6 +7088,11 @@ summaryFileInput.addEventListener("change", e => {
 
 // ===== INITIAL MAP LAYER + USER LOCATION =====
 baseMaps.streets.addTo(map);
+initLocalStreetSourceControls();
+tryRestoreSavedStreetSourceOnStartup().catch(err => {
+  console.warn("Unable to restore saved local streets source on startup:", err);
+  updateLocalStreetSourceStatus();
+});
 initStreetNetworkToggle();
 
 
@@ -4104,9 +7177,6 @@ if (window.visualViewport) {
 if (map && typeof map.on === "function") {
   map.on("click zoomend moveend", () => {
     requestAnimationFrame(syncMobileSidebarLayout);
-  });
-  map.on("zoomend moveend", () => {
-    maybeAutoLoadStreetSegments();
   });
 }
 

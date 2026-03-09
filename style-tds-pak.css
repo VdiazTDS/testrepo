@@ -39,12 +39,13 @@ header p {
   left: 0;
   right: 0;
   bottom: -1px;
-  height: 2px;
+  height: 4px;
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.16s ease;
+  transition: opacity 0.16s ease, box-shadow 0.16s ease;
   z-index: 12;
+  background: rgba(56, 182, 255, 0.08);
 }
 
 .street-segments-loadbar::before {
@@ -60,6 +61,7 @@ header p {
 
 .street-segments-loadbar.active {
   opacity: 1;
+  box-shadow: 0 0 10px rgba(56, 182, 255, 0.45);
 }
 
 @keyframes streetLoadSweep {
@@ -325,6 +327,196 @@ header p {
 
 .map-network-toggle input {
   accent-color: #42a5f5;
+}
+
+.local-street-source {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #3a4b5e;
+  background: #17212c;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.local-street-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.local-street-toggle {
+  margin-top: 0;
+  flex: 1 1 210px;
+}
+
+#openStreetSetupWizardBtn,
+#loadLocalStreetFileBtn,
+#saveStreetPolygonBtn,
+#chooseStreetPolygonBtn {
+  min-height: 32px;
+}
+
+#downloadTexasZipBtn,
+#downloadAutoSetupPackageBtn,
+#checkLocalBackendBtn,
+#setLocalBackendUrlBtn {
+  min-height: 32px;
+}
+
+.street-setup-guide {
+  display: grid;
+  gap: 5px;
+}
+
+.street-setup-step {
+  font-size: 11px;
+  line-height: 1.35;
+  color: #b7c9dc;
+  border: 1px solid #30455b;
+  background: #1a2734;
+  border-radius: 7px;
+  padding: 6px 8px;
+}
+
+.street-setup-step strong {
+  color: #e8f2ff;
+}
+
+.street-setup-step.done {
+  color: #8fe0a7;
+  border-color: #2f7140;
+  background: #162a1d;
+}
+
+.street-setup-step.done strong {
+  color: #b9f3ca;
+}
+
+.local-streets-status {
+  font-size: 11px;
+  color: #b7c9dc;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+body.sun-mode .local-street-source {
+  border-color: #bfd4ea;
+  background: #edf5ff;
+}
+
+body.sun-mode .local-streets-status {
+  color: #33506c;
+}
+
+body.sun-mode .street-setup-step {
+  color: #3f5f7d;
+  border-color: #c5d9ec;
+  background: #f4f8ff;
+}
+
+body.sun-mode .street-setup-step strong {
+  color: #24425f;
+}
+
+body.sun-mode .street-setup-step.done {
+  color: #1f6a3b;
+  border-color: #90d2a8;
+  background: #ebf8ef;
+}
+
+body.sun-mode .street-setup-step.done strong {
+  color: #1e5a36;
+}
+
+.street-setup-wizard-modal-content {
+  width: min(560px, calc(100vw - 24px));
+}
+
+.street-setup-wizard-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.street-polygon-library-modal-content {
+  width: min(560px, calc(100vw - 24px));
+}
+
+.street-polygon-library-list {
+  max-height: min(52vh, 420px);
+  overflow: auto;
+  border: 1px solid #38506a;
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(20, 33, 47, 0.65);
+}
+
+.street-polygon-library-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid rgba(140, 173, 207, 0.18);
+}
+
+.street-polygon-library-item:last-child {
+  border-bottom: 0;
+}
+
+.street-polygon-library-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.street-polygon-library-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eaf3ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+.street-polygon-library-meta {
+  font-size: 11px;
+  color: #aac0d7;
+}
+
+.street-polygon-library-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.street-polygon-empty {
+  font-size: 12px;
+  color: #b7c9dc;
+  padding: 8px;
+}
+
+body.sun-mode .street-polygon-library-list {
+  background: #f5faff;
+  border-color: #c6d8ea;
+}
+
+body.sun-mode .street-polygon-library-item {
+  border-bottom-color: #d7e5f3;
+}
+
+body.sun-mode .street-polygon-library-name {
+  color: #1a3048;
+}
+
+body.sun-mode .street-polygon-library-meta,
+body.sun-mode .street-polygon-empty {
+  color: #476685;
 }
 
 .map-view-label {

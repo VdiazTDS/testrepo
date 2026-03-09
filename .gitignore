@@ -1,0 +1,5 @@
+# Local generated street index DB (very large; do not commit)
+tds-streets.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal

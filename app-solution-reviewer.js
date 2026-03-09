@@ -19,6 +19,7 @@ window._summaryHeaders = [];
 window._attributeHeaders = [];
 
 window.streetLabelsEnabled = false;
+window.streetSegmentsEnabled = false;
 const attributeRowToId = new WeakMap();
 let attributeRowToMarker = new WeakMap();
 const attributeMarkerByRowId = new Map();
@@ -610,16 +611,19 @@ const satelliteLabelsLayer = L.tileLayer(
 );
 
 // ================= POLYGON SELECT =================
+let streetLoadFilterLayer = null;
+let streetFilterDrawPending = false;
 
 
 // when polygon created
 // ================= POLYGON SELECT =================
 let drawnLayer = new L.FeatureGroup();
 map.addLayer(drawnLayer);
+const polygonDrawOptions = {};
 
 const drawControl = new L.Control.Draw({
   draw: {
-    polygon: true,
+    polygon: polygonDrawOptions,
     rectangle: true,
     circle: false,
     marker: false,
@@ -630,6 +634,120 @@ const drawControl = new L.Control.Draw({
 });
 
 map.addControl(drawControl);
+
+function getPolygonRings(latlngs) {
+  if (!Array.isArray(latlngs) || !latlngs.length) return [];
+  if (latlngs[0] && typeof latlngs[0].lat === "number" && typeof latlngs[0].lng === "number") {
+    return [latlngs];
+  }
+  return latlngs.flatMap(getPolygonRings);
+}
+
+function isPointInRing(latlng, ring) {
+  const x = latlng.lng;
+  const y = latlng.lat;
+  let inside = false;
+
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i].lng;
+    const yi = ring[i].lat;
+    const xj = ring[j].lng;
+    const yj = ring[j].lat;
+    const intersects = ((yi > y) !== (yj > y))
+      && (x < ((xj - xi) * (y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+    if (intersects) inside = !inside;
+  }
+
+  return inside;
+}
+
+function isInsideStreetLoadFilter(lat, lon) {
+  if (!window.streetSegmentsEnabled) return true;
+  if (!streetLoadFilterLayer) return false;
+
+  const latlng = L.latLng(lat, lon);
+  if (typeof streetLoadFilterLayer.getBounds === "function") {
+    const bounds = streetLoadFilterLayer.getBounds();
+    if (bounds && !bounds.contains(latlng)) return false;
+  }
+
+  if (streetLoadFilterLayer instanceof L.Rectangle) return true;
+  if (streetLoadFilterLayer instanceof L.Polygon) {
+    const rings = getPolygonRings(streetLoadFilterLayer.getLatLngs());
+    if (!rings.length) return false;
+    return rings.some(ring => isPointInRing(latlng, ring));
+  }
+
+  return true;
+}
+
+function reloadMarkersUsingCurrentRows() {
+  if (!Array.isArray(window._currentRows) || !window._currentRows.length || !window._currentWorkbook) return;
+  processExcelBuffer(null, window._currentRows, window._currentWorkbook);
+}
+
+let streetSegmentsLoaderTimer = null;
+function showStreetSegmentsLoader() {
+  const wrap = document.getElementById("streetSegmentsLoader");
+  const bar = document.getElementById("streetSegmentsLoaderBar");
+  if (!wrap || !bar) return;
+
+  if (streetSegmentsLoaderTimer) {
+    clearInterval(streetSegmentsLoaderTimer);
+    streetSegmentsLoaderTimer = null;
+  }
+
+  let pct = 8;
+  wrap.classList.add("active");
+  bar.style.width = `${pct}%`;
+
+  streetSegmentsLoaderTimer = setInterval(() => {
+    pct = Math.min(92, pct + (Math.random() * 10 + 3));
+    bar.style.width = `${pct}%`;
+  }, 120);
+}
+
+function hideStreetSegmentsLoader() {
+  const wrap = document.getElementById("streetSegmentsLoader");
+  const bar = document.getElementById("streetSegmentsLoaderBar");
+  if (!wrap || !bar) return;
+
+  if (streetSegmentsLoaderTimer) {
+    clearInterval(streetSegmentsLoaderTimer);
+    streetSegmentsLoaderTimer = null;
+  }
+
+  bar.style.width = "100%";
+  setTimeout(() => {
+    wrap.classList.remove("active");
+    bar.style.width = "0%";
+  }, 180);
+}
+
+function reloadStreetSegmentsWithLoader() {
+  if (!Array.isArray(window._currentRows) || !window._currentRows.length || !window._currentWorkbook) return;
+  showStreetSegmentsLoader();
+  setTimeout(() => {
+    try {
+      reloadMarkersUsingCurrentRows();
+    } finally {
+      hideStreetSegmentsLoader();
+    }
+  }, 40);
+}
+
+function beginStreetFilterPolygonDraw() {
+  streetFilterDrawPending = true;
+
+  const toolbarHandler = drawControl?._toolbars?.draw?._modes?.polygon?.handler;
+  if (toolbarHandler && typeof toolbarHandler.enable === "function") {
+    toolbarHandler.enable();
+    return;
+  }
+
+  const drawHandler = new L.Draw.Polygon(map, { ...polygonDrawOptions });
+  drawHandler.enable();
+}
 
 // ===== SELECTION COUNT FUNCTION (GLOBAL & CORRECT) =====
 function updateSelectionCount() {
@@ -688,8 +806,24 @@ map.on(L.Draw.Event.CREATED, e => {
   selectedLayerKey = null;
   drawnLayer.clearLayers();
   drawnLayer.addLayer(e.layer);
+  if (streetFilterDrawPending) {
+    streetLoadFilterLayer = e.layer;
+    streetFilterDrawPending = false;
+    reloadStreetSegmentsWithLoader();
+  }
   updateSelectionCount();
   updateUndoButtonState();   // 🔥 ADD THIS
+});
+
+map.on(L.Draw.Event.DRAWSTOP, () => {
+  if (!streetFilterDrawPending) return;
+  streetFilterDrawPending = false;
+  const streetToggle = document.getElementById("streetLabelToggle");
+  if (streetToggle) streetToggle.checked = false;
+  window.streetLabelsEnabled = false;
+  window.streetSegmentsEnabled = false;
+  reloadMarkersUsingCurrentRows();
+  map.fire("zoomend");
 });
 
 // Default map
@@ -2288,6 +2422,7 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
     const lat = Number(row.LATITUDE);
     const lon = Number(row.LONGITUDE);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (!isInsideStreetLoadFilter(lat, lon)) return;
 
     const route = String(row.NEWROUTE ?? "").trim() || "Unassigned";
     const day = String(row.NEWDAY ?? "").trim() || "No Day";
@@ -2756,7 +2891,6 @@ function placeLocateButton() {
   const locateBtn = document.getElementById("locateMeBtn");
     const headerContainer = document.querySelector(".mobile-header-buttons");
   const desktopContainer = document.getElementById("desktopLocateContainer");
-    const streetToggle = document.getElementById("streetLabelToggle");
 
   if (!locateBtn || !headerContainer || !desktopContainer) return;
 
@@ -2764,17 +2898,10 @@ function placeLocateButton() {
     // 📱 MOBILE
     headerContainer.appendChild(locateBtn);
 
-    if (streetToggle) {
-      headerContainer.appendChild(streetToggle.parentElement);
-    }
-
   } else {
     // 🖥 DESKTOP
     desktopContainer.appendChild(locateBtn);
 
-    if (streetToggle) {
-      desktopContainer.appendChild(streetToggle.parentElement);
-    }
   }
 }
 
@@ -4216,6 +4343,12 @@ if (resetBtn) {
 
     // 2. Clear drawn polygon
     drawnLayer.clearLayers();
+    streetLoadFilterLayer = null;
+    streetFilterDrawPending = false;
+    window.streetLabelsEnabled = false;
+    window.streetSegmentsEnabled = false;
+    const streetToggle = document.getElementById("streetLabelToggle");
+    if (streetToggle) streetToggle.checked = false;
 
     // 3. Remove ALL markers from map
     Object.values(routeDayGroups).forEach(group => {
@@ -4477,26 +4610,94 @@ window.addEventListener("resize", placeLocateButton);
 
 // ===== STREET LABEL TOGGLE =====
 const streetToggle = document.getElementById("streetLabelToggle");
+const streetSegmentsPromptModal = document.getElementById("streetSegmentsPromptModal");
+const streetSegmentsPromptDrawBtn = document.getElementById("streetSegmentsPromptDraw");
+const streetSegmentsPromptCancelBtn = document.getElementById("streetSegmentsPromptCancel");
+
+function closeStreetSegmentsPrompt(restoreMap = false) {
+  if (streetSegmentsPromptModal) streetSegmentsPromptModal.style.display = "none";
+  if (!restoreMap) return;
+  streetLoadFilterLayer = null;
+  streetFilterDrawPending = false;
+  window.streetLabelsEnabled = false;
+  window.streetSegmentsEnabled = false;
+  if (streetToggle) streetToggle.checked = false;
+  reloadMarkersUsingCurrentRows();
+  map.fire("zoomend");
+}
+
+function openStreetSegmentsPrompt() {
+  if (!streetSegmentsPromptModal) {
+    beginStreetFilterPolygonDraw();
+    return;
+  }
+  streetSegmentsPromptModal.style.display = "flex";
+}
 
 if (streetToggle) {
-
-  // Set initial state based on checkbox
-  window.streetLabelsEnabled = streetToggle.checked;
+  streetToggle.checked = false;
+  window.streetLabelsEnabled = false;
+  window.streetSegmentsEnabled = false;
 
   // Force labels to respect initial state
   map.whenReady(() => {
     map.fire("zoomend");
   });
 
-  streetToggle.addEventListener("change", (e) => {
-    window.streetLabelsEnabled = e.target.checked;
+  const handleStreetToggle = (enabled) => {
+    if (enabled === window.streetSegmentsEnabled && enabled === window.streetLabelsEnabled) return;
+    window.streetLabelsEnabled = enabled;
+    window.streetSegmentsEnabled = enabled;
+
+    if (enabled) {
+      streetLoadFilterLayer = null;
+      drawnLayer.clearLayers();
+      // Hide all currently rendered records until a polygon is drawn.
+      Object.values(routeDayGroups).forEach(group => {
+        group.layers.forEach(layer => map.removeLayer(layer));
+      });
+      reloadMarkersUsingCurrentRows();
+      openStreetSegmentsPrompt();
+    } else {
+      streetLoadFilterLayer = null;
+      streetFilterDrawPending = false;
+      drawnLayer.clearLayers();
+      reloadMarkersUsingCurrentRows();
+    }
 
     // Immediately refresh labels
     map.fire("zoomend");
+  };
+
+  streetToggle.addEventListener("change", (e) => handleStreetToggle(!!e.target.checked));
+  streetToggle.addEventListener("input", (e) => handleStreetToggle(!!e.target.checked));
+  streetToggle.addEventListener("click", () => {
+    setTimeout(() => handleStreetToggle(!!streetToggle.checked), 0);
   });
 }
   
 ////////////////////////////////////////////////////////////////////
+if (streetSegmentsPromptDrawBtn) {
+  streetSegmentsPromptDrawBtn.addEventListener("click", () => {
+    closeStreetSegmentsPrompt(false);
+    beginStreetFilterPolygonDraw();
+  });
+}
+
+if (streetSegmentsPromptCancelBtn) {
+  streetSegmentsPromptCancelBtn.addEventListener("click", () => {
+    closeStreetSegmentsPrompt(true);
+  });
+}
+
+if (streetSegmentsPromptModal) {
+  streetSegmentsPromptModal.addEventListener("click", (e) => {
+    if (e.target === streetSegmentsPromptModal) {
+      closeStreetSegmentsPrompt(true);
+    }
+  });
+}
+
 // 🔍 MAP ADDRESS SEARCH (PASTE RIGHT BELOW STREET TOGGLE)
 ////////////////////////////////////////////////////////////////////
 

@@ -120,10 +120,28 @@
         <option value="satellite">Satellite (Imagery)</option>
       </select>
     </div>
-    <label class="map-network-toggle">
-      <input type="checkbox" id="streetNetworkToggle" />
-      Street Segments
-    </label>
+    <div class="local-street-source">
+      <div class="local-street-source-actions">
+        <label class="map-network-toggle local-street-toggle">
+          <input type="checkbox" id="useLocalStreetSource" />
+          Street Segments (Local Source)
+        </label>
+        <button id="openStreetSetupWizardBtn" class="mini-btn" type="button">Street Setup Wizard</button>
+        <button id="loadLocalStreetFileBtn" class="mini-btn" type="button">Load ZIP/GeoJSON File</button>
+        <button id="saveStreetPolygonBtn" class="mini-btn" type="button">Save Polygon</button>
+        <button id="chooseStreetPolygonBtn" class="mini-btn" type="button">Choose Polygon</button>
+        <button id="downloadTexasZipBtn" class="mini-btn" type="button">Download Texas Source ZIP</button>
+        <button id="downloadAutoSetupPackageBtn" class="mini-btn" type="button">Download Setup Program</button>
+        <button id="checkLocalBackendBtn" class="mini-btn" type="button">Check Backend</button>
+        <button id="setLocalBackendUrlBtn" class="mini-btn" type="button">Backend URL</button>
+      </div>
+      <div id="streetSetupGuide" class="street-setup-guide">
+        <div id="streetSetupStep1" class="street-setup-step">1) Get street data: use <strong>Download Texas Source ZIP</strong> or <strong>Load ZIP/GeoJSON File</strong>.</div>
+        <div id="streetSetupStep2" class="street-setup-step">2) Start backend and click <strong>Check Backend</strong>.</div>
+        <div id="streetSetupStep3" class="street-setup-step">3) Turn on <strong>Street Segments</strong>, then draw a polygon.</div>
+      </div>
+      <div id="localStreetsStatus" class="local-streets-status">Street layer: Off. Click Street Setup Wizard and follow the steps.</div>
+    </div>
 
 
     
@@ -396,6 +414,44 @@
     </div>
   </div>
 </div>
+<div id="streetSegmentsPromptModal" class="modal">
+  <div class="modal-content">
+    <h3>Street Segments</h3>
+    <p>Draw a polygon on the map to load street segments inside that area.</p>
+    <div class="modal-actions">
+      <button id="streetSegmentsPromptCancel">Cancel</button>
+      <button id="streetSegmentsPromptDraw">Draw Polygon</button>
+    </div>
+  </div>
+</div>
+<div id="streetSetupWizardModal" class="modal">
+  <div class="modal-content street-setup-wizard-modal-content">
+    <h3>Street Setup Wizard</h3>
+    <p>Follow these steps in order. You only need to do setup once per new streets file.</p>
+    <div class="street-setup-wizard-actions">
+      <button id="streetWizardDownloadTexasBtn" class="primary-btn" type="button">1) Download Texas Source ZIP</button>
+      <button id="streetWizardLoadFileBtn" class="primary-btn" type="button">Load ZIP/GeoJSON File</button>
+      <button id="streetWizardAutoSetupBtn" class="primary-btn" type="button">Download Setup Program</button>
+      <button id="streetWizardCheckBackendBtn" class="primary-btn" type="button">2) Check Backend</button>
+      <button id="streetWizardStartBtn" class="primary-btn" type="button">3) Turn On + Draw Polygon</button>
+    </div>
+    <div id="streetWizardStatus" class="local-streets-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="streetSetupWizardClose">Close</button>
+    </div>
+  </div>
+</div>
+<div id="streetPolygonLibraryModal" class="modal">
+  <div class="modal-content street-polygon-library-modal-content">
+    <h3>Saved Street Polygons</h3>
+    <p>Click Use to load street segments from a saved polygon.</p>
+    <div id="streetPolygonLibraryList" class="street-polygon-library-list"></div>
+    <div class="modal-actions">
+      <button id="streetPolygonLibraryClose">Close</button>
+    </div>
+  </div>
+</div>
+<script src="https://unpkg.com/shpjs@6.2.0/dist/shp.min.js" defer></script>
 <script src="app-tds-pak.js" defer></script>
 <!-- MOBILE Selected Stops Button -->
 <button id="mobileSelectionBtn">Selected: 0</button>

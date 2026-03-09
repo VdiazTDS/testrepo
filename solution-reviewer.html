@@ -78,6 +78,9 @@
   <input type="file" id="summaryFileInput" accept=".xlsx,.xls,.csv" hidden>
 
 </header>
+<div id="streetSegmentsLoader" class="street-segments-loader" aria-hidden="true">
+  <div id="streetSegmentsLoaderBar" class="street-segments-loader-bar"></div>
+</div>
 
 
   
@@ -112,6 +115,12 @@
         <option value="streets">Streets (Detailed)</option>
         <option value="satellite">Satellite (Imagery)</option>
       </select>
+    </div>
+    <div class="filter-group street-segments-filter-group">
+      <label class="street-toggle-label street-segments-toggle-label">
+        <input type="checkbox" id="streetLabelToggle">
+        Street Segments
+      </label>
     </div>
 
 
@@ -235,15 +244,6 @@
   </button>
   
   <div id="desktopLocateContainer"></div>
-  
-<label class="street-toggle-label">
-  <input type="checkbox" id="streetLabelToggle">
-  Street Labels for Records
-</label>
-
-
-
-  
 </div>
 
 
@@ -381,6 +381,16 @@
     <div class="modal-actions">
       <button id="cancelDownload">Cancel</button>
       <button id="confirmDownload">Download</button>
+    </div>
+  </div>
+</div>
+<div id="streetSegmentsPromptModal" class="modal">
+  <div class="modal-content">
+    <h3>Street Segments</h3>
+    <p>Draw a polygon on the map to load street segments inside that area.</p>
+    <div class="modal-actions">
+      <button id="streetSegmentsPromptCancel">Cancel</button>
+      <button id="streetSegmentsPromptDraw">Draw Polygon</button>
     </div>
   </div>
 </div>
