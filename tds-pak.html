@@ -60,9 +60,17 @@
       <span class="import-wizard-icon" aria-hidden="true"></span>
       <span>Import Wizard</span>
     </button>
+    <button id="streetNetworkManagerBtn" class="primary-btn street-network-manager-btn" type="button">
+      <span class="street-network-manager-icon" aria-hidden="true"></span>
+      <span>Street Network Manager</span>
+    </button>
     <button id="streetAttributesBtn" class="primary-btn street-attributes-btn" type="button">
       <span class="street-attributes-icon" aria-hidden="true"></span>
       <span>Street Attributes</span>
+    </button>
+    <button id="selectByAttributesBtn" class="primary-btn select-attributes-btn" type="button">
+      <span class="select-attributes-icon" aria-hidden="true"></span>
+      <span>Select By Attributes</span>
     </button>
     <button id="attributeTableBtn" class="primary-btn attribute-table-btn" type="button">
       <span class="attribute-table-icon" aria-hidden="true"></span>
@@ -107,41 +115,18 @@
   </span>
 </button>
 </div>
-    <div id="savedFilesGuide" class="saved-files-guide">
-      <div class="saved-files-guide-title">Quick Start</div>
-      <div class="saved-files-guide-step"><span class="saved-files-guide-num">1</span>Open <strong>Saved Files</strong></div>
-      <div class="saved-files-guide-step"><span class="saved-files-guide-num">2</span><strong>Open Map</strong> or <strong>Summary</strong></div>
-    </div>
     <div class="map-view-group">
-      <label for="baseMapSelect" class="map-view-label">Map View</label>
-      <select id="baseMapSelect" aria-label="Map View">
+      <label for="baseMapSelect" class="map-view-label">Basemap</label>
+      <select id="baseMapSelect" aria-label="Basemap">
         <option value="streets">Streets (Detailed)</option>
         <option value="freeStreets">OSM Streets (Free)</option>
         <option value="satellite">Satellite (Imagery)</option>
       </select>
     </div>
-    <div class="local-street-source">
-      <div class="local-street-source-actions">
-        <label class="map-network-toggle local-street-toggle">
-          <input type="checkbox" id="useLocalStreetSource" />
-          Street Segments (Local Source)
-        </label>
-        <button id="openStreetSetupWizardBtn" class="mini-btn" type="button">Street Setup Wizard</button>
-        <button id="loadLocalStreetFileBtn" class="mini-btn" type="button">Load ZIP/GeoJSON File</button>
-        <button id="saveStreetPolygonBtn" class="mini-btn" type="button">Save Polygon</button>
-        <button id="chooseStreetPolygonBtn" class="mini-btn" type="button">Choose Polygon</button>
-        <button id="downloadTexasZipBtn" class="mini-btn" type="button">Download Texas Source ZIP</button>
-        <button id="downloadAutoSetupPackageBtn" class="mini-btn" type="button">Download Setup Program</button>
-        <button id="checkLocalBackendBtn" class="mini-btn" type="button">Check Backend</button>
-        <button id="setLocalBackendUrlBtn" class="mini-btn" type="button">Backend URL</button>
-      </div>
-      <div id="streetSetupGuide" class="street-setup-guide">
-        <div id="streetSetupStep1" class="street-setup-step">1) Get street data: use <strong>Download Texas Source ZIP</strong> or <strong>Load ZIP/GeoJSON File</strong>.</div>
-        <div id="streetSetupStep2" class="street-setup-step">2) Start backend and click <strong>Check Backend</strong>.</div>
-        <div id="streetSetupStep3" class="street-setup-step">3) Turn on <strong>Street Segments</strong>, then draw a polygon.</div>
-      </div>
-      <div id="localStreetsStatus" class="local-streets-status">Street layer: Off. Click Street Setup Wizard and follow the steps.</div>
-    </div>
+    <label class="map-network-toggle street-network-sidebar-toggle">
+      <input type="checkbox" id="streetNetworkLayerToggle" checked />
+      Street Network Layer
+    </label>
 
 
     
@@ -411,6 +396,165 @@
     <div class="modal-actions">
       <button id="cancelDownload">Cancel</button>
       <button id="confirmDownload">Download</button>
+    </div>
+  </div>
+</div>
+<div id="streetNetworkManagerModal" class="modal">
+  <div class="modal-content street-network-manager-modal-content">
+    <div class="street-network-manager-head">
+      <h3>Street Network Manager</h3>
+      <p>Manage local street source, backend connection, and loading controls in one place.</p>
+    </div>
+    <div class="street-network-manager-grid">
+      <section class="street-network-manager-card street-network-manager-mode-card">
+        <div class="street-network-manager-card-top">
+          <h4>Mode</h4>
+          <span id="streetNetworkManagerBadge" class="street-network-manager-badge">No Source</span>
+        </div>
+        <label class="map-network-toggle local-street-toggle street-network-manager-toggle">
+          <input type="checkbox" id="useLocalStreetSource" />
+          <span class="street-network-manager-toggle-copy">
+            <span class="street-network-manager-toggle-title">Street Segments (Local Source)</span>
+            <span class="street-network-manager-toggle-subtitle">Enable this, then draw a polygon to load streets for that map area.</span>
+          </span>
+        </label>
+        <div id="streetNetworkManagerHint" class="street-network-manager-hint">Choose a data source, then enable Street Segments to start loading streets.</div>
+        <div id="streetSetupGuide" class="street-network-manager-progress">
+          <div id="streetSetupStep1" class="street-network-manager-progress-step">1) Source ready</div>
+          <div id="streetSetupStep2" class="street-network-manager-progress-step">2) Backend ready</div>
+          <div id="streetSetupStep3" class="street-network-manager-progress-step">3) Streets visible</div>
+        </div>
+      </section>
+      <section class="street-network-manager-card">
+        <h4>Data Source</h4>
+        <p class="street-network-manager-card-desc">Load a local streets file or use setup tools.</p>
+        <div class="street-network-manager-actions">
+          <button id="loadLocalStreetFileBtn" class="mini-btn street-network-action-btn" type="button">
+            <span class="street-network-action-title">Load ZIP/GeoJSON File</span>
+            <span class="street-network-action-subtitle">Choose your local street source file.</span>
+          </button>
+          <button id="downloadAutoSetupPackageBtn" class="mini-btn street-network-action-btn" type="button">
+            <span class="street-network-action-title">Download Setup Program</span>
+            <span class="street-network-action-subtitle">Get the full converter + index + backend package.</span>
+          </button>
+          <button id="openStreetSetupWizardBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
+            <span class="street-network-action-title">Street Setup Wizard</span>
+            <span class="street-network-action-subtitle">Step-by-step guided setup workflow.</span>
+          </button>
+        </div>
+      </section>
+      <section class="street-network-manager-card">
+        <h4>Backend</h4>
+        <p class="street-network-manager-card-desc">Check local server health and set its URL.</p>
+        <div class="street-network-manager-actions street-network-manager-actions-two">
+          <button id="checkLocalBackendBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
+            <span class="street-network-action-title">Check Backend</span>
+            <span class="street-network-action-subtitle">Verify local API + index availability.</span>
+          </button>
+          <button id="setLocalBackendUrlBtn" class="mini-btn street-network-action-btn" type="button">
+            <span class="street-network-action-title">Backend URL</span>
+            <span class="street-network-action-subtitle">Set server address (default `127.0.0.1:8787`).</span>
+          </button>
+        </div>
+        <div id="localStreetsStatus" class="local-streets-status street-network-manager-status">Street layer: Off. Click Street Setup Wizard and follow the steps.</div>
+      </section>
+    </div>
+    <div class="modal-actions">
+      <button id="streetNetworkManagerClose">Close</button>
+    </div>
+  </div>
+</div>
+<div id="selectByAttributesModal" class="modal">
+  <div class="modal-content select-attributes-modal-content">
+    <h3>Select By Attributes</h3>
+    <p>Build a SQL-style WHERE clause. The query prefix is fixed as <code>SELECT * FROM</code>.</p>
+
+    <div class="select-attributes-source-row">
+      <label for="selectAttributesSource">Source</label>
+      <select id="selectAttributesSource" aria-label="Select query source">
+        <option value="records">Record Attributes</option>
+        <option value="streets">Street Attributes</option>
+        <option value="layers">Map Layer Features</option>
+      </select>
+      <button id="selectAttributesRefreshFieldsBtn" class="mini-btn" type="button">Refresh Fields</button>
+    </div>
+
+    <div id="selectAttributesQueryPreview" class="select-attributes-query-preview">SELECT * FROM Record Attributes</div>
+
+    <div class="select-attributes-builder-grid">
+      <div>
+        <label for="selectAttributesField">Field</label>
+        <div class="select-attributes-inline">
+          <select id="selectAttributesField" aria-label="Select field"></select>
+          <button id="selectAttributesInsertFieldBtn" class="mini-btn" type="button">Insert Field</button>
+        </div>
+      </div>
+      <div>
+        <label for="selectAttributesValue">Value</label>
+        <div class="select-attributes-inline">
+          <input id="selectAttributesValue" type="text" placeholder="Enter value" />
+          <button id="selectAttributesInsertValueBtn" class="mini-btn" type="button">Insert Value</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="selectAttributesTokenBar" class="select-attributes-token-bar">
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="AND">AND</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="OR">OR</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="NOT">NOT</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="=">=</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="!=">!=</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token=">">&gt;</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token=">=">&gt;=</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="<">&lt;</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="<=">&lt;=</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="LIKE">LIKE</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="IN">IN</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="IS NULL">IS NULL</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="IS NOT NULL">IS NOT NULL</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="NULL">NULL</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token="(">(</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token=")">)</button>
+      <button class="mini-btn select-attributes-token-btn" type="button" data-token=",">,</button>
+    </div>
+
+    <label for="selectAttributesWhereClause">WHERE clause</label>
+    <textarea id="selectAttributesWhereClause" class="select-attributes-where" rows="5" placeholder="[Route] = 'R1' AND [Stops] > 5"></textarea>
+
+    <div class="select-attributes-inline select-attributes-query-tools">
+      <button id="selectAttributesUniqueValuesBtn" class="mini-btn" type="button">Get Unique Values</button>
+      <button id="selectAttributesFormatBtn" class="mini-btn" type="button">Format Query</button>
+      <button id="selectAttributesClearBtn" class="mini-btn" type="button">Clear</button>
+    </div>
+
+    <div class="select-attributes-saved">
+      <label for="selectAttributesQueryName">Save Query</label>
+      <div class="select-attributes-inline">
+        <input id="selectAttributesQueryName" type="text" placeholder="Query name" />
+        <button id="selectAttributesSaveBtn" class="mini-btn" type="button">Save</button>
+      </div>
+      <div class="select-attributes-inline">
+        <select id="selectAttributesSavedList" aria-label="Saved queries"></select>
+        <button id="selectAttributesLoadBtn" class="mini-btn" type="button">Load</button>
+        <button id="selectAttributesDeleteBtn" class="mini-btn" type="button">Delete</button>
+      </div>
+    </div>
+
+    <div id="selectAttributesStatus" class="select-attributes-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="selectAttributesRunBtn">Run Query</button>
+      <button id="selectAttributesCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+<div id="selectAttributesUniqueModal" class="modal">
+  <div class="modal-content select-attributes-unique-modal-content">
+    <h3>Unique Values</h3>
+    <p id="selectAttributesUniqueMeta">Select a value to insert into your query.</p>
+    <input id="selectAttributesUniqueSearch" type="text" placeholder="Filter values..." />
+    <div id="selectAttributesUniqueList" class="select-attributes-unique-list"></div>
+    <div class="modal-actions">
+      <button id="selectAttributesUniqueCloseBtn">Close</button>
     </div>
   </div>
 </div>

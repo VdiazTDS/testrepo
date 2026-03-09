@@ -674,6 +674,7 @@ const LOCAL_STREET_STREAM_YIELD_FEATURE_STEP = 300;
 const LOCAL_STREET_OFFLINE_CONVERTER_PACKAGE = "tds-streets-offline-converter-package.zip?v=20260306-8";
 const LOCAL_STREET_AUTO_SETUP_PACKAGE = "tds-streets-auto-setup-package.zip?v=20260306-6";
 const LOCAL_STREET_BACKEND_URL_KEY = "localStreetBackendUrl";
+const STREET_NETWORK_LAYER_VISIBLE_KEY = "streetNetworkLayerVisible";
 const LOCAL_STREET_BACKEND_URL_DEFAULT = "http://127.0.0.1:8787";
 const LOCAL_STREET_BACKEND_HEALTH_TTL_MS = 12000;
 const LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS = 25000;
@@ -782,6 +783,71 @@ function shouldUseLocalStreetSource() {
   return !!toggle?.checked && localStreetHasProvider();
 }
 
+function isStreetNetworkLayerVisibleEnabled() {
+  const toggle = document.getElementById("streetNetworkLayerToggle");
+  if (!toggle) return true;
+  return !!toggle.checked;
+}
+
+function setStreetNetworkManagerBadgeState(state = "off") {
+  const badge = document.getElementById("streetNetworkManagerBadge");
+  if (!badge) return;
+  const states = {
+    active: { text: "Active", className: "is-active" },
+    hidden: { text: "Hidden", className: "is-hidden" },
+    ready: { text: "Ready", className: "is-ready" },
+    off: { text: "No Source", className: "is-off" },
+    checking: { text: "Checking", className: "is-checking" }
+  };
+  const next = states[state] || states.off;
+  badge.classList.remove("is-active", "is-hidden", "is-ready", "is-off", "is-checking");
+  badge.classList.add(next.className);
+  badge.textContent = next.text;
+}
+
+function resolveStreetNetworkManagerBadgeState(message = "", hasProvider = localStreetHasProvider()) {
+  const messageText = String(message || "").toLowerCase();
+  if (localStreetBackendState.checking || messageText.includes("checking")) return "checking";
+  if (!hasProvider) return "off";
+  if (shouldUseLocalStreetSource()) {
+    return isStreetNetworkLayerVisibleEnabled() ? "active" : "hidden";
+  }
+  return "ready";
+}
+
+function updateStreetNetworkManagerHint(hasProvider = localStreetHasProvider()) {
+  const hintNode = document.getElementById("streetNetworkManagerHint");
+  if (!hintNode) return;
+
+  const usingLocal = shouldUseLocalStreetSource();
+  const layerVisible = isStreetNetworkLayerVisibleEnabled();
+
+  if (!hasProvider) {
+    hintNode.textContent = "Start with Data Source: load a ZIP/GeoJSON file or open Street Setup Wizard.";
+    return;
+  }
+
+  if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
+    if (usingLocal && layerVisible) {
+      hintNode.textContent = "Backend source is active. Draw a polygon to load streets for this area.";
+    } else if (usingLocal) {
+      hintNode.textContent = "Street source is on, but map layer is hidden. Turn on Street Network Layer in the sidebar.";
+    } else {
+      hintNode.textContent = "Backend is ready. Turn on Street Segments, then draw a polygon.";
+    }
+    return;
+  }
+
+  const loadedCount = localStreetSourceState.elementsById.size.toLocaleString();
+  if (usingLocal && layerVisible) {
+    hintNode.textContent = `Local source is active (${loadedCount} indexed). Draw a polygon to refresh streets in view.`;
+  } else if (usingLocal) {
+    hintNode.textContent = "Street source is on, but map layer is hidden. Turn on Street Network Layer in the sidebar.";
+  } else {
+    hintNode.textContent = `Local source is ready (${loadedCount} indexed). Turn on Street Segments, then draw a polygon.`;
+  }
+}
+
 function updateLocalStreetSourceStatus(message = "") {
   const node = document.getElementById("localStreetsStatus");
   const useLocalToggle = document.getElementById("useLocalStreetSource");
@@ -791,6 +857,8 @@ function updateLocalStreetSourceStatus(message = "") {
     useLocalToggle.disabled = !hasProvider;
     if (!hasProvider) useLocalToggle.checked = false;
   }
+  setStreetNetworkManagerBadgeState(resolveStreetNetworkManagerBadgeState(message, hasProvider));
+  updateStreetNetworkManagerHint(hasProvider);
   if (!node) return;
   if (message) {
     node.textContent = message;
@@ -803,8 +871,10 @@ function updateLocalStreetSourceStatus(message = "") {
 
   if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
     const backendName = localStreetBackendState.sourceName ? ` (${localStreetBackendState.sourceName})` : "";
-    if (shouldUseLocalStreetSource()) {
+    if (shouldUseLocalStreetSource() && isStreetNetworkLayerVisibleEnabled()) {
       node.textContent = `Street layer: On (Local backend${backendName})`;
+    } else if (shouldUseLocalStreetSource()) {
+      node.textContent = `Street layer: Hidden (Local backend${backendName})`;
     } else {
       node.textContent = `Street layer: Off (Local backend ready${backendName}). Turn on Street Segments, then draw a polygon.`;
     }
@@ -812,12 +882,17 @@ function updateLocalStreetSourceStatus(message = "") {
   }
 
   const usingLocal = shouldUseLocalStreetSource();
+  const layerVisible = isStreetNetworkLayerVisibleEnabled();
   const count = localStreetSourceState.elementsById.size.toLocaleString();
   const chunkMode = !!localStreetSourceState.chunkMode;
-  if (usingLocal) {
+  if (usingLocal && layerVisible) {
     node.textContent = chunkMode
       ? `Street layer: On (Chunk mode, ${count} segments indexed for current region from ${localStreetSourceState.sourceName})`
       : `Street layer: On (Local file: ${localStreetSourceState.sourceName}, ${count} segments indexed)`;
+  } else if (usingLocal) {
+    node.textContent = chunkMode
+      ? `Street layer: Hidden (Chunk mode, ${count} segments indexed for current region from ${localStreetSourceState.sourceName})`
+      : `Street layer: Hidden (Local file: ${localStreetSourceState.sourceName}, ${count} segments indexed)`;
   } else {
     node.textContent = chunkMode
       ? `Street layer: Off (Chunk mode ready: ${localStreetSourceState.sourceName}, ${count} region segments indexed)`
@@ -2451,7 +2526,22 @@ function closeStreetSetupWizardModal() {
   if (modal) modal.style.display = "none";
 }
 
+function openStreetNetworkManagerModal() {
+  const modal = document.getElementById("streetNetworkManagerModal");
+  if (!modal) return;
+  updateLocalStreetSourceStatus();
+  modal.style.display = "flex";
+}
+
+function closeStreetNetworkManagerModal() {
+  const modal = document.getElementById("streetNetworkManagerModal");
+  if (modal) modal.style.display = "none";
+}
+
 function initLocalStreetSourceControls() {
+  const streetNetworkManagerBtn = document.getElementById("streetNetworkManagerBtn");
+  const streetNetworkManagerModal = document.getElementById("streetNetworkManagerModal");
+  const streetNetworkManagerClose = document.getElementById("streetNetworkManagerClose");
   const openStreetSetupWizardBtn = document.getElementById("openStreetSetupWizardBtn");
   const loadLocalStreetFileBtn = document.getElementById("loadLocalStreetFileBtn");
   const downloadTexasZipBtn = document.getElementById("downloadTexasZipBtn");
@@ -2537,6 +2627,19 @@ function initLocalStreetSourceControls() {
     useLocalToggle.checked = false;
     useLocalToggle.disabled = !localStreetHasProvider();
   }
+
+  streetNetworkManagerBtn?.addEventListener("click", () => {
+    openStreetNetworkManagerModal();
+  });
+
+  streetNetworkManagerClose?.addEventListener("click", () => {
+    closeStreetNetworkManagerModal();
+  });
+
+  streetNetworkManagerModal?.addEventListener("click", e => {
+    if (e.target !== streetNetworkManagerModal) return;
+    closeStreetNetworkManagerModal();
+  });
 
   openStreetSetupWizardBtn?.addEventListener("click", () => {
     openStreetSetupWizardModal();
@@ -2872,8 +2975,10 @@ async function loadStreetAttributesFromLocalDataset(boundsOverride = null, polyg
 }
 
 function syncStreetNetworkOverlay() {
-  const toggle = document.getElementById("useLocalStreetSource");
-  const enabled = !!toggle && !!toggle.checked;
+  const sourceToggle = document.getElementById("useLocalStreetSource");
+  const sourceEnabled = !!sourceToggle && !!sourceToggle.checked;
+  const layerVisible = isStreetNetworkLayerVisibleEnabled();
+  const enabled = sourceEnabled && layerVisible;
   if (enabled) {
     if (!map.hasLayer(streetAttributeLayerGroup)) {
       streetAttributeLayerGroup.addTo(map);
@@ -2882,6 +2987,8 @@ function syncStreetNetworkOverlay() {
     }
   } else {
     map.removeLayer(streetAttributeLayerGroup);
+  }
+  if (!sourceEnabled) {
     streetLoadPolygonLayerGroup.clearLayers();
     streetPolygonLoadPending = false;
     pendingStreetReload = false;
@@ -3190,8 +3297,8 @@ function beginStreetPolygonDraw() {
 }
 
 function initStreetNetworkToggle() {
-  const toggle = document.getElementById("useLocalStreetSource");
-  if (!toggle) return;
+  const sourceToggle = document.getElementById("useLocalStreetSource");
+  const layerToggle = document.getElementById("streetNetworkLayerToggle");
   const drawBtn = document.getElementById("streetSegmentsPromptDraw");
   const cancelBtn = document.getElementById("streetSegmentsPromptCancel");
   const promptModal = document.getElementById("streetSegmentsPromptModal");
@@ -3199,21 +3306,38 @@ function initStreetNetworkToggle() {
   const choosePolygonBtn = document.getElementById("chooseStreetPolygonBtn");
   const polygonLibraryModal = document.getElementById("streetPolygonLibraryModal");
   const polygonLibraryCloseBtn = document.getElementById("streetPolygonLibraryClose");
-  toggle.checked = false;
+
+  if (layerToggle) {
+    const storedLayerPref = storageGet(STREET_NETWORK_LAYER_VISIBLE_KEY);
+    layerToggle.checked = storedLayerPref ? storedLayerPref === "on" : true;
+    layerToggle.addEventListener("change", () => {
+      storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, layerToggle.checked ? "on" : "off");
+      syncStreetNetworkOverlay();
+      updateLocalStreetSourceStatus();
+    });
+  }
+
+  if (!sourceToggle) {
+    syncStreetNetworkOverlay();
+    updateLocalStreetSourceStatus();
+    return;
+  }
+
+  sourceToggle.checked = false;
   storageSet("streetSegmentsVisible", "off");
-  toggle.addEventListener("change", () => {
-    if (toggle.checked && !localStreetHasProvider()) {
-      toggle.checked = false;
+  sourceToggle.addEventListener("change", () => {
+    if (sourceToggle.checked && !localStreetHasProvider()) {
+      sourceToggle.checked = false;
       storageSet("streetSegmentsVisible", "off");
       updateLocalStreetSourceStatus("Street source is not ready. Open Street Setup Wizard and follow steps 1-3.");
       openStreetSetupWizardModal();
       return;
     }
 
-    storageSet("streetSegmentsVisible", toggle.checked ? "on" : "off");
+    storageSet("streetSegmentsVisible", sourceToggle.checked ? "on" : "off");
     syncStreetNetworkOverlay();
     updateLocalStreetSourceStatus();
-    if (toggle.checked) {
+    if (sourceToggle.checked) {
       if (!streetAttributeById.size) {
         streetLoadPolygonLayerGroup.clearLayers();
         streetPolygonLoadPending = false;
@@ -3244,7 +3368,7 @@ function initStreetNetworkToggle() {
   });
 
   drawBtn?.addEventListener("click", () => {
-    if (!toggle.checked) return;
+    if (!sourceToggle.checked) return;
     closeStreetSegmentsPromptModal();
     streetLoadPolygonLayerGroup.clearLayers();
     beginStreetPolygonDraw();
@@ -3253,7 +3377,7 @@ function initStreetNetworkToggle() {
   cancelBtn?.addEventListener("click", () => {
     closeStreetSegmentsPromptModal();
     closeStreetPolygonLibraryModal();
-    toggle.checked = false;
+    sourceToggle.checked = false;
     storageSet("streetSegmentsVisible", "off");
     syncStreetNetworkOverlay();
     updateLocalStreetSourceStatus();
@@ -3263,12 +3387,13 @@ function initStreetNetworkToggle() {
     if (e.target !== promptModal) return;
     closeStreetSegmentsPromptModal();
     closeStreetPolygonLibraryModal();
-    toggle.checked = false;
+    sourceToggle.checked = false;
     storageSet("streetSegmentsVisible", "off");
     syncStreetNetworkOverlay();
     updateLocalStreetSourceStatus();
   });
   syncStreetNetworkOverlay();
+  updateLocalStreetSourceStatus();
 }
 
 let attributeTableMode = "records";
@@ -5388,6 +5513,867 @@ window.zoomToAttributeRowsOnMap = function(rowIds) {
   return true;
 };
 
+const SELECT_ATTRIBUTES_SAVED_QUERIES_KEY = "selectAttributesSavedQueries";
+const SELECT_ATTRIBUTES_MAX_UNIQUE_VALUES = 2000;
+
+function getSelectAttributesSourceLabel(sourceKey) {
+  const key = String(sourceKey || "").trim().toLowerCase();
+  if (key === "streets") return "Street Attributes";
+  if (key === "layers") return "Map Layer Features";
+  return "Record Attributes";
+}
+
+function getSelectAttributesDataset(sourceKey) {
+  const key = String(sourceKey || "records").trim().toLowerCase();
+
+  if (key === "streets") {
+    const rows = (Array.isArray(streetAttributesRows) && streetAttributesRows.length)
+      ? streetAttributesRows
+      : [...streetAttributeById.values()].map(v => v?.row).filter(Boolean);
+    return rows
+      .map(row => {
+        const streetId = Number(row?.id);
+        return { row, streetId };
+      })
+      .filter(item => Number.isFinite(item.streetId));
+  }
+
+  if (key === "layers") {
+    const out = [];
+    Object.entries(routeDayGroups).forEach(([routeDayKey, group]) => {
+      const layers = Array.isArray(group?.layers) ? group.layers : [];
+      layers.forEach(marker => {
+        const latlng = getLayerLatLng(marker);
+        const rowId = Number(marker?._rowId);
+        out.push({
+          row: {
+            row_id: Number.isFinite(rowId) ? rowId : "",
+            route_day: routeDayKey || "",
+            symbol_label: marker?._base?.symbol?.label || marker?._base?.symbol?.name || "",
+            symbol_color: marker?._base?.symbol?.color || "",
+            latitude: Number.isFinite(latlng?.lat) ? Number(latlng.lat.toFixed(7)) : "",
+            longitude: Number.isFinite(latlng?.lng) ? Number(latlng.lng.toFixed(7)) : ""
+          },
+          rowId: Number.isFinite(rowId) ? rowId : null
+        });
+      });
+    });
+    return out;
+  }
+
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  return rows.map((row, idx) => {
+    const mappedRowId = getAttributeRowId(row);
+    const rowId = Number.isFinite(mappedRowId) ? mappedRowId : idx;
+    return { row, rowId };
+  });
+}
+
+function getSelectAttributesFieldNames(sourceKey, dataset = null) {
+  const key = String(sourceKey || "records").trim().toLowerCase();
+  if (key === "records") {
+    const fromHeaders = Array.isArray(window._attributeHeaders) ? window._attributeHeaders.filter(Boolean) : [];
+    if (fromHeaders.length) return fromHeaders;
+  }
+  const rows = (Array.isArray(dataset) ? dataset : getSelectAttributesDataset(sourceKey)).map(entry => entry?.row || {});
+  return getAttributeHeaders(rows);
+}
+
+function getSelectAttributesSavedQueries() {
+  const raw = storageGet(SELECT_ATTRIBUTES_SAVED_QUERIES_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(item => ({
+        id: String(item?.id || ""),
+        name: String(item?.name || "").trim(),
+        source: String(item?.source || "records").trim().toLowerCase(),
+        where: String(item?.where || "").trim(),
+        updatedAt: Number(item?.updatedAt || 0)
+      }))
+      .filter(item => item.id && item.name && item.source);
+  } catch {
+    return [];
+  }
+}
+
+function setSelectAttributesSavedQueries(queries) {
+  const next = Array.isArray(queries) ? queries : [];
+  storageSet(SELECT_ATTRIBUTES_SAVED_QUERIES_KEY, JSON.stringify(next.slice(0, 250)));
+}
+
+function normalizeSelectAttributesWhereText(input) {
+  let text = String(input || "");
+  text = text.replace(/\r?\n/g, " ");
+  text = text.replace(/\s+/g, " ").trim();
+  text = text.replace(/\(\s+/g, "(").replace(/\s+\)/g, ")");
+  text = text.replace(/\s+,/g, ",").replace(/,\s*/g, ", ");
+  return text;
+}
+
+function escapeSelectAttributesHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function quoteSelectAttributesSqlString(value) {
+  return `'${String(value ?? "").replace(/'/g, "''")}'`;
+}
+
+function formatSelectAttributesSqlLiteral(value) {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  const text = String(value);
+  if (!text.length) return "''";
+  return quoteSelectAttributesSqlString(text);
+}
+
+function normalizeSelectAttributesInputLiteral(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const upper = text.toUpperCase();
+  if (upper === "NULL" || upper === "TRUE" || upper === "FALSE") return upper;
+  if (/^-?\d+(\.\d+)?$/.test(text)) return text;
+  if (text.startsWith("'") && text.endsWith("'") && text.length >= 2) return text;
+  return quoteSelectAttributesSqlString(text);
+}
+
+function detectLastSelectAttributesField(whereClause) {
+  const text = String(whereClause || "");
+  const bracketMatches = [...text.matchAll(/\[([^\]]+)\]/g)];
+  if (bracketMatches.length) {
+    const value = String(bracketMatches[bracketMatches.length - 1]?.[1] || "").trim();
+    return value || "";
+  }
+  const bareMatches = [...text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\b(?=\s*(=|!=|<>|>=|<=|>|<|LIKE|IN|IS))/gi)];
+  if (!bareMatches.length) return "";
+  return String(bareMatches[bareMatches.length - 1]?.[1] || "").trim();
+}
+
+function getSelectAttributesRowFieldValue(row, fieldName) {
+  if (!row || typeof row !== "object") return null;
+  const name = String(fieldName || "").trim();
+  if (!name) return null;
+  if (Object.prototype.hasOwnProperty.call(row, name)) return row[name];
+
+  const target = name.toLowerCase();
+  const key = Object.keys(row).find(k => String(k).toLowerCase() === target);
+  if (!key) return null;
+  return row[key];
+}
+
+function tokenizeSelectAttributesWhereClause(whereText) {
+  const text = String(whereText || "");
+  const tokens = [];
+  let i = 0;
+
+  const isDigit = ch => /[0-9]/.test(ch);
+  const isWord = ch => /[A-Za-z0-9_.]/.test(ch);
+
+  while (i < text.length) {
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+
+    if (ch === "(" || ch === ")" || ch === ",") {
+      tokens.push({ type: "punct", value: ch });
+      i += 1;
+      continue;
+    }
+
+    const two = text.slice(i, i + 2);
+    if (two === ">=" || two === "<=" || two === "<>" || two === "!=") {
+      tokens.push({ type: "op", value: two });
+      i += 2;
+      continue;
+    }
+    if (ch === "=" || ch === ">" || ch === "<") {
+      tokens.push({ type: "op", value: ch });
+      i += 1;
+      continue;
+    }
+
+    if (ch === "'") {
+      i += 1;
+      let value = "";
+      let closed = false;
+      while (i < text.length) {
+        if (text[i] === "'" && text[i + 1] === "'") {
+          value += "'";
+          i += 2;
+          continue;
+        }
+        if (text[i] === "'") {
+          closed = true;
+          i += 1;
+          break;
+        }
+        value += text[i];
+        i += 1;
+      }
+      if (!closed) throw new Error("Unclosed string literal in WHERE clause.");
+      tokens.push({ type: "string", value });
+      continue;
+    }
+
+    if (ch === "[") {
+      const end = text.indexOf("]", i + 1);
+      if (end === -1) throw new Error("Unclosed [field] identifier in WHERE clause.");
+      const value = text.slice(i + 1, end).trim();
+      if (!value) throw new Error("Empty [field] identifier is not allowed.");
+      tokens.push({ type: "identifier", value });
+      i = end + 1;
+      continue;
+    }
+
+    const isSignedNumber = (ch === "-" || ch === "+") && isDigit(text[i + 1]);
+    if (isDigit(ch) || isSignedNumber) {
+      const start = i;
+      i += 1;
+      while (i < text.length && /[0-9.]/.test(text[i])) i += 1;
+      const raw = text.slice(start, i);
+      if (/^[+-]?\d+(\.\d+)?$/.test(raw)) {
+        tokens.push({ type: "number", value: Number(raw) });
+      } else {
+        throw new Error(`Invalid numeric literal "${raw}" in WHERE clause.`);
+      }
+      continue;
+    }
+
+    if (isWord(ch)) {
+      const start = i;
+      i += 1;
+      while (i < text.length && isWord(text[i])) i += 1;
+      const raw = text.slice(start, i);
+      const upper = raw.toUpperCase();
+      if (["AND", "OR", "NOT", "IS", "NULL", "IN", "LIKE", "TRUE", "FALSE"].includes(upper)) {
+        tokens.push({ type: "keyword", value: upper });
+      } else {
+        tokens.push({ type: "identifier", value: raw });
+      }
+      continue;
+    }
+
+    throw new Error(`Unsupported character "${ch}" in WHERE clause.`);
+  }
+
+  return tokens;
+}
+
+function parseSelectAttributesWhereClause(whereText) {
+  const tokens = tokenizeSelectAttributesWhereClause(whereText);
+  if (!tokens.length) return { type: "all" };
+  let pos = 0;
+
+  const peek = () => tokens[pos] || null;
+  const consume = () => tokens[pos++] || null;
+  const match = (type, value = null) => {
+    const token = peek();
+    if (!token) return null;
+    if (token.type !== type) return null;
+    if (value !== null && token.value !== value) return null;
+    pos += 1;
+    return token;
+  };
+  const expect = (type, value = null, message = "Invalid query syntax.") => {
+    const token = match(type, value);
+    if (token) return token;
+    throw new Error(message);
+  };
+
+  const parseField = () => {
+    const token = expect("identifier", null, "Expected a field name.");
+    return String(token.value || "").trim();
+  };
+
+  const parseValue = () => {
+    const token = consume();
+    if (!token) throw new Error("Expected a value.");
+    if (token.type === "number" || token.type === "string") return token.value;
+    if (token.type === "keyword") {
+      if (token.value === "NULL") return null;
+      if (token.value === "TRUE") return true;
+      if (token.value === "FALSE") return false;
+      throw new Error(`Expected a value, got keyword "${token.value}".`);
+    }
+    if (token.type === "identifier") return token.value;
+    throw new Error("Expected a value.");
+  };
+
+  const parsePredicate = () => {
+    const field = parseField();
+
+    if (match("keyword", "IS")) {
+      if (match("keyword", "NOT")) {
+        expect("keyword", "NULL", 'Expected "NULL" after "IS NOT".');
+        return { type: "is_not_null", field };
+      }
+      expect("keyword", "NULL", 'Expected "NULL" after "IS".');
+      return { type: "is_null", field };
+    }
+
+    if (match("keyword", "IN")) {
+      expect("punct", "(", 'Expected "(" after "IN".');
+      const values = [];
+      if (!match("punct", ")")) {
+        values.push(parseValue());
+        while (match("punct", ",")) values.push(parseValue());
+        expect("punct", ")", 'Expected ")" to close "IN" list.');
+      }
+      return { type: "in", field, values };
+    }
+
+    if (match("keyword", "LIKE")) {
+      const value = parseValue();
+      return { type: "like", field, value };
+    }
+
+    const opToken = expect("op", null, "Expected a comparison operator.");
+    if (!["=", "!=", "<>", ">", ">=", "<", "<="].includes(opToken.value)) {
+      throw new Error(`Unsupported operator "${opToken.value}".`);
+    }
+    const value = parseValue();
+    return { type: "compare", field, op: opToken.value, value };
+  };
+
+  const parsePrimary = () => {
+    if (match("punct", "(")) {
+      const expr = parseOr();
+      expect("punct", ")", 'Expected ")" after grouped condition.');
+      return expr;
+    }
+    return parsePredicate();
+  };
+
+  const parseNot = () => {
+    if (match("keyword", "NOT")) return { type: "not", value: parseNot() };
+    return parsePrimary();
+  };
+
+  const parseAnd = () => {
+    let node = parseNot();
+    while (match("keyword", "AND")) {
+      node = { type: "and", left: node, right: parseNot() };
+    }
+    return node;
+  };
+
+  const parseOr = () => {
+    let node = parseAnd();
+    while (match("keyword", "OR")) {
+      node = { type: "or", left: node, right: parseAnd() };
+    }
+    return node;
+  };
+
+  const ast = parseOr();
+  if (pos < tokens.length) {
+    const token = tokens[pos];
+    throw new Error(`Unexpected token "${token?.value ?? ""}" near the end of WHERE clause.`);
+  }
+  return ast;
+}
+
+function escapeSelectAttributesRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compareSelectAttributesValues(left, right, op) {
+  const leftIsNull = left === null || left === undefined || left === "";
+  const rightIsNull = right === null || right === undefined || right === "";
+  if (op === "=" || op === "==" || op === "!=" || op === "<>") {
+    if (leftIsNull || rightIsNull) {
+      const sameNull = leftIsNull && rightIsNull;
+      return (op === "=" || op === "==") ? sameNull : !sameNull;
+    }
+    const leftNum = Number(left);
+    const rightNum = Number(right);
+    if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) {
+      const eq = leftNum === rightNum;
+      return (op === "=" || op === "==") ? eq : !eq;
+    }
+    const leftText = String(left).toLowerCase();
+    const rightText = String(right).toLowerCase();
+    const eq = leftText === rightText;
+    return (op === "=" || op === "==") ? eq : !eq;
+  }
+
+  const leftNum = Number(left);
+  const rightNum = Number(right);
+  if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) {
+    if (op === ">") return leftNum > rightNum;
+    if (op === ">=") return leftNum >= rightNum;
+    if (op === "<") return leftNum < rightNum;
+    if (op === "<=") return leftNum <= rightNum;
+    return false;
+  }
+
+  const cmp = String(left ?? "").localeCompare(String(right ?? ""), undefined, { numeric: true, sensitivity: "base" });
+  if (op === ">") return cmp > 0;
+  if (op === ">=") return cmp >= 0;
+  if (op === "<") return cmp < 0;
+  if (op === "<=") return cmp <= 0;
+  return false;
+}
+
+function evaluateSelectAttributesAst(node, row) {
+  if (!node) return true;
+  if (node.type === "all") return true;
+  if (node.type === "or") return evaluateSelectAttributesAst(node.left, row) || evaluateSelectAttributesAst(node.right, row);
+  if (node.type === "and") return evaluateSelectAttributesAst(node.left, row) && evaluateSelectAttributesAst(node.right, row);
+  if (node.type === "not") return !evaluateSelectAttributesAst(node.value, row);
+
+  if (node.type === "is_null") {
+    const value = getSelectAttributesRowFieldValue(row, node.field);
+    return value === null || value === undefined || value === "";
+  }
+  if (node.type === "is_not_null") {
+    const value = getSelectAttributesRowFieldValue(row, node.field);
+    return !(value === null || value === undefined || value === "");
+  }
+
+  if (node.type === "compare") {
+    const left = getSelectAttributesRowFieldValue(row, node.field);
+    return compareSelectAttributesValues(left, node.value, node.op);
+  }
+
+  if (node.type === "in") {
+    const left = getSelectAttributesRowFieldValue(row, node.field);
+    return node.values.some(value => compareSelectAttributesValues(left, value, "="));
+  }
+
+  if (node.type === "like") {
+    const leftText = String(getSelectAttributesRowFieldValue(row, node.field) ?? "");
+    const pattern = String(node.value ?? "");
+    const regex = new RegExp(
+      `^${escapeSelectAttributesRegex(pattern).replace(/%/g, ".*").replace(/_/g, ".")}$`,
+      "i"
+    );
+    return regex.test(leftText);
+  }
+
+  return false;
+}
+
+function buildSelectAttributesPredicate(whereClause) {
+  const normalized = normalizeSelectAttributesWhereText(whereClause);
+  if (!normalized) return () => true;
+  const ast = parseSelectAttributesWhereClause(normalized);
+  return row => evaluateSelectAttributesAst(ast, row || {});
+}
+
+function getSelectAttributesUniqueValues(sourceKey, fieldName) {
+  const dataset = getSelectAttributesDataset(sourceKey);
+  const uniqueMap = new Map();
+  const field = String(fieldName || "").trim();
+  if (!field) return [];
+
+  dataset.forEach(entry => {
+    const rawValue = getSelectAttributesRowFieldValue(entry?.row || {}, field);
+    const type = rawValue === null || rawValue === undefined ? "null" : typeof rawValue;
+    const key = `${type}::${String(rawValue)}`;
+    if (!uniqueMap.has(key)) uniqueMap.set(key, rawValue);
+  });
+
+  const values = [...uniqueMap.values()];
+  values.sort((a, b) => {
+    const an = Number(a);
+    const bn = Number(b);
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+    if (a === null || a === undefined) return -1;
+    if (b === null || b === undefined) return 1;
+    return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+  });
+  return values.slice(0, SELECT_ATTRIBUTES_MAX_UNIQUE_VALUES);
+}
+
+function initSelectByAttributesControls() {
+  const modal = document.getElementById("selectByAttributesModal");
+  const openBtn = document.getElementById("selectByAttributesBtn");
+  const closeBtn = document.getElementById("selectAttributesCloseBtn");
+  const runBtn = document.getElementById("selectAttributesRunBtn");
+  const sourceSelect = document.getElementById("selectAttributesSource");
+  const fieldSelect = document.getElementById("selectAttributesField");
+  const valueInput = document.getElementById("selectAttributesValue");
+  const whereArea = document.getElementById("selectAttributesWhereClause");
+  const previewNode = document.getElementById("selectAttributesQueryPreview");
+  const statusNode = document.getElementById("selectAttributesStatus");
+  const insertFieldBtn = document.getElementById("selectAttributesInsertFieldBtn");
+  const insertValueBtn = document.getElementById("selectAttributesInsertValueBtn");
+  const refreshFieldsBtn = document.getElementById("selectAttributesRefreshFieldsBtn");
+  const uniqueValuesBtn = document.getElementById("selectAttributesUniqueValuesBtn");
+  const formatBtn = document.getElementById("selectAttributesFormatBtn");
+  const clearBtn = document.getElementById("selectAttributesClearBtn");
+  const saveBtn = document.getElementById("selectAttributesSaveBtn");
+  const loadBtn = document.getElementById("selectAttributesLoadBtn");
+  const deleteBtn = document.getElementById("selectAttributesDeleteBtn");
+  const queryNameInput = document.getElementById("selectAttributesQueryName");
+  const savedList = document.getElementById("selectAttributesSavedList");
+  const tokenBar = document.getElementById("selectAttributesTokenBar");
+
+  const uniqueModal = document.getElementById("selectAttributesUniqueModal");
+  const uniqueCloseBtn = document.getElementById("selectAttributesUniqueCloseBtn");
+  const uniqueMeta = document.getElementById("selectAttributesUniqueMeta");
+  const uniqueSearch = document.getElementById("selectAttributesUniqueSearch");
+  const uniqueList = document.getElementById("selectAttributesUniqueList");
+
+  if (!modal || !openBtn || !closeBtn || !runBtn || !sourceSelect || !fieldSelect || !whereArea || !previewNode || !statusNode) {
+    return;
+  }
+
+  const state = {
+    savedQueries: getSelectAttributesSavedQueries(),
+    uniqueValues: [],
+    uniqueField: "",
+    uniqueSource: "records"
+  };
+
+  const setStatus = (message, type = "") => {
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (type === "error") statusNode.classList.add("error");
+    if (type === "success") statusNode.classList.add("success");
+  };
+
+  const getWhereClause = () => normalizeSelectAttributesWhereText(whereArea.value || "");
+
+  const updatePreview = () => {
+    const sourceLabel = getSelectAttributesSourceLabel(sourceSelect.value);
+    const whereClause = getWhereClause();
+    previewNode.textContent = whereClause
+      ? `SELECT * FROM ${sourceLabel} WHERE ${whereClause}`
+      : `SELECT * FROM ${sourceLabel}`;
+  };
+
+  const renderSavedList = (selectId = "") => {
+    if (!savedList) return;
+    savedList.innerHTML = "";
+    if (!state.savedQueries.length) {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "No saved queries";
+      savedList.appendChild(empty);
+      return;
+    }
+    const sorted = [...state.savedQueries].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+    sorted.forEach(query => {
+      const option = document.createElement("option");
+      option.value = query.id;
+      option.textContent = `${query.name} (${getSelectAttributesSourceLabel(query.source)})`;
+      savedList.appendChild(option);
+    });
+    if (selectId) savedList.value = selectId;
+  };
+
+  const refreshFields = (preferredField = "") => {
+    const dataset = getSelectAttributesDataset(sourceSelect.value);
+    const fields = getSelectAttributesFieldNames(sourceSelect.value, dataset);
+    fieldSelect.innerHTML = "";
+    fields.forEach(field => {
+      const option = document.createElement("option");
+      option.value = field;
+      option.textContent = field;
+      fieldSelect.appendChild(option);
+    });
+    if (preferredField && fields.includes(preferredField)) {
+      fieldSelect.value = preferredField;
+    }
+    updatePreview();
+  };
+
+  const setWhereClause = next => {
+    whereArea.value = normalizeSelectAttributesWhereText(next);
+    updatePreview();
+  };
+
+  const appendToken = token => {
+    const value = String(token || "").trim();
+    if (!value) return;
+    const current = getWhereClause();
+    setWhereClause(current ? `${current} ${value}` : value);
+    whereArea.focus();
+  };
+
+  const renderUniqueValuesList = () => {
+    if (!uniqueList) return;
+    const filter = String(uniqueSearch?.value || "").trim().toLowerCase();
+    const filtered = state.uniqueValues.filter(value => {
+      if (!filter) return true;
+      if (value === null || value === undefined) return "null".includes(filter);
+      return String(value).toLowerCase().includes(filter);
+    });
+
+    uniqueList.innerHTML = "";
+    if (!filtered.length) {
+      uniqueList.innerHTML = '<div class="select-attributes-unique-empty">No values match the current filter.</div>';
+      return;
+    }
+
+    filtered.forEach(value => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "select-attributes-unique-item";
+      const label = value === null || value === undefined
+        ? "NULL"
+        : String(value).length
+          ? String(value)
+          : "(empty string)";
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        appendToken(formatSelectAttributesSqlLiteral(value));
+      });
+      uniqueList.appendChild(button);
+    });
+  };
+
+  const openUniqueModalForField = () => {
+    if (!uniqueModal || !uniqueMeta) return;
+    const whereField = detectLastSelectAttributesField(getWhereClause());
+    const field = whereField || String(fieldSelect.value || "").trim();
+    if (!field) {
+      setStatus("Pick or insert a field before fetching unique values.", "error");
+      return;
+    }
+    const values = getSelectAttributesUniqueValues(sourceSelect.value, field);
+    state.uniqueValues = values;
+    state.uniqueField = field;
+    state.uniqueSource = sourceSelect.value;
+    uniqueMeta.textContent = `${values.length.toLocaleString()} unique values for [${field}] from ${getSelectAttributesSourceLabel(sourceSelect.value)}.`;
+    if (uniqueSearch) uniqueSearch.value = "";
+    renderUniqueValuesList();
+    uniqueModal.style.display = "flex";
+  };
+
+  const closeUniqueModal = () => {
+    if (uniqueModal) uniqueModal.style.display = "none";
+  };
+
+  const runQuery = () => {
+    const source = String(sourceSelect.value || "records");
+    const whereClause = getWhereClause();
+    const dataset = getSelectAttributesDataset(source);
+    if (!dataset.length) {
+      setStatus(`No rows available in ${getSelectAttributesSourceLabel(source)}.`, "error");
+      return;
+    }
+
+    let predicate = () => true;
+    try {
+      predicate = buildSelectAttributesPredicate(whereClause);
+    } catch (err) {
+      setStatus(`Query error: ${String(err?.message || err)}`, "error");
+      return;
+    }
+
+    const matched = dataset.filter(entry => {
+      try {
+        return predicate(entry?.row || {});
+      } catch {
+        return false;
+      }
+    });
+
+    attributeState.selectedRowIds.clear();
+    applyAttributeSelectionStyles();
+    streetAttributeSelectedIds.clear();
+    applyStreetSelectionStyles();
+    syncSelectedStopsHeaderCount(0);
+
+    if (source === "streets") {
+      const ids = matched
+        .map(item => Number(item?.streetId))
+        .filter(id => Number.isFinite(id));
+      ids.forEach(id => streetAttributeSelectedIds.add(id));
+      applyStreetSelectionStyles();
+      syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
+      setAttributeTableMode("streets");
+      openAttributePanel();
+      renderAttributeTable();
+      setStatus(`Selected ${ids.length.toLocaleString()} street segments.`, "success");
+      return;
+    }
+
+    const rowIds = matched
+      .map(item => Number(item?.rowId))
+      .filter(id => Number.isFinite(id));
+    setAttributeTableMode("records");
+    window.setAttributeSelectedRowIds(rowIds);
+    openAttributePanel();
+    renderAttributeTable();
+    setStatus(`Selected ${rowIds.length.toLocaleString()} records from ${getSelectAttributesSourceLabel(source)}.`, "success");
+  };
+
+  const saveQuery = () => {
+    const source = String(sourceSelect.value || "records");
+    const whereClause = getWhereClause();
+    if (!whereClause) {
+      setStatus("Enter a WHERE clause before saving a query.", "error");
+      return;
+    }
+    const typedName = String(queryNameInput?.value || "").trim();
+    const autoName = `Query ${new Date().toLocaleString()}`;
+    const name = typedName || autoName;
+    const now = Date.now();
+    const existingIndex = state.savedQueries.findIndex(query => query.name.toLowerCase() === name.toLowerCase());
+
+    if (existingIndex >= 0) {
+      const current = state.savedQueries[existingIndex];
+      state.savedQueries[existingIndex] = {
+        ...current,
+        source,
+        where: whereClause,
+        updatedAt: now
+      };
+      setSelectAttributesSavedQueries(state.savedQueries);
+      renderSavedList(current.id);
+      setStatus(`Updated saved query "${name}".`, "success");
+      return;
+    }
+
+    const id = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+      ? crypto.randomUUID()
+      : `q_${now}_${Math.random().toString(36).slice(2, 8)}`;
+    state.savedQueries.push({
+      id,
+      name,
+      source,
+      where: whereClause,
+      updatedAt: now
+    });
+    setSelectAttributesSavedQueries(state.savedQueries);
+    renderSavedList(id);
+    if (queryNameInput && !typedName) queryNameInput.value = name;
+    setStatus(`Saved query "${name}".`, "success");
+  };
+
+  const loadSavedQuery = () => {
+    const selectedId = String(savedList?.value || "").trim();
+    if (!selectedId) {
+      setStatus("Choose a saved query to load.", "error");
+      return;
+    }
+    const query = state.savedQueries.find(item => item.id === selectedId);
+    if (!query) {
+      setStatus("Saved query not found.", "error");
+      return;
+    }
+    if ([...sourceSelect.options].some(option => option.value === query.source)) {
+      sourceSelect.value = query.source;
+    } else {
+      sourceSelect.value = "records";
+    }
+    refreshFields(detectLastSelectAttributesField(query.where));
+    setWhereClause(query.where);
+    if (queryNameInput) queryNameInput.value = query.name;
+    setStatus(`Loaded query "${query.name}".`, "success");
+  };
+
+  const deleteSavedQuery = () => {
+    const selectedId = String(savedList?.value || "").trim();
+    if (!selectedId) {
+      setStatus("Choose a saved query to delete.", "error");
+      return;
+    }
+    const query = state.savedQueries.find(item => item.id === selectedId);
+    if (!query) {
+      setStatus("Saved query not found.", "error");
+      return;
+    }
+    state.savedQueries = state.savedQueries.filter(item => item.id !== selectedId);
+    setSelectAttributesSavedQueries(state.savedQueries);
+    renderSavedList("");
+    setStatus(`Deleted query "${query.name}".`, "success");
+  };
+
+  const openModal = () => {
+    refreshFields(detectLastSelectAttributesField(getWhereClause()));
+    updatePreview();
+    renderSavedList(savedList?.value || "");
+    if (!whereArea.value.trim()) setStatus("Build a WHERE clause, then click Run Query.");
+    openBtn.classList.add("active");
+    modal.style.display = "flex";
+  };
+
+  const closeModal = () => {
+    openBtn.classList.remove("active");
+    modal.style.display = "none";
+    closeUniqueModal();
+  };
+
+  openBtn.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+
+  sourceSelect.addEventListener("change", () => {
+    refreshFields(detectLastSelectAttributesField(getWhereClause()));
+    updatePreview();
+  });
+  whereArea.addEventListener("input", updatePreview);
+  refreshFieldsBtn?.addEventListener("click", () => refreshFields(detectLastSelectAttributesField(getWhereClause())));
+
+  insertFieldBtn?.addEventListener("click", () => {
+    const field = String(fieldSelect.value || "").trim();
+    if (!field) {
+      setStatus("Pick a field first.", "error");
+      return;
+    }
+    appendToken(`[${field}]`);
+  });
+
+  insertValueBtn?.addEventListener("click", () => {
+    const literal = normalizeSelectAttributesInputLiteral(valueInput?.value || "");
+    if (!literal) {
+      setStatus("Enter a value first.", "error");
+      return;
+    }
+    appendToken(literal);
+  });
+
+  valueInput?.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    insertValueBtn?.click();
+  });
+
+  tokenBar?.addEventListener("click", event => {
+    const button = event.target.closest("button[data-token]");
+    if (!button) return;
+    const token = button.getAttribute("data-token");
+    appendToken(token);
+  });
+
+  uniqueValuesBtn?.addEventListener("click", openUniqueModalForField);
+  formatBtn?.addEventListener("click", () => setWhereClause(whereArea.value || ""));
+  clearBtn?.addEventListener("click", () => {
+    setWhereClause("");
+    setStatus("Query cleared.");
+  });
+
+  saveBtn?.addEventListener("click", saveQuery);
+  loadBtn?.addEventListener("click", loadSavedQuery);
+  deleteBtn?.addEventListener("click", deleteSavedQuery);
+  runBtn.addEventListener("click", runQuery);
+
+  uniqueCloseBtn?.addEventListener("click", closeUniqueModal);
+  uniqueModal?.addEventListener("click", event => {
+    if (event.target === uniqueModal) closeUniqueModal();
+  });
+  uniqueSearch?.addEventListener("input", renderUniqueValuesList);
+
+  renderSavedList("");
+  refreshFields("");
+  updatePreview();
+}
+
 function getFilteredAttributeRows() {
   const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
   const headers = window._attributeHeaders || [];
@@ -6625,6 +7611,10 @@ const selectionCountNode = document.getElementById("selectionCount");
 const desktopSelectionHeader = document.getElementById("desktopSelectionHeader");
 const pageHeader = document.querySelector("header");
 
+// Start with the right sidebar closed on initial page load.
+if (selectionBox) selectionBox.classList.add("collapsed");
+if (toggleSelectionBtn) toggleSelectionBtn.textContent = "❮";
+
 // Toggle sidebar open/closed
 if (selectionBox && toggleSelectionBtn) {
   toggleSelectionBtn.onclick = () => {
@@ -7094,6 +8084,7 @@ tryRestoreSavedStreetSourceOnStartup().catch(err => {
   updateLocalStreetSourceStatus();
 });
 initStreetNetworkToggle();
+initSelectByAttributesControls();
 
 
 

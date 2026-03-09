@@ -2026,6 +2026,10 @@ const pageHeader = document.querySelector("header");
 const completeBtnDesktop = document.getElementById("completeStopsBtn");
 const completeBtnMobile  = document.getElementById("completeStopsBtnMobile");
 
+// Start with the right sidebar closed on initial page load.
+if (selectionBox) selectionBox.classList.add("collapsed");
+if (toggleSelectionBtn) toggleSelectionBtn.textContent = "❮";
+
 
   
 // Toggle sidebar open/closed

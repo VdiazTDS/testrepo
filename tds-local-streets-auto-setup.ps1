@@ -105,6 +105,24 @@ function Test-GeoJsonLooksAttributeEmpty([string]$GeoJsonPathValue) {
   }
 }
 
+function Test-ZipArchiveReadable([string]$ZipPathValue) {
+  if (-not (Test-Path -LiteralPath $ZipPathValue)) {
+    return $false
+  }
+
+  $zip = $null
+  try {
+    Add-Type -AssemblyName System.IO.Compression | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPathValue)
+    return ($zip.Entries.Count -gt 0)
+  } catch {
+    return $false
+  } finally {
+    if ($zip) { $zip.Dispose() }
+  }
+}
+
 function Get-PythonInvocation {
   $candidates = @(
     @{ Command = "py"; PrefixArgs = @("-3") },
@@ -205,6 +223,35 @@ try {
       Write-Step "Using selected ZIP: $ZipPath"
     } else {
       throw "ZIP file not found: $ZipPath"
+    }
+  }
+
+  if (-not (Test-ZipArchiveReadable -ZipPathValue $ZipPath)) {
+    Write-Step "ZIP integrity check failed (corrupt or incomplete archive)."
+    if (-not $SkipDownload) {
+      Write-Step "Re-downloading Texas streets ZIP..."
+      try {
+        if (Test-Path -LiteralPath $ZipPath) {
+          Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+        }
+      } catch {}
+      Invoke-WebRequest -Uri $downloadUrl -OutFile $ZipPath
+      if (-not (Test-ZipArchiveReadable -ZipPathValue $ZipPath)) {
+        throw "Downloaded ZIP is still invalid: $ZipPath"
+      }
+    } else {
+      Write-Step "Skipping ZIP download by request, so auto-repair is disabled."
+      Write-Step "Please pick a valid Texas streets ZIP now."
+      $pickedZip = Show-ZipFilePicker
+      if ($pickedZip) {
+        $ZipPath = $pickedZip
+        if (-not (Test-ZipArchiveReadable -ZipPathValue $ZipPath)) {
+          throw "Selected ZIP is invalid or corrupt: $ZipPath"
+        }
+        Write-Step "Using selected ZIP: $ZipPath"
+      } else {
+        throw "ZIP file is invalid or corrupted: $ZipPath"
+      }
     }
   }
 

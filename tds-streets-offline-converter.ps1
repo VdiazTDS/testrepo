@@ -94,6 +94,117 @@ function Get-NodeCommand {
   return $null
 }
 
+function Get-ShapefileScore([string]$Name) {
+  $name = $Name.ToLowerInvariant()
+  $score = 0
+  if ($name -eq "gis_osm_roads_free_1.shp") { $score += 1200 }
+  if ($name -eq "gis_osm_highways_free_1.shp") { $score += 900 }
+  if ($name -like "*roads_free_1.shp") { $score += 700 }
+  if ($name -like "*roads*.shp") { $score += 300 }
+  if ($name -like "*highway*.shp") { $score += 220 }
+  if ($name -like "*street*.shp") { $score += 160 }
+  if ($name -like "*rail*.shp") { $score -= 120 }
+  if ($name -like "*water*.shp") { $score -= 120 }
+  if ($name -like "*building*.shp") { $score -= 120 }
+  return $score
+}
+
+function New-WorkingTempDirectory([string]$OutputPath) {
+  $candidates = @()
+  if ($OutputPath) {
+    $outDir = Split-Path -Parent $OutputPath
+    if ($outDir) {
+      $candidates += $outDir
+    }
+  }
+  if ($env:TEMP) {
+    $candidates += $env:TEMP
+  }
+
+  foreach ($candidate in $candidates) {
+    if (-not $candidate) { continue }
+    try {
+      if (-not (Test-Path -LiteralPath $candidate)) { continue }
+      $tmp = Join-Path $candidate ("tds_streets_convert_" + [Guid]::NewGuid().ToString("N"))
+      New-Item -Path $tmp -ItemType Directory -ErrorAction Stop | Out-Null
+      return $tmp
+    } catch {}
+  }
+
+  throw "Could not create a temporary folder near output path or TEMP."
+}
+
+function Extract-RoadShapefileFromZip([string]$ZipPathValue, [string]$DestinationRoot) {
+  Add-Type -AssemblyName System.IO.Compression | Out-Null
+  Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPathValue)
+  try {
+    $shpEntries = @(
+      $archive.Entries | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_.Name) -and $_.Name.ToLowerInvariant().EndsWith(".shp")
+      }
+    )
+    if (-not $shpEntries -or $shpEntries.Count -eq 0) {
+      throw "No .shp files found in ZIP."
+    }
+
+    $ranked = $shpEntries | ForEach-Object {
+      [PSCustomObject]@{
+        Entry = $_
+        Score = Get-ShapefileScore -Name $_.Name
+      }
+    } | Sort-Object -Property Score -Descending
+
+    $best = $ranked | Select-Object -First 1
+    if (-not $best) {
+      throw "Unable to choose a roads shapefile from ZIP."
+    }
+
+    $bestEntry = $best.Entry
+    $targetBase = [System.IO.Path]::GetFileNameWithoutExtension($bestEntry.Name)
+    $targetDir = [System.IO.Path]::GetDirectoryName($bestEntry.FullName)
+    if (-not $targetDir) { $targetDir = "" }
+    $keepExt = @(".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".fix")
+
+    $toExtract = @(
+      $archive.Entries | Where-Object {
+        if ([string]::IsNullOrWhiteSpace($_.Name)) { return $false }
+        $entryDir = [System.IO.Path]::GetDirectoryName($_.FullName)
+        if (-not $entryDir) { $entryDir = "" }
+        if ($entryDir -ne $targetDir) { return $false }
+        $entryBase = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+        if ($entryBase -ne $targetBase) { return $false }
+        $entryExt = [System.IO.Path]::GetExtension($_.Name).ToLowerInvariant()
+        return ($keepExt -contains $entryExt)
+      }
+    )
+
+    if (-not $toExtract -or $toExtract.Count -eq 0) {
+      throw "Required shapefile sidecar files were not found in ZIP."
+    }
+
+    foreach ($entry in $toExtract) {
+      $destPath = Join-Path $DestinationRoot $entry.FullName
+      $destDir = Split-Path -Parent $destPath
+      if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+      }
+      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+    }
+
+    $shpOut = Join-Path $DestinationRoot $bestEntry.FullName
+    if (-not (Test-Path -LiteralPath $shpOut)) {
+      throw "Shapefile extraction failed: $shpOut"
+    }
+
+    Write-Step ("Selected shapefile: " + $bestEntry.Name)
+    return $shpOut
+  } finally {
+    if ($archive) { $archive.Dispose() }
+  }
+}
+
 function Find-RoadShapefile([string]$RootDir) {
   $all = Get-ChildItem -Path $RootDir -Recurse -File -Filter *.shp
   if (-not $all -or $all.Count -eq 0) {
@@ -101,20 +212,9 @@ function Find-RoadShapefile([string]$RootDir) {
   }
 
   $scored = $all | ForEach-Object {
-    $name = $_.Name.ToLowerInvariant()
-    $score = 0
-    if ($name -eq "gis_osm_roads_free_1.shp") { $score += 1200 }
-    if ($name -eq "gis_osm_highways_free_1.shp") { $score += 900 }
-    if ($name -like "*roads_free_1.shp") { $score += 700 }
-    if ($name -like "*roads*.shp") { $score += 300 }
-    if ($name -like "*highway*.shp") { $score += 220 }
-    if ($name -like "*street*.shp") { $score += 160 }
-    if ($name -like "*rail*.shp") { $score -= 120 }
-    if ($name -like "*water*.shp") { $score -= 120 }
-    if ($name -like "*building*.shp") { $score -= 120 }
     [PSCustomObject]@{
       Path = $_.FullName
-      Score = $score
+      Score = Get-ShapefileScore -Name $_.Name
       Name = $_.Name
     }
   } | Sort-Object -Property Score -Descending
@@ -531,6 +631,122 @@ function Convert-ShapefileToGeoJsonPowerShell([string]$ShpPath, [string]$OutputG
   $reader = $null
   $outStream = $null
   $writer = $null
+  $dbfStream = $null
+  $dbfReader = $null
+  $dbfMeta = $null
+  $dbfFieldDefs = @()
+  $dbfPath = [System.IO.Path]::ChangeExtension($ShpPath, ".dbf")
+
+  function Escape-JsonStringValue([string]$Text) {
+    $s = [string]$Text
+    $s = $s -replace '\\', '\\\\'
+    $s = $s -replace '"', '\"'
+    $s = $s -replace "`r", '\r'
+    $s = $s -replace "`n", '\n'
+    $s = $s -replace "`t", '\t'
+    return '"' + $s + '"'
+  }
+
+  function Parse-DbfHeader([System.IO.BinaryReader]$DbfReader) {
+    $header = $DbfReader.ReadBytes(32)
+    if ($header.Length -lt 32) {
+      throw "DBF header is incomplete."
+    }
+    $recordCount = [System.BitConverter]::ToUInt32($header, 4)
+    $headerLength = [System.BitConverter]::ToUInt16($header, 8)
+    $recordLength = [System.BitConverter]::ToUInt16($header, 10)
+    if ($headerLength -lt 33 -or $recordLength -lt 2) {
+      throw "DBF header is invalid."
+    }
+
+    $fields = New-Object System.Collections.Generic.List[hashtable]
+    $offset = 32
+    while (($offset + 32) -le $headerLength) {
+      $desc = $DbfReader.ReadBytes(32)
+      if ($desc.Length -lt 32) { break }
+      $offset += 32
+      if ($desc[0] -eq 0x0D) { break }
+
+      $zeroIdx = [System.Array]::IndexOf($desc, [byte]0, 0, 11)
+      if ($zeroIdx -lt 0) { $zeroIdx = 11 }
+      $nameLen = [Math]::Min([Math]::Max($zeroIdx, 0), 11)
+      $nameBytes = if ($nameLen -gt 0) { $desc[0..($nameLen - 1)] } else { @() }
+      $fieldName = ([System.Text.Encoding]::ASCII.GetString($nameBytes)).Trim([char]0).Trim()
+      if ([string]::IsNullOrWhiteSpace($fieldName)) {
+        $fieldName = "field_$($fields.Count + 1)"
+      }
+
+      $fieldType = [char]$desc[11]
+      $fieldLength = [int]$desc[16]
+      $fields.Add(@{
+        name = $fieldName
+        type = $fieldType
+        length = $fieldLength
+      })
+    }
+
+    return @{
+      recordCount = [int]$recordCount
+      headerLength = [int]$headerLength
+      recordLength = [int]$recordLength
+      fields = $fields
+    }
+  }
+
+  function Decode-DbfFieldValue([byte[]]$Raw, [string]$FieldType) {
+    if ($null -eq $Raw -or $Raw.Length -eq 0) { return "" }
+    $text = [System.Text.Encoding]::UTF8.GetString($Raw)
+    if ($null -eq $text) { return "" }
+    $text = $text.Replace([char]0, "").Trim()
+    if (-not $text) { return "" }
+    if ($FieldType -eq "N" -or $FieldType -eq "F") {
+      $num = 0.0
+      if ([double]::TryParse($text, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$num)) {
+        return $num.ToString("0.################", [System.Globalization.CultureInfo]::InvariantCulture)
+      }
+    }
+    return $text
+  }
+
+  function Read-DbfRecord([int]$RowIndex) {
+    if (-not $dbfReader -or -not $dbfMeta) { return @{} }
+    if ($RowIndex -lt 0 -or $RowIndex -ge [int]$dbfMeta.recordCount) { return @{} }
+
+    $rowPos = [int64]$dbfMeta.headerLength + ([int64]$RowIndex * [int64]$dbfMeta.recordLength)
+    if ($rowPos -lt 0 -or $rowPos -ge [int64]$dbfReader.BaseStream.Length) { return @{} }
+    $dbfReader.BaseStream.Position = $rowPos
+    $row = $dbfReader.ReadBytes([int]$dbfMeta.recordLength)
+    if ($row.Length -lt [int]$dbfMeta.recordLength) { return @{} }
+    if ($row[0] -eq 0x2A) { return @{} } # deleted record
+
+    $props = @{}
+    $cursor = 1
+    foreach ($field in $dbfFieldDefs) {
+      $len = [int]$field.length
+      if ($len -le 0 -or ($cursor + $len) -gt $row.Length) {
+        $cursor += [Math]::Max(0, $len)
+        continue
+      }
+      $value = Decode-DbfFieldValue -Raw $row[$cursor..($cursor + $len - 1)] -FieldType ([string]$field.type)
+      $props[$field.name] = $value
+      $props[([string]$field.name).ToLowerInvariant()] = $value
+      $cursor += $len
+    }
+    return $props
+  }
+
+  function Pick-DbfValue([hashtable]$Props, [string[]]$Keys, [string]$Fallback = "Unknown") {
+    foreach ($key in $Keys) {
+      if (-not $Props.ContainsKey($key)) { continue }
+      $raw = $Props[$key]
+      if ($null -eq $raw) { continue }
+      $text = [string]$raw
+      if ($null -eq $text) { continue }
+      $text = $text.Trim()
+      if ($text) { return $text }
+    }
+    return $Fallback
+  }
 
   try {
     $inStream = [System.IO.File]::Open($ShpPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
@@ -542,6 +758,24 @@ function Convert-ShapefileToGeoJsonPowerShell([string]$ShpPath, [string]$OutputG
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $outStream = [System.IO.File]::Open($OutputGeoJson, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
     $writer = New-Object System.IO.StreamWriter($outStream, $utf8NoBom)
+
+    if (Test-Path -LiteralPath $dbfPath) {
+      try {
+        $dbfStream = [System.IO.File]::Open($dbfPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $dbfReader = New-Object System.IO.BinaryReader($dbfStream)
+        $dbfMeta = Parse-DbfHeader -DbfReader $dbfReader
+        $dbfFieldDefs = @($dbfMeta.fields)
+        Write-Step ("DBF attributes loaded ({0} fields)." -f $dbfFieldDefs.Count)
+      } catch {
+        Write-Step ("DBF parse failed: {0}. Continuing with Unknown attributes." -f $_.Exception.Message)
+        if ($dbfReader) { $dbfReader.Dispose(); $dbfReader = $null }
+        if ($dbfStream) { $dbfStream.Dispose(); $dbfStream = $null }
+        $dbfMeta = $null
+        $dbfFieldDefs = @()
+      }
+    } else {
+      Write-Step "DBF file not found. Attributes will be Unknown."
+    }
 
     $writer.Write('{"type":"FeatureCollection","features":[')
     $firstFeature = $true
@@ -645,9 +879,32 @@ function Convert-ShapefileToGeoJsonPowerShell([string]$ShpPath, [string]$OutputG
         $firstFeature = $false
       }
 
+      $dbfProps = Read-DbfRecord -RowIndex ($recordId - 1)
+      $nameValue = Pick-DbfValue -Props $dbfProps -Keys @("name", "NAME", "osm_name", "OSM_NAME")
+      $highwayValue = Pick-DbfValue -Props $dbfProps -Keys @("highway", "HIGHWAY", "fclass", "FCLASS", "type", "TYPE", "road_class", "ROAD_CLASS")
+      $refValue = Pick-DbfValue -Props $dbfProps -Keys @("ref", "REF", "ref_name", "REF_NAME")
+      $maxspeedValue = Pick-DbfValue -Props $dbfProps -Keys @("maxspeed", "MAXSPEED", "max_speed", "MAX_SPEED")
+      $lanesValue = Pick-DbfValue -Props $dbfProps -Keys @("lanes", "LANES", "num_lanes", "NUM_LANES")
+      $surfaceValue = Pick-DbfValue -Props $dbfProps -Keys @("surface", "SURFACE", "surf_type", "SURF_TYPE")
+      $onewayValue = Pick-DbfValue -Props $dbfProps -Keys @("oneway", "ONEWAY", "one_way", "ONE_WAY")
+
       $writer.Write('{"type":"Feature","id":')
       $writer.Write($recordId)
-      $writer.Write(',"properties":{"name":"Unknown","highway":"Unknown","ref":"Unknown","maxspeed":"Unknown","lanes":"Unknown","surface":"Unknown","oneway":"Unknown"},"geometry":{"type":"')
+      $writer.Write(',"properties":{"name":')
+      $writer.Write((Escape-JsonStringValue -Text $nameValue))
+      $writer.Write(',"highway":')
+      $writer.Write((Escape-JsonStringValue -Text $highwayValue))
+      $writer.Write(',"ref":')
+      $writer.Write((Escape-JsonStringValue -Text $refValue))
+      $writer.Write(',"maxspeed":')
+      $writer.Write((Escape-JsonStringValue -Text $maxspeedValue))
+      $writer.Write(',"lanes":')
+      $writer.Write((Escape-JsonStringValue -Text $lanesValue))
+      $writer.Write(',"surface":')
+      $writer.Write((Escape-JsonStringValue -Text $surfaceValue))
+      $writer.Write(',"oneway":')
+      $writer.Write((Escape-JsonStringValue -Text $onewayValue))
+      $writer.Write('},"geometry":{"type":"')
       $writer.Write($geomType)
       $writer.Write('","coordinates":')
       $writer.Write($coordsJson)
@@ -664,6 +921,8 @@ function Convert-ShapefileToGeoJsonPowerShell([string]$ShpPath, [string]$OutputG
     $writer.Flush()
     Write-Step "Built-in parser wrote $written street features."
   } finally {
+    if ($dbfReader) { $dbfReader.Dispose() }
+    if ($dbfStream) { $dbfStream.Dispose() }
     if ($writer) { $writer.Dispose() }
     if ($outStream) { $outStream.Dispose() }
     if ($reader) { $reader.Dispose() }
@@ -709,6 +968,7 @@ function Test-GeoJsonFileLooksComplete([string]$GeoJsonPath) {
 }
 
 $workingOutputGeoJson = $null
+$tempDir = $null
 
 try {
   Write-Step "Starting offline ZIP -> GeoJSON conversion"
@@ -735,12 +995,10 @@ try {
     Remove-Item -LiteralPath $workingOutputGeoJson -Force -ErrorAction SilentlyContinue
   }
 
-  $tempDir = Join-Path $env:TEMP ("tds_streets_convert_" + [Guid]::NewGuid().ToString("N"))
-  New-Item -Path $tempDir -ItemType Directory | Out-Null
-  Write-Step "Extracting ZIP to temporary folder..."
-  Expand-Archive -LiteralPath $ZipPath -DestinationPath $tempDir -Force
-
-  $shpPath = Find-RoadShapefile -RootDir $tempDir
+  $tempDir = New-WorkingTempDirectory -OutputPath $OutputGeoJson
+  Write-Step "Temporary working folder: $tempDir"
+  Write-Step "Extracting roads shapefile from ZIP..."
+  $shpPath = Extract-RoadShapefileFromZip -ZipPathValue $ZipPath -DestinationRoot $tempDir
 
   $ogr = Get-Command ogr2ogr -ErrorAction SilentlyContinue
   if ($ogr) {
@@ -759,6 +1017,9 @@ try {
     Write-Step "Conversion complete: $OutputGeoJson"
     Start-Process explorer.exe "/select,`"$OutputGeoJson`""
     Write-Step "You can now load this GeoJSON in TDS PAK with 'Load File'."
+    if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+      Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     exit 0
   }
 
@@ -830,18 +1091,25 @@ try {
   Write-Step "Conversion complete: $OutputGeoJson"
   Start-Process explorer.exe "/select,`"$OutputGeoJson`""
   Write-Step "You can now load this GeoJSON in TDS PAK with 'Load File'."
+  if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+    Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 catch {
   if ($workingOutputGeoJson -and (Test-Path -LiteralPath $workingOutputGeoJson)) {
     Remove-Item -LiteralPath $workingOutputGeoJson -Force -ErrorAction SilentlyContinue
   }
+  if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+    Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
   Write-Host ""
   Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
   Write-Host ""
   Write-Host "Tips:"
-  Write-Host "1) Retry and select the ZIP from 'Download Texas Streets'."
-  Write-Host "2) If Python is not installed, the built-in fallback can still work but may be slower."
-  Write-Host "3) Optional speed boost: install Python (https://www.python.org/downloads/), GDAL, or Node.js (https://nodejs.org/)."
-  Write-Host "4) If Windows shows Microsoft Store alias errors for python/py, disable those aliases or install Python from python.org."
+  Write-Host "1) Ensure the drive used for TEMP/output has enough free space."
+  Write-Host "2) Retry and select the ZIP from 'Download Texas Streets'."
+  Write-Host "3) If Python is not installed, the built-in fallback can still work but may be slower."
+  Write-Host "4) Optional speed boost: install Python (https://www.python.org/downloads/), GDAL, or Node.js (https://nodejs.org/)."
+  Write-Host "5) If Windows shows Microsoft Store alias errors for python/py, disable those aliases or install Python from python.org."
   exit 1
 }
