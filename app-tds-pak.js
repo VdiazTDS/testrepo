@@ -5574,11 +5574,28 @@ function replaceStreetSelection(nextSelectedIds) {
 }
 
 const MAP_SELECTION_DRAW_MODE_KEY = "mapSelectionDrawMode";
+const MAP_SELECTION_TARGET_KEY = "mapSelectionTarget";
 
 function normalizeMapSelectionDrawMode(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "add" || normalized === "subtract" || normalized === "intersect") return normalized;
   return "replace";
+}
+
+function normalizeMapSelectionTarget(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "records" || normalized === "streets" || normalized === "both" || normalized === "active") {
+    return normalized;
+  }
+  return "both";
+}
+
+function resolveMapSelectionTarget(targetValue = mapSelectionTarget) {
+  const normalized = normalizeMapSelectionTarget(targetValue);
+  if (normalized === "active") {
+    return attributeTableMode === "streets" ? "streets" : "records";
+  }
+  return normalized;
 }
 
 function getMapSelectionModeLabel(modeValue = "replace") {
@@ -5589,7 +5606,19 @@ function getMapSelectionModeLabel(modeValue = "replace") {
   return "Replace";
 }
 
+function getMapSelectionTargetLabel(targetValue = mapSelectionTarget) {
+  const normalized = normalizeMapSelectionTarget(targetValue);
+  const resolved = resolveMapSelectionTarget(normalized);
+  if (normalized === "active") {
+    return resolved === "streets" ? "Active Table (Street Segments)" : "Active Table (Record Stops)";
+  }
+  if (resolved === "streets") return "Street Segments";
+  if (resolved === "records") return "Record Stops";
+  return "Record Stops + Street Segments";
+}
+
 let mapSelectionDrawMode = normalizeMapSelectionDrawMode(storageGet(MAP_SELECTION_DRAW_MODE_KEY) || "replace");
+let mapSelectionTarget = normalizeMapSelectionTarget(storageGet(MAP_SELECTION_TARGET_KEY) || "both");
 
 function setMapSelectionDrawMode(modeValue, persist = true) {
   mapSelectionDrawMode = normalizeMapSelectionDrawMode(modeValue);
@@ -5599,6 +5628,38 @@ function setMapSelectionDrawMode(modeValue, persist = true) {
   if (typeof window.__refreshSelectionToolsUi === "function") {
     window.__refreshSelectionToolsUi();
   }
+}
+
+function setMapSelectionTarget(targetValue, persist = true) {
+  mapSelectionTarget = normalizeMapSelectionTarget(targetValue);
+  if (persist) {
+    storageSet(MAP_SELECTION_TARGET_KEY, mapSelectionTarget);
+  }
+  if (typeof window.__refreshSelectionToolsUi === "function") {
+    window.__refreshSelectionToolsUi();
+  }
+}
+
+function getCurrentAttributeModeSelectionCount() {
+  return attributeTableMode === "streets"
+    ? streetAttributeSelectedIds.size
+    : attributeState.selectedRowIds.size;
+}
+
+function getSelectionCountForTarget(targetValue = mapSelectionTarget) {
+  const resolved = resolveMapSelectionTarget(targetValue);
+  if (resolved === "streets") return streetAttributeSelectedIds.size;
+  if (resolved === "records") return attributeState.selectedRowIds.size;
+  return attributeState.selectedRowIds.size + streetAttributeSelectedIds.size;
+}
+
+function getSelectionSummaryForTarget(targetValue = mapSelectionTarget) {
+  const resolved = resolveMapSelectionTarget(targetValue);
+  const recordCount = attributeState.selectedRowIds.size;
+  const streetCount = streetAttributeSelectedIds.size;
+  if (resolved === "streets") return `${streetCount.toLocaleString()} street segments selected`;
+  if (resolved === "records") return `${recordCount.toLocaleString()} record stops selected`;
+  return `${recordCount.toLocaleString()} record stops + ${streetCount.toLocaleString()} street segments selected`;
 }
 
 function areNumericIdSetsEqual(a, b) {
@@ -5639,6 +5700,26 @@ function combineSelectionIds(currentIds, candidateIds, modeValue = mapSelectionD
     return next;
   }
   return candidates;
+}
+
+function splitSelectionCandidateIds(candidateIds) {
+  const isScopedObject =
+    candidateIds &&
+    typeof candidateIds === "object" &&
+    !Array.isArray(candidateIds) &&
+    (
+      Object.prototype.hasOwnProperty.call(candidateIds, "records") ||
+      Object.prototype.hasOwnProperty.call(candidateIds, "streets")
+    );
+
+  if (!isScopedObject) {
+    return { records: candidateIds, streets: candidateIds };
+  }
+
+  return {
+    records: candidateIds.records,
+    streets: candidateIds.streets
+  };
 }
 
 function getVisibleSelectableRecordRowIds() {
@@ -5717,65 +5798,92 @@ function getStreetIdsInCurrentView() {
   return out;
 }
 
-function applySelectionIdsToActiveMode(candidateIds, modeValue = mapSelectionDrawMode) {
+function applySelectionIdsToActiveMode(candidateIds, modeValue = mapSelectionDrawMode, targetValue = mapSelectionTarget) {
   const mode = normalizeMapSelectionDrawMode(modeValue);
-  if (attributeTableMode === "streets") {
-    if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) {
-      return streetAttributeSelectedIds.size;
-    }
-    const next = combineSelectionIds(streetAttributeSelectedIds, candidateIds, mode);
-    replaceStreetSelection(next);
-    applyStreetSelectionStyles();
-    syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
-    refreshAttributeStatus();
-    if (attributeTableMode === "streets") renderAttributeTable();
-    return streetAttributeSelectedIds.size;
+  const resolvedTarget = resolveMapSelectionTarget(targetValue);
+  const scopedCandidates = splitSelectionCandidateIds(candidateIds);
+  let recordsChanged = false;
+  let streetsChanged = false;
+
+  if (resolvedTarget === "records" || resolvedTarget === "both") {
+    const selectableIds = getSelectableRecordRowIds();
+    const base = new Set(
+      [...attributeState.selectedRowIds].filter(id => selectableIds.has(id))
+    );
+    const next = combineSelectionIds(base, scopedCandidates.records, mode);
+    recordsChanged = !areNumericIdSetsEqual(attributeState.selectedRowIds, next);
+    attributeState.selectedRowIds = next;
+    applyAttributeSelectionStyles();
   }
 
-  const selectableIds = getSelectableRecordRowIds();
-  const base = new Set(
-    [...attributeState.selectedRowIds].filter(id => selectableIds.has(id))
-  );
-  const next = combineSelectionIds(base, candidateIds, mode);
-  attributeState.selectedRowIds = next;
-  applyAttributeSelectionStyles();
-  syncSelectedStopsHeaderCount(next.size);
+  if (resolvedTarget === "streets" || resolvedTarget === "both") {
+    if (isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) {
+      const next = combineSelectionIds(streetAttributeSelectedIds, scopedCandidates.streets, mode);
+      streetsChanged = !areNumericIdSetsEqual(streetAttributeSelectedIds, next);
+      if (streetsChanged) {
+        replaceStreetSelection(next);
+      }
+      applyStreetSelectionStyles();
+    }
+  }
+
+  syncSelectedStopsHeaderCount(getCurrentAttributeModeSelectionCount());
   refreshAttributeStatus();
-  if (attributeTableMode === "records") renderAttributeTable();
-  return next.size;
+
+  if (
+    (attributeTableMode === "records" && recordsChanged) ||
+    (attributeTableMode === "streets" && streetsChanged)
+  ) {
+    renderAttributeTable();
+  }
+
+  return getSelectionCountForTarget(resolvedTarget);
 }
 
-function invertVisibleSelectionInActiveMode() {
-  if (attributeTableMode === "streets") {
-    if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) {
-      return streetAttributeSelectedIds.size;
-    }
-    const next = new Set(streetAttributeSelectedIds);
-    const visibleIds = getVisibleSelectableStreetIds();
+function invertVisibleSelectionInActiveMode(targetValue = mapSelectionTarget) {
+  const resolvedTarget = resolveMapSelectionTarget(targetValue);
+  let recordsChanged = false;
+  let streetsChanged = false;
+
+  if (resolvedTarget === "records" || resolvedTarget === "both") {
+    const next = new Set(attributeState.selectedRowIds);
+    const visibleIds = getVisibleSelectableRecordRowIds();
     visibleIds.forEach(id => {
       if (next.has(id)) next.delete(id);
       else next.add(id);
     });
-    replaceStreetSelection(next);
-    applyStreetSelectionStyles();
-    syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
-    refreshAttributeStatus();
-    if (attributeTableMode === "streets") renderAttributeTable();
-    return streetAttributeSelectedIds.size;
+    recordsChanged = !areNumericIdSetsEqual(attributeState.selectedRowIds, next);
+    attributeState.selectedRowIds = next;
+    applyAttributeSelectionStyles();
   }
 
-  const next = new Set(attributeState.selectedRowIds);
-  const visibleIds = getVisibleSelectableRecordRowIds();
-  visibleIds.forEach(id => {
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-  });
-  attributeState.selectedRowIds = next;
-  applyAttributeSelectionStyles();
-  syncSelectedStopsHeaderCount(next.size);
+  if (resolvedTarget === "streets" || resolvedTarget === "both") {
+    if (isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) {
+      const next = new Set(streetAttributeSelectedIds);
+      const visibleIds = getVisibleSelectableStreetIds();
+      visibleIds.forEach(id => {
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+      });
+      streetsChanged = !areNumericIdSetsEqual(streetAttributeSelectedIds, next);
+      if (streetsChanged) {
+        replaceStreetSelection(next);
+      }
+      applyStreetSelectionStyles();
+    }
+  }
+
+  syncSelectedStopsHeaderCount(getCurrentAttributeModeSelectionCount());
   refreshAttributeStatus();
-  if (attributeTableMode === "records") renderAttributeTable();
-  return next.size;
+
+  if (
+    (attributeTableMode === "records" && recordsChanged) ||
+    (attributeTableMode === "streets" && streetsChanged)
+  ) {
+    renderAttributeTable();
+  }
+
+  return getSelectionCountForTarget(resolvedTarget);
 }
 
 // ================= POLYGON SELECT =================
@@ -5824,53 +5932,42 @@ function clearDrawnSelectionGeometry() {
 }
 
 // ===== SELECTION COUNT FUNCTION (GLOBAL & CORRECT) =====
-function updateSelectionCount() {
-  const polygon = drawnLayer.getLayers()[0] || null;
-  const polygonBounds = polygon?.getBounds?.() || null;
-
-  if (attributeTableMode === "streets") {
-    const streetSelectable = isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY);
-    if (!streetSelectable) {
-      const hadSelection = streetAttributeSelectedIds.size > 0;
-      if (hadSelection) {
-        streetAttributeSelectedIds.clear();
-        applyStreetSelectionStyles();
-        renderAttributeTable();
-      }
-      syncSelectedStopsHeaderCount(0);
-      refreshAttributeStatus();
-      return;
-    }
-
-    let nextSelectedStreetIds = new Set(streetAttributeSelectedIds);
-    if (polygon) {
-      const candidateStreetIds = new Set();
-      streetAttributeById.forEach((entry, id) => {
-        if (!entry?.layer) return;
-        if (!map.hasLayer(entry.layer)) return;
-        if (!streetEntryIntersectsSelectionPolygon(entry, polygon)) return;
-        candidateStreetIds.add(id);
-      });
-      nextSelectedStreetIds = combineSelectionIds(nextSelectedStreetIds, candidateStreetIds, mapSelectionDrawMode);
-    }
-    nextSelectedStreetIds = new Set(
-      [...nextSelectedStreetIds].filter(id => streetAttributeById.has(id))
-    );
-
-    const prevStreet = streetAttributeSelectedIds;
-    const changed = !areNumericIdSetsEqual(prevStreet, nextSelectedStreetIds);
-
-    if (changed) {
-      replaceStreetSelection(nextSelectedStreetIds);
+function applyPolygonSelectionToStreets(polygonLayer) {
+  const streetSelectable = isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY);
+  if (!streetSelectable) {
+    const hadSelection = streetAttributeSelectedIds.size > 0;
+    if (hadSelection) {
+      streetAttributeSelectedIds.clear();
       applyStreetSelectionStyles();
-      if (attributeTableMode === "streets") renderAttributeTable();
     }
-
-    syncSelectedStopsHeaderCount(streetAttributeSelectedIds.size);
-    refreshAttributeStatus();
-    return;
+    return hadSelection;
   }
 
+  let nextSelectedStreetIds = new Set(streetAttributeSelectedIds);
+  if (polygonLayer) {
+    const candidateStreetIds = new Set();
+    streetAttributeById.forEach((entry, id) => {
+      if (!entry?.layer) return;
+      if (!map.hasLayer(entry.layer)) return;
+      if (!streetEntryIntersectsSelectionPolygon(entry, polygonLayer)) return;
+      candidateStreetIds.add(id);
+    });
+    nextSelectedStreetIds = combineSelectionIds(nextSelectedStreetIds, candidateStreetIds, mapSelectionDrawMode);
+  }
+
+  nextSelectedStreetIds = new Set(
+    [...nextSelectedStreetIds].filter(id => streetAttributeById.has(id))
+  );
+
+  const changed = !areNumericIdSetsEqual(streetAttributeSelectedIds, nextSelectedStreetIds);
+  if (changed) {
+    replaceStreetSelection(nextSelectedStreetIds);
+    applyStreetSelectionStyles();
+  }
+  return changed;
+}
+
+function applyPolygonSelectionToRecords(polygonBounds) {
   if (selectedLayerKey && !isLayerManagerEntrySelectable(selectedLayerKey)) {
     selectedLayerKey = null;
   }
@@ -5927,12 +6024,35 @@ function updateSelectionCount() {
     });
   });
 
-  const prev = attributeState.selectedRowIds;
-  const changed = !areNumericIdSetsEqual(prev, nextSelectedRowIds);
+  const changed = !areNumericIdSetsEqual(attributeState.selectedRowIds, nextSelectedRowIds);
   attributeState.selectedRowIds = nextSelectedRowIds;
-  syncSelectedStopsHeaderCount(nextSelectedRowIds.size);
+  return changed;
+}
+
+function updateSelectionCount() {
+  const polygon = drawnLayer.getLayers()[0] || null;
+  const polygonBounds = polygon?.getBounds?.() || null;
+  const target = resolveMapSelectionTarget();
+  let recordChanged = false;
+  let streetChanged = false;
+
+  if (target === "streets" || target === "both") {
+    streetChanged = applyPolygonSelectionToStreets(polygon);
+  }
+
+  if (target === "records" || target === "both") {
+    recordChanged = applyPolygonSelectionToRecords(polygonBounds);
+  }
+
+  syncSelectedStopsHeaderCount(getCurrentAttributeModeSelectionCount());
   refreshAttributeStatus();
-  if (changed) renderAttributeTable();
+
+  if (
+    (attributeTableMode === "records" && recordChanged) ||
+    (attributeTableMode === "streets" && streetChanged)
+  ) {
+    renderAttributeTable();
+  }
 }
 
 
@@ -7765,7 +7885,7 @@ window.setAttributeSelectedRowIds = function(rowIds) {
   attributeState.selectedRowIds = next;
   applyAttributeSelectionStyles();
   refreshAttributeStatus();
-  syncSelectedStopsHeaderCount(next.size);
+  syncSelectedStopsHeaderCount(getCurrentAttributeModeSelectionCount());
   renderAttributeTable();
   return true;
 };
@@ -7805,7 +7925,7 @@ window.setStreetSelectedSegmentIds = function(rowIds) {
   next.forEach(id => streetAttributeSelectedIds.add(id));
   applyStreetSelectionStyles();
   refreshAttributeStatus();
-  syncSelectedStopsHeaderCount(next.size);
+  syncSelectedStopsHeaderCount(getCurrentAttributeModeSelectionCount());
   renderAttributeTable();
   return true;
 };
@@ -13791,6 +13911,7 @@ const selectionCountNode = document.getElementById("selectionCount");
 const desktopSelectionHeader = document.getElementById("desktopSelectionHeader");
 const pageHeader = document.querySelector("header");
 const selectionDrawModeSelect = document.getElementById("selectionDrawModeSelect");
+const selectionTargetSelect = document.getElementById("selectionTargetSelect");
 const selectionModeBadge = document.getElementById("selectionModeBadge");
 const selectionToolsStatus = document.getElementById("selectionToolsStatus");
 const selectionDrawPolygonBtn = document.getElementById("selectionDrawPolygonBtn");
@@ -13867,8 +13988,9 @@ const setSelectionToolsStatus = message => {
 const refreshSelectionToolsUi = () => {
   const mode = normalizeMapSelectionDrawMode(mapSelectionDrawMode);
   const modeLabel = getMapSelectionModeLabel(mode);
-  const targetLabel = attributeTableMode === "streets" ? "Street Segments" : "Record Stops";
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
   if (selectionDrawModeSelect) selectionDrawModeSelect.value = mode;
+  if (selectionTargetSelect) selectionTargetSelect.value = normalizeMapSelectionTarget(mapSelectionTarget);
   if (selectionModeBadge) selectionModeBadge.textContent = modeLabel;
   setSelectionToolsStatus(`Target: ${targetLabel}. Mode: ${modeLabel}.`);
 };
@@ -13881,6 +14003,31 @@ selectionDrawModeSelect?.addEventListener("change", () => {
   refreshSelectionToolsUi();
 });
 
+selectionTargetSelect?.addEventListener("change", () => {
+  setMapSelectionTarget(selectionTargetSelect.value, true);
+  refreshSelectionToolsUi();
+});
+
+function getSelectionCandidatesForScope(scope) {
+  const resolvedTarget = resolveMapSelectionTarget();
+  const useInView = scope === "inView";
+  if (resolvedTarget === "both") {
+    return useInView
+      ? {
+          records: getRecordRowIdsInCurrentView(),
+          streets: getStreetIdsInCurrentView()
+        }
+      : {
+          records: getVisibleSelectableRecordRowIds(),
+          streets: getVisibleSelectableStreetIds()
+        };
+  }
+  if (resolvedTarget === "streets") {
+    return useInView ? getStreetIdsInCurrentView() : getVisibleSelectableStreetIds();
+  }
+  return useInView ? getRecordRowIdsInCurrentView() : getVisibleSelectableRecordRowIds();
+}
+
 selectionDrawPolygonBtn?.addEventListener("click", () => {
   const started = startSelectionDrawTool("polygon");
   if (!started) {
@@ -13888,7 +14035,8 @@ selectionDrawPolygonBtn?.addEventListener("click", () => {
     return;
   }
   const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
-  setSelectionToolsStatus(`Polygon draw started (${modeLabel}).`);
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
+  setSelectionToolsStatus(`Polygon draw started (${modeLabel}, ${targetLabel}).`);
 });
 
 selectionDrawRectangleBtn?.addEventListener("click", () => {
@@ -13898,30 +14046,30 @@ selectionDrawRectangleBtn?.addEventListener("click", () => {
     return;
   }
   const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
-  setSelectionToolsStatus(`Rectangle draw started (${modeLabel}).`);
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
+  setSelectionToolsStatus(`Rectangle draw started (${modeLabel}, ${targetLabel}).`);
 });
 
 selectionSelectInViewBtn?.addEventListener("click", () => {
-  const ids = attributeTableMode === "streets"
-    ? getStreetIdsInCurrentView()
-    : getRecordRowIdsInCurrentView();
-  const total = applySelectionIdsToActiveMode(ids, mapSelectionDrawMode);
+  const ids = getSelectionCandidatesForScope("inView");
+  applySelectionIdsToActiveMode(ids, mapSelectionDrawMode, mapSelectionTarget);
   const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
-  setSelectionToolsStatus(`Select In View applied (${modeLabel}). ${total.toLocaleString()} selected.`);
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
+  setSelectionToolsStatus(`Select In View applied (${modeLabel}, ${targetLabel}). ${getSelectionSummaryForTarget(mapSelectionTarget)}.`);
 });
 
 selectionSelectVisibleBtn?.addEventListener("click", () => {
-  const ids = attributeTableMode === "streets"
-    ? getVisibleSelectableStreetIds()
-    : getVisibleSelectableRecordRowIds();
-  const total = applySelectionIdsToActiveMode(ids, mapSelectionDrawMode);
+  const ids = getSelectionCandidatesForScope("visible");
+  applySelectionIdsToActiveMode(ids, mapSelectionDrawMode, mapSelectionTarget);
   const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
-  setSelectionToolsStatus(`Select All Visible applied (${modeLabel}). ${total.toLocaleString()} selected.`);
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
+  setSelectionToolsStatus(`Select All Visible applied (${modeLabel}, ${targetLabel}). ${getSelectionSummaryForTarget(mapSelectionTarget)}.`);
 });
 
 selectionInvertVisibleBtn?.addEventListener("click", () => {
-  const total = invertVisibleSelectionInActiveMode();
-  setSelectionToolsStatus(`Invert Visible applied. ${total.toLocaleString()} selected.`);
+  invertVisibleSelectionInActiveMode(mapSelectionTarget);
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
+  setSelectionToolsStatus(`Invert Visible applied (${targetLabel}). ${getSelectionSummaryForTarget(mapSelectionTarget)}.`);
 });
 
 selectionClearShapeBtn?.addEventListener("click", () => {
