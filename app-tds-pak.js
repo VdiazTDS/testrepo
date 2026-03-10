@@ -626,7 +626,26 @@ const satelliteLabelsLayer = L.tileLayer(
     opacity: 1
   }
 );
+const MULTI_DAY_LABEL_PANE = "multiDayLabelPane";
+const MULTI_DAY_LABEL_HARD_LIMIT = 12000;
+const multiDayLabelPane = map.createPane(MULTI_DAY_LABEL_PANE);
+if (multiDayLabelPane) {
+  multiDayLabelPane.style.zIndex = "640";
+  multiDayLabelPane.style.pointerEvents = "none";
+}
+const multiDayLabelLayerGroup = L.layerGroup().addTo(map);
+const multiDayServiceByLocation = new Map();
+const multiDayFrequencyCatalog = new Map();
+let multiDayFrequencyVisibilityByKey = new Map();
+const multiDayLabelDayCatalog = new Map();
+let multiDayLabelDayVisibilityByToken = new Map();
+let multiDayLabelFrequencyVisibilityByKey = new Map();
+let multiDayServiceEnabled = false;
+let multiDayToggleButtonRef = null;
+let multiDayManagerUiRenderer = null;
+let multiDaySidebarUiRenderer = null;
 const streetAttributeLayerGroup = L.layerGroup();
+const texasLandfillsLayerGroup = L.layerGroup();
 const streetLoadPolygonLayerGroup = new L.FeatureGroup();
 map.addLayer(streetLoadPolygonLayerGroup);
 let streetPolygonLoadPending = false;
@@ -710,6 +729,24 @@ const LOCAL_STREET_BACKEND_URL_DEFAULT = "http://127.0.0.1:8787";
 const LOCAL_STREET_BACKEND_HEALTH_TTL_MS = 12000;
 const LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS = 25000;
 const LOCAL_STREET_BACKEND_QUERY_LIMIT = 220000;
+const TEXAS_LANDFILLS_LAYER_VISIBLE_KEY = "texasLandfillsLayerVisible";
+const TEXAS_LANDFILLS_FEATURE_LAYER_URL = "https://services6.arcgis.com/MhhE5pgCPypps4To/ArcGIS/rest/services/Texas_Landfills_Web_Map/FeatureServer/0";
+const TEXAS_LANDFILLS_QUERY_URL = `${TEXAS_LANDFILLS_FEATURE_LAYER_URL}/query`;
+const TEXAS_LANDFILLS_FETCH_BATCH_SIZE = 180;
+const TEXAS_LANDFILL_MAJOR_TYPE_ALLOWLIST = new Set(["1", "1AE", "1 AE & 4 AE", "1AE & 4AE", "2"]);
+const TEXAS_LANDFILL_EXCLUDED_SITE_STATUSES = new Set(["INACTIVE", "CLOSED", "POST CLOSURE", "NOT CONSTRUCTED", "MISSING"]);
+const TEXAS_LANDFILL_EXCLUDED_CEC_STATUSES = new Set(["INACTIVE"]);
+const TEXAS_LANDFILL_EXCLUDED_LEGAL_STATUSES = new Set(["DENIED", "REVOKED", "WITHDRAWN", "RETURNED"]);
+const texasLandfillsState = {
+  loaded: false,
+  loading: false,
+  loadPromise: null,
+  featureCount: 0,
+  sourceFeatureCount: 0,
+  filteredOutCount: 0,
+  lastError: "",
+  sourceName: "Texas Landfills Web Map"
+};
 const localStreetBackendState = {
   baseUrl: LOCAL_STREET_BACKEND_URL_DEFAULT,
   available: false,
@@ -5538,15 +5575,7 @@ function setRouteDayLayerVisibilityFromManager(key, visible) {
   const routeDayCheckbox = [...document.querySelectorAll("#routeDayLayers input[data-key]")]
     .find(node => node.dataset.key === key);
   if (routeDayCheckbox) routeDayCheckbox.checked = nextVisible;
-
-  group.layers.forEach(layer => {
-    if (nextVisible) map.addLayer(layer);
-    else map.removeLayer(layer);
-  });
-
-  applyLayerManagerOrder();
-  updateSelectionCount();
-  updateStats();
+  applyFilters();
 }
 
 function setStreetNetworkLayerVisibilityFromManager(visible) {
@@ -5589,8 +5618,505 @@ function getLayerLatLng(layer) {
   return null;
 }
 
-// Used by the visualization popup window (window.opener) to focus the matching route+day on the map.
-window.highlightRouteDayOnMap = function(routeValue, dayValue) {
+function multiDaySortRank(dayToken) {
+  const normalized = normalizeDayToken(dayToken);
+  const n = Number(normalized);
+  if (Number.isFinite(n)) return n;
+  if (normalized === "delivered") return 99;
+  return 80;
+}
+
+function multiDayShortLabel(dayToken) {
+  const normalized = normalizeDayToken(dayToken);
+  const shortByDay = {
+    "1": "Mon",
+    "2": "Tue",
+    "3": "Wed",
+    "4": "Thu",
+    "5": "Fri",
+    "6": "Sat",
+    "7": "Sun",
+    delivered: "Delivered"
+  };
+  if (Object.prototype.hasOwnProperty.call(shortByDay, normalized)) return shortByDay[normalized];
+  if (!normalized) return "No Day";
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function multiDayLongLabel(dayToken) {
+  const normalized = normalizeDayToken(dayToken);
+  const longByDay = {
+    "1": "Monday",
+    "2": "Tuesday",
+    "3": "Wednesday",
+    "4": "Thursday",
+    "5": "Friday",
+    "6": "Saturday",
+    "7": "Sunday",
+    delivered: "Delivered"
+  };
+  if (Object.prototype.hasOwnProperty.call(longByDay, normalized)) return longByDay[normalized];
+  if (!normalized) return "No Day";
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function escapeMultiDayLabelText(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function normalizeMultiDayCoordinateToken(value) {
+  if (value == null) return "";
+
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (!raw) return "";
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return "";
+    if (!/[eE]/.test(raw)) {
+      let normalized = raw.replace(/^\+/, "");
+      if (normalized.includes(".")) {
+        normalized = normalized.replace(/0+$/, "").replace(/\.$/, "");
+      }
+      if (normalized === "-0") normalized = "0";
+      return normalized;
+    }
+    return String(parsed);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "";
+  if (Object.is(parsed, -0)) return "0";
+  return String(parsed);
+}
+
+function makeMultiDayLocationKey(lat, lon) {
+  const latToken = normalizeMultiDayCoordinateToken(lat);
+  const lonToken = normalizeMultiDayCoordinateToken(lon);
+  if (!latToken || !lonToken) return "";
+  return `${latToken}|${lonToken}`;
+}
+
+function buildRecordPopupContent(layer) {
+  const routeToken = String(layer?._routeToken ?? "").trim() || "-";
+  const rawDay = String(layer?._dayToken ?? "").trim();
+  const dayToken = normalizeDayToken(rawDay) || rawDay;
+  const dayLabel = dayName(dayToken) || dayToken || "No Day";
+  const serviceDetail = String(layer?._multiDayDetailLabel || "").trim();
+  const serviceLine = serviceDetail
+    ? `<div><strong>Service Frequency:</strong> ${escapeMultiDayLabelText(serviceDetail)}</div>`
+    : "";
+
+  return `
+    <div style="font-size:14px; line-height:1.4;">
+      <div><strong>Route:</strong> ${escapeMultiDayLabelText(routeToken)}</div>
+      <div><strong>Day:</strong> ${escapeMultiDayLabelText(dayLabel)}</div>
+      ${serviceLine}
+    </div>
+  `;
+}
+
+function syncRecordPopupContent(layer) {
+  if (!layer || typeof layer.bindPopup !== "function") return;
+  const popupContent = buildRecordPopupContent(layer);
+  if (typeof layer.getPopup === "function" && layer.getPopup() && typeof layer.setPopupContent === "function") {
+    layer.setPopupContent(popupContent);
+    return;
+  }
+  layer.bindPopup(popupContent);
+}
+
+function collectSortedMultiDayDayTokens(daySet) {
+  const normalizedDays = [...new Set(
+    [...(daySet || [])]
+      .map(v => normalizeDayToken(v) || String(v ?? "").trim())
+      .filter(Boolean)
+  )];
+
+  normalizedDays.sort((a, b) => {
+    const aRank = multiDaySortRank(a);
+    const bRank = multiDaySortRank(b);
+    if (aRank !== bRank) return aRank - bRank;
+    return String(a).localeCompare(String(b), undefined, { sensitivity: "base" });
+  });
+  return normalizedDays;
+}
+
+function buildMultiDayServiceSummary(daySet) {
+  const normalizedDays = collectSortedMultiDayDayTokens(daySet);
+  if (!normalizedDays.length) {
+    return { short: "No Day", detail: "No Day", dayCount: 0 };
+  }
+
+  const shortDays = normalizedDays.map(multiDayShortLabel);
+  const longDays = normalizedDays.map(multiDayLongLabel);
+  const dayCount = shortDays.length;
+
+  const short = dayCount === 1
+    ? `${shortDays[0]} only`
+    : `${shortDays.join("/")} (${dayCount}d)`;
+
+  const detail = dayCount === 1
+    ? `${longDays[0]} only`
+    : `${longDays.join(", ")} (${dayCount} days)`;
+
+  return { short, detail, dayCount, tokens: normalizedDays };
+}
+
+function buildMultiDayFrequencyKey(dayTokens) {
+  const tokens = Array.isArray(dayTokens) ? dayTokens : [];
+  return JSON.stringify(tokens);
+}
+
+function hasActiveMultiDayFrequencyFilter() {
+  if (!multiDayFrequencyVisibilityByKey.size) return false;
+  for (const visible of multiDayFrequencyVisibilityByKey.values()) {
+    if (!visible) return true;
+  }
+  return false;
+}
+
+function hasActiveMultiDayLabelFilter() {
+  if (multiDayLabelDayVisibilityByToken.size) {
+    for (const visible of multiDayLabelDayVisibilityByToken.values()) {
+      if (!visible) return true;
+    }
+  }
+  if (multiDayLabelFrequencyVisibilityByKey.size) {
+    for (const visible of multiDayLabelFrequencyVisibilityByKey.values()) {
+      if (!visible) return true;
+    }
+  }
+  return false;
+}
+
+function isMultiDayFrequencyVisibleByKey(frequencyKey) {
+  if (!frequencyKey) return true;
+  if (!multiDayFrequencyVisibilityByKey.size) return true;
+  if (!multiDayFrequencyVisibilityByKey.has(frequencyKey)) return true;
+  return multiDayFrequencyVisibilityByKey.get(frequencyKey) !== false;
+}
+
+function isMultiDayLabelFrequencyVisibleByKey(frequencyKey) {
+  if (!frequencyKey) return true;
+  if (!multiDayLabelFrequencyVisibilityByKey.size) return true;
+  if (!multiDayLabelFrequencyVisibilityByKey.has(frequencyKey)) return true;
+  return multiDayLabelFrequencyVisibilityByKey.get(frequencyKey) !== false;
+}
+
+function isMultiDayLabelDayVisibleByToken(dayToken) {
+  const token = String(dayToken || "").trim();
+  if (!token) return true;
+  if (!multiDayLabelDayVisibilityByToken.size) return true;
+  if (!multiDayLabelDayVisibilityByToken.has(token)) return true;
+  return multiDayLabelDayVisibilityByToken.get(token) !== false;
+}
+
+function isMultiDayProfileVisibleByLabelFilters(profile) {
+  if (!profile) return true;
+  if (!isMultiDayLabelFrequencyVisibleByKey(profile.frequencyKey)) return false;
+  const dayTokens = Array.isArray(profile.dayTokens) ? profile.dayTokens : [];
+  for (const token of dayTokens) {
+    if (!isMultiDayLabelDayVisibleByToken(token)) return false;
+  }
+  return true;
+}
+
+function isLayerVisibleByMultiDayFrequency(layer) {
+  const frequencyKey = String(layer?._multiDayFrequencyKey || "");
+  return isMultiDayFrequencyVisibleByKey(frequencyKey);
+}
+
+function syncMultiDayFrequencyVisibilityState() {
+  const next = new Map();
+  multiDayFrequencyCatalog.forEach((entry, key) => {
+    const existing = multiDayFrequencyVisibilityByKey.has(key)
+      ? multiDayFrequencyVisibilityByKey.get(key)
+      : true;
+    next.set(key, existing !== false);
+  });
+  multiDayFrequencyVisibilityByKey = next;
+}
+
+function syncMultiDayLabelVisibilityState() {
+  const nextDayState = new Map();
+  multiDayLabelDayCatalog.forEach((entry, token) => {
+    const existing = multiDayLabelDayVisibilityByToken.has(token)
+      ? multiDayLabelDayVisibilityByToken.get(token)
+      : true;
+    nextDayState.set(token, existing !== false);
+  });
+  multiDayLabelDayVisibilityByToken = nextDayState;
+
+  const nextFrequencyState = new Map();
+  multiDayFrequencyCatalog.forEach((entry, key) => {
+    const existing = multiDayLabelFrequencyVisibilityByKey.has(key)
+      ? multiDayLabelFrequencyVisibilityByKey.get(key)
+      : true;
+    nextFrequencyState.set(key, existing !== false);
+  });
+  multiDayLabelFrequencyVisibilityByKey = nextFrequencyState;
+}
+
+function setAllMultiDayLabelDayVisibility(visible) {
+  const nextVisible = !!visible;
+  multiDayLabelDayCatalog.forEach((entry, token) => {
+    multiDayLabelDayVisibilityByToken.set(token, nextVisible);
+  });
+}
+
+function setAllMultiDayLabelFrequencyVisibility(visible) {
+  const nextVisible = !!visible;
+  multiDayFrequencyCatalog.forEach((entry, key) => {
+    multiDayLabelFrequencyVisibilityByKey.set(key, nextVisible);
+  });
+}
+
+function setMultiDayLabelDayVisibility(token, visible) {
+  const key = String(token || "").trim();
+  if (!key || !multiDayLabelDayCatalog.has(key)) return false;
+  const nextVisible = !!visible;
+  if (multiDayLabelDayVisibilityByToken.get(key) === nextVisible) return false;
+  multiDayLabelDayVisibilityByToken.set(key, nextVisible);
+  return true;
+}
+
+function setMultiDayLabelFrequencyVisibility(frequencyKey, visible) {
+  const key = String(frequencyKey || "");
+  if (!key || !multiDayFrequencyCatalog.has(key)) return false;
+  const nextVisible = !!visible;
+  if (multiDayLabelFrequencyVisibilityByKey.get(key) === nextVisible) return false;
+  multiDayLabelFrequencyVisibilityByKey.set(key, nextVisible);
+  return true;
+}
+
+function setAllMultiDayFrequencyVisibility(visible) {
+  const nextVisible = !!visible;
+  multiDayFrequencyCatalog.forEach((entry, key) => {
+    multiDayFrequencyVisibilityByKey.set(key, nextVisible);
+  });
+  syncMultiDayToggleUi();
+}
+
+function setMultiDayFrequencyVisibilityByPredicate(predicate) {
+  multiDayFrequencyCatalog.forEach((entry, key) => {
+    const keep = !!predicate(entry);
+    multiDayFrequencyVisibilityByKey.set(key, keep);
+  });
+  syncMultiDayToggleUi();
+}
+
+function setMultiDayFrequencyVisibility(frequencyKey, visible) {
+  const key = String(frequencyKey || "");
+  if (!key || !multiDayFrequencyCatalog.has(key)) return false;
+  const nextVisible = !!visible;
+  if (multiDayFrequencyVisibilityByKey.get(key) === nextVisible) return false;
+  multiDayFrequencyVisibilityByKey.set(key, nextVisible);
+  syncMultiDayToggleUi();
+  return true;
+}
+
+function getMultiDayFrequencyVisibilitySummary() {
+  let totalFreq = 0;
+  let visibleFreq = 0;
+  let totalRecords = 0;
+  let visibleRecords = 0;
+
+  multiDayFrequencyCatalog.forEach(entry => {
+    totalFreq += 1;
+    totalRecords += Number(entry?.recordCount) || 0;
+    if (isMultiDayFrequencyVisibleByKey(entry?.key)) {
+      visibleFreq += 1;
+      visibleRecords += Number(entry?.recordCount) || 0;
+    }
+  });
+  return { totalFreq, visibleFreq, totalRecords, visibleRecords };
+}
+
+function refreshMultiDayManagerUi() {
+  syncMultiDayToggleUi();
+  if (typeof multiDayManagerUiRenderer === "function") {
+    multiDayManagerUiRenderer();
+  }
+  if (typeof multiDaySidebarUiRenderer === "function") {
+    multiDaySidebarUiRenderer();
+  }
+}
+
+function rebuildMultiDayServiceProfilesFromMapLayers() {
+  multiDayServiceByLocation.clear();
+  multiDayFrequencyCatalog.clear();
+  multiDayLabelDayCatalog.clear();
+
+  Object.entries(routeDayGroups).forEach(([routeDayKey, group]) => {
+    const [, rawDay = ""] = String(routeDayKey || "").split("|");
+    const normalizedDay = normalizeDayToken(rawDay) || String(rawDay || "").trim() || "No Day";
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+
+    layers.forEach(layer => {
+      const baseLat = Number(layer?._base?.lat);
+      const baseLon = Number(layer?._base?.lon);
+      const latlng = Number.isFinite(baseLat) && Number.isFinite(baseLon)
+        ? L.latLng(baseLat, baseLon)
+        : getLayerLatLng(layer);
+      if (!latlng) return;
+
+      const key = makeMultiDayLocationKey(
+        layer?._multiDayLatToken ?? latlng.lat,
+        layer?._multiDayLonToken ?? latlng.lng
+      );
+      if (!key) return;
+
+      let profile = multiDayServiceByLocation.get(key);
+      if (!profile) {
+        profile = {
+          key,
+          latlng,
+          days: new Set(),
+          layers: []
+        };
+        multiDayServiceByLocation.set(key, profile);
+      }
+
+      profile.days.add(normalizedDay);
+      profile.layers.push(layer);
+      layer._multiDayLocationKey = key;
+    });
+  });
+
+  multiDayServiceByLocation.forEach(profile => {
+    const summary = buildMultiDayServiceSummary(profile.days);
+    const frequencyKey = buildMultiDayFrequencyKey(summary.tokens);
+    const dayTokens = Array.isArray(summary.tokens) ? summary.tokens : [];
+    profile.shortLabel = summary.short;
+    profile.detailLabel = summary.detail;
+    profile.dayCount = summary.dayCount;
+    profile.isMulti = summary.dayCount > 1;
+    profile.frequencyKey = frequencyKey;
+    profile.dayTokens = dayTokens;
+
+    dayTokens.forEach(token => {
+      const normalizedToken = String(token || "").trim();
+      if (!normalizedToken) return;
+      const existingDay = multiDayLabelDayCatalog.get(normalizedToken) || {
+        token: normalizedToken,
+        shortLabel: multiDayShortLabel(normalizedToken),
+        detailLabel: multiDayLongLabel(normalizedToken),
+        locationCount: 0,
+        recordCount: 0
+      };
+      existingDay.locationCount += 1;
+      existingDay.recordCount += profile.layers.length;
+      multiDayLabelDayCatalog.set(normalizedToken, existingDay);
+    });
+
+    if (frequencyKey) {
+      const existing = multiDayFrequencyCatalog.get(frequencyKey) || {
+        key: frequencyKey,
+        shortLabel: summary.short,
+        detailLabel: summary.detail,
+        dayCount: summary.dayCount,
+        isMulti: summary.dayCount > 1,
+        tokens: dayTokens,
+        locationCount: 0,
+        recordCount: 0
+      };
+      existing.locationCount += 1;
+      existing.recordCount += profile.layers.length;
+      multiDayFrequencyCatalog.set(frequencyKey, existing);
+    }
+
+    profile.layers.forEach(layer => {
+      layer._multiDayShortLabel = profile.shortLabel;
+      layer._multiDayDetailLabel = profile.detailLabel;
+      layer._multiDayFrequencyKey = frequencyKey;
+      syncRecordPopupContent(layer);
+    });
+  });
+
+  syncMultiDayFrequencyVisibilityState();
+  syncMultiDayLabelVisibilityState();
+  refreshMultiDayManagerUi();
+}
+
+function syncMultiDayToggleUi() {
+  if (!multiDayToggleButtonRef) return;
+  const frequencyFilterActive = hasActiveMultiDayFrequencyFilter();
+  const labelFilterActive = hasActiveMultiDayLabelFilter();
+  const filterActive = frequencyFilterActive || labelFilterActive;
+  const buttonActive = multiDayServiceEnabled || filterActive;
+  multiDayToggleButtonRef.classList.toggle("active", buttonActive);
+  multiDayToggleButtonRef.setAttribute("aria-pressed", multiDayServiceEnabled ? "true" : "false");
+  if (multiDayServiceEnabled && filterActive) {
+    multiDayToggleButtonRef.title = "Multi-Day labels are on and filters are active.";
+  } else if (multiDayServiceEnabled) {
+    multiDayToggleButtonRef.title = "Multi-Day labels are on.";
+  } else if (filterActive) {
+    multiDayToggleButtonRef.title = "Multi-Day filters are active.";
+  } else {
+    multiDayToggleButtonRef.title = "Open Multi-Day manager.";
+  }
+}
+
+function renderMultiDayServiceLabels() {
+  multiDayLabelLayerGroup.clearLayers();
+  if (!multiDayServiceEnabled) return;
+  if (!multiDayServiceByLocation.size) return;
+
+  const bounds = map.getBounds();
+  let labelCount = 0;
+  const orderedProfiles = [...multiDayServiceByLocation.values()].sort((a, b) => {
+    if (b.dayCount !== a.dayCount) return b.dayCount - a.dayCount;
+    return String(a.shortLabel || "").localeCompare(String(b.shortLabel || ""), undefined, { sensitivity: "base" });
+  });
+
+  orderedProfiles.forEach(profile => {
+    if (labelCount >= MULTI_DAY_LABEL_HARD_LIMIT) return;
+    if (!isMultiDayProfileVisibleByLabelFilters(profile)) return;
+    const visibleLayer = profile.layers.find(layer => map.hasLayer(layer));
+    if (!visibleLayer) return;
+
+    const latlng = getLayerLatLng(visibleLayer) || profile.latlng;
+    if (!latlng || !bounds.contains(latlng)) return;
+    const text = profile.shortLabel || "";
+    if (!text) return;
+
+    const icon = L.divIcon({
+      className: "multiday-service-label-icon",
+      html: `<span class="multiday-service-label-chip ${profile.isMulti ? "multi" : "single"}">${escapeMultiDayLabelText(text)}</span>`,
+      iconSize: [0, 0],
+      iconAnchor: [0, 0]
+    });
+    const marker = L.marker(latlng, {
+      icon,
+      interactive: false,
+      keyboard: false,
+      pane: MULTI_DAY_LABEL_PANE,
+      zIndexOffset: 2000
+    });
+    multiDayLabelLayerGroup.addLayer(marker);
+    labelCount += 1;
+  });
+}
+
+function setMultiDayServiceEnabled(enabled) {
+  multiDayServiceEnabled = !!enabled;
+  syncMultiDayToggleUi();
+  renderMultiDayServiceLabels();
+  refreshMultiDayManagerUi();
+}
+
+// Used by summary interactions (and visualization popup) to focus the matching route+day on the map.
+window.highlightRouteDayOnMap = function(routeValue, dayValue, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const selectRecords = !!opts.selectRecords;
+  const flash = Object.prototype.hasOwnProperty.call(opts, "flash")
+    ? !!opts.flash
+    : !selectRecords;
+  const shouldFitBounds = opts.fitBounds !== false;
+
   const routeToken = String(routeValue ?? "").trim();
   const dayToken = normalizeDayToken(dayValue);
   if (!routeToken || !dayToken) {
@@ -5618,6 +6144,8 @@ window.highlightRouteDayOnMap = function(routeValue, dayValue) {
     return { ok: false, message: `No map points found for ${routeToken} | ${dayValue}.` };
   }
 
+  const selectedRowIds = new Set();
+
   layerVisibilityState[matchingKey] = true;
   const layerCheckbox = document.querySelector(`input[data-key="${matchingKey}"]`);
   if (layerCheckbox) layerCheckbox.checked = true;
@@ -5628,27 +6156,36 @@ window.highlightRouteDayOnMap = function(routeValue, dayValue) {
     const ll = getLayerLatLng(marker);
     if (ll) bounds.extend(ll);
 
-    const sym = symbolMap[matchingKey] || { color: "#2f89df" };
-    marker.setStyle?.({
-      color: "#ffd54a",
-      fillColor: "#ffd54a",
-      fillOpacity: 1,
-      opacity: 1,
-      weight: 2
-    });
+    const rowId = Number(marker?._rowId);
+    if (selectRecords && Number.isFinite(rowId)) selectedRowIds.add(rowId);
 
-    setTimeout(() => {
+    if (flash) {
+      const sym = symbolMap[matchingKey] || { color: "#2f89df" };
       marker.setStyle?.({
-        color: sym.color,
-        fillColor: sym.color,
-        fillOpacity: 0.95,
+        color: "#ffd54a",
+        fillColor: "#ffd54a",
+        fillOpacity: 1,
         opacity: 1,
-        weight: 1
+        weight: 2
       });
-    }, 2200);
+
+      setTimeout(() => {
+        marker.setStyle?.({
+          color: sym.color,
+          fillColor: sym.color,
+          fillOpacity: 0.95,
+          opacity: 1,
+          weight: 1
+        });
+      }, 2200);
+    }
   });
 
-  if (bounds.isValid()) {
+  if (selectRecords && selectedRowIds.size && typeof window.setAttributeSelectedRowIds === "function") {
+    window.setAttributeSelectedRowIds([...selectedRowIds]);
+  }
+
+  if (shouldFitBounds && bounds.isValid()) {
     map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
   }
 
@@ -5656,7 +6193,8 @@ window.highlightRouteDayOnMap = function(routeValue, dayValue) {
     ok: true,
     message: `Highlighted ${matchingKey} on the map.`,
     key: matchingKey,
-    points: markers.length
+    points: markers.length,
+    selectedCount: selectedRowIds.size
   };
 };
 
@@ -5844,19 +6382,37 @@ function applyFilters() {
   const routeCheckboxes = [...document.querySelectorAll("#routeCheckboxes input")];
   const dayCheckboxes   = [...document.querySelectorAll("#dayCheckboxes input")];
 
-  const routes = routeCheckboxes.filter(i => i.checked).map(i => i.value);
-  const days = dayCheckboxes.filter(i => i.checked).map(i => i.value);
+  const routeSet = new Set(routeCheckboxes.filter(i => i.checked).map(i => String(i.value)));
+  const daySet = new Set(
+    dayCheckboxes
+      .filter(i => i.checked)
+      .map(i => normalizeDayToken(i.value) || String(i.value || "").trim())
+      .filter(Boolean)
+  );
 
   Object.entries(routeDayGroups).forEach(([key, group]) => {
-    const [r, d] = key.split("|");
-    const show = routes.includes(r) && days.includes(d);
-    group.layers.forEach(l => show ? l.addTo(map) : map.removeLayer(l));
+    const [routeToken = "", rawDay = ""] = String(key || "").split("|");
+    const routeVisible = routeSet.has(routeToken);
+    const dayToken = normalizeDayToken(rawDay) || String(rawDay || "").trim();
+    const dayVisible = daySet.has(dayToken);
+    const layerToggleVisible = Object.prototype.hasOwnProperty.call(layerVisibilityState, key)
+      ? !!layerVisibilityState[key]
+      : true;
+
+    group.layers.forEach(layer => {
+      const frequencyVisible = isLayerVisibleByMultiDayFrequency(layer);
+      const show = routeVisible && dayVisible && layerToggleVisible && frequencyVisible;
+      if (show) layer.addTo(map);
+      else map.removeLayer(layer);
+    });
   });
 
   applyLayerManagerOrder();
   updateSelectionCount();
   updateStats();
   refreshLayerManagerUiIfOpen();
+  refreshMultiDayManagerUi();
+  renderMultiDayServiceLabels();
 }
 
 
@@ -5983,13 +6539,7 @@ function buildRouteDayLayerControls() {
 
     checkbox.addEventListener("change", () => {
       layerVisibilityState[key] = checkbox.checked;
-      routeDayGroups[key].layers.forEach(marker => {
-        if (checkbox.checked) map.addLayer(marker);
-        else map.removeLayer(marker);
-      });
-      applyLayerManagerOrder();
-      updateStats();
-      refreshLayerManagerUiIfOpen();
+      applyFilters();
     });
 
     const symbol = getSymbol(key);
@@ -9741,6 +10291,975 @@ function initLayerManagerControls() {
   };
 }
 
+function initMultiDayManagerControls() {
+  const openBtn = document.getElementById("multiDayToggleBtn");
+  const modal = document.getElementById("multiDayManagerModal");
+  const closeBtn = document.getElementById("multiDayManagerCloseBtn");
+  const labelsToggle = document.getElementById("multiDayLabelsToggle");
+  const showAllBtn = document.getElementById("multiDayFreqShowAllBtn");
+  const hideAllBtn = document.getElementById("multiDayFreqHideAllBtn");
+  const singleOnlyBtn = document.getElementById("multiDayFreqSingleOnlyBtn");
+  const multiOnlyBtn = document.getElementById("multiDayFreqMultiOnlyBtn");
+  const listNode = document.getElementById("multiDayFrequencyList");
+  const statusNode = document.getElementById("multiDayManagerStatus");
+
+  if (!openBtn || !modal || !closeBtn || !labelsToggle || !showAllBtn || !hideAllBtn || !singleOnlyBtn || !multiOnlyBtn || !listNode || !statusNode) {
+    return;
+  }
+  if (openBtn.dataset.multiDayBound === "1") return;
+  openBtn.dataset.multiDayBound = "1";
+  multiDayToggleButtonRef = openBtn;
+
+  const isModalOpen = () => modal.style.display === "flex";
+
+  const setStatus = message => {
+    statusNode.textContent = String(message || "");
+  };
+
+  const getSortedFrequencyEntries = () => {
+    return [...multiDayFrequencyCatalog.values()].sort((a, b) => {
+      if (!!b.isMulti !== !!a.isMulti) return b.isMulti ? 1 : -1;
+      if ((b.dayCount || 0) !== (a.dayCount || 0)) return (b.dayCount || 0) - (a.dayCount || 0);
+      return String(a.detailLabel || "").localeCompare(String(b.detailLabel || ""), undefined, { sensitivity: "base" });
+    });
+  };
+
+  const renderFrequencyList = () => {
+    listNode.innerHTML = "";
+    const entries = getSortedFrequencyEntries();
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "multiday-frequency-empty";
+      empty.textContent = "Load a route file to build service-frequency options.";
+      listNode.appendChild(empty);
+      return;
+    }
+
+    entries.forEach(entry => {
+      const row = document.createElement("div");
+      row.className = "multiday-frequency-row";
+
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = isMultiDayFrequencyVisibleByKey(entry.key);
+      input.dataset.frequencyKey = entry.key;
+
+      const main = document.createElement("span");
+      main.className = "multiday-frequency-main";
+
+      const chip = document.createElement("span");
+      chip.className = `multiday-frequency-chip ${entry.isMulti ? "multi" : "single"}`;
+      chip.textContent = entry.isMulti ? "Multi-Day" : "Single-Day";
+
+      const text = document.createElement("span");
+      text.className = "multiday-frequency-label";
+      text.textContent = entry.detailLabel || "Unknown";
+
+      const meta = document.createElement("span");
+      meta.className = "multiday-frequency-meta";
+      const locations = Number(entry.locationCount) || 0;
+      const records = Number(entry.recordCount) || 0;
+      meta.textContent = `${locations.toLocaleString()} locations | ${records.toLocaleString()} records`;
+
+      main.append(chip, text);
+      label.append(input, main, meta);
+      row.appendChild(label);
+      listNode.appendChild(row);
+    });
+  };
+
+  const refreshStatus = () => {
+    const summary = getMultiDayFrequencyVisibilitySummary();
+    if (!summary.totalFreq) {
+      setStatus("No service-frequency groups yet. Load route records to configure visibility.");
+      return;
+    }
+    if (summary.visibleFreq <= 0) {
+      setStatus(`All ${summary.totalFreq.toLocaleString()} service-frequency groups are hidden.`);
+      return;
+    }
+    if (summary.visibleFreq === summary.totalFreq) {
+      setStatus(
+        `Showing all ${summary.totalFreq.toLocaleString()} service frequencies (${summary.visibleRecords.toLocaleString()} records).`
+      );
+      return;
+    }
+    setStatus(
+      `Showing ${summary.visibleFreq.toLocaleString()} of ${summary.totalFreq.toLocaleString()} service frequencies (${summary.visibleRecords.toLocaleString()} of ${summary.totalRecords.toLocaleString()} records).`
+    );
+  };
+
+  const renderModalUi = () => {
+    labelsToggle.checked = !!multiDayServiceEnabled;
+    renderFrequencyList();
+    refreshStatus();
+  };
+
+  const openModal = () => {
+    renderModalUi();
+    modal.style.display = "flex";
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+  };
+
+  labelsToggle.addEventListener("change", () => {
+    setMultiDayServiceEnabled(labelsToggle.checked);
+  });
+
+  listNode.addEventListener("change", event => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    const key = String(input.dataset.frequencyKey || "");
+    if (!key) return;
+    if (!setMultiDayFrequencyVisibility(key, input.checked)) return;
+    applyFilters();
+    renderModalUi();
+  });
+
+  showAllBtn.addEventListener("click", () => {
+    setAllMultiDayFrequencyVisibility(true);
+    applyFilters();
+    renderModalUi();
+  });
+
+  hideAllBtn.addEventListener("click", () => {
+    setAllMultiDayFrequencyVisibility(false);
+    applyFilters();
+    renderModalUi();
+  });
+
+  singleOnlyBtn.addEventListener("click", () => {
+    setMultiDayFrequencyVisibilityByPredicate(entry => !entry.isMulti);
+    applyFilters();
+    renderModalUi();
+  });
+
+  multiOnlyBtn.addEventListener("click", () => {
+    setMultiDayFrequencyVisibilityByPredicate(entry => !!entry.isMulti);
+    applyFilters();
+    renderModalUi();
+  });
+
+  openBtn.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+
+  window.addEventListener("keydown", event => {
+    if (!isModalOpen()) return;
+    if (event.key === "Escape") closeModal();
+  });
+
+  multiDayManagerUiRenderer = () => {
+    if (!isModalOpen()) return;
+    renderModalUi();
+  };
+
+  setMultiDayServiceEnabled(false);
+  refreshMultiDayManagerUi();
+}
+
+function initServiceDayLabelLayerControls() {
+  const toggleHeader = document.getElementById("serviceDayLabelLayerToggle");
+  const content = document.getElementById("serviceDayLabelLayerContent");
+  const allBtn = document.getElementById("serviceDayLabelLayerAll");
+  const noneBtn = document.getElementById("serviceDayLabelLayerNone");
+  const daysAllBtn = document.getElementById("serviceDayLabelDaysAll");
+  const daysNoneBtn = document.getElementById("serviceDayLabelDaysNone");
+  const freqAllBtn = document.getElementById("serviceDayLabelFreqAll");
+  const freqNoneBtn = document.getElementById("serviceDayLabelFreqNone");
+  const masterToggle = document.getElementById("serviceDayLabelLayerEnabled");
+  const dayList = document.getElementById("serviceDayLabelDayFilters");
+  const frequencyList = document.getElementById("serviceDayLabelFrequencyFilters");
+
+  if (!toggleHeader || !content || !allBtn || !noneBtn || !daysAllBtn || !daysNoneBtn || !freqAllBtn || !freqNoneBtn || !masterToggle || !dayList || !frequencyList) return;
+  if (toggleHeader.dataset.serviceDayLabelBound === "1") return;
+  toggleHeader.dataset.serviceDayLabelBound = "1";
+
+  content.classList.add("collapsed");
+  toggleHeader.classList.remove("open");
+
+  const sortDayEntries = () => {
+    return [...multiDayLabelDayCatalog.values()].sort((a, b) => {
+      const rankDiff = multiDaySortRank(a?.token) - multiDaySortRank(b?.token);
+      if (rankDiff !== 0) return rankDiff;
+      return String(a?.detailLabel || "").localeCompare(String(b?.detailLabel || ""), undefined, { sensitivity: "base" });
+    });
+  };
+
+  const sortFrequencyEntries = () => {
+    return [...multiDayFrequencyCatalog.values()].sort((a, b) => {
+      if ((b?.dayCount || 0) !== (a?.dayCount || 0)) return (b?.dayCount || 0) - (a?.dayCount || 0);
+      return String(a?.detailLabel || "").localeCompare(String(b?.detailLabel || ""), undefined, { sensitivity: "base" });
+    });
+  };
+
+  const renderEmptyState = (node, text) => {
+    node.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "service-day-label-empty";
+    empty.textContent = text;
+    node.appendChild(empty);
+  };
+
+  const renderDayList = () => {
+    const entries = sortDayEntries();
+    if (!entries.length) {
+      renderEmptyState(dayList, "No service days found yet.");
+      return;
+    }
+
+    dayList.innerHTML = "";
+    entries.forEach(entry => {
+      const item = document.createElement("div");
+      item.className = "service-day-label-item";
+
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.dayToken = entry.token;
+      checkbox.checked = isMultiDayLabelDayVisibleByToken(entry.token);
+
+      const title = document.createElement("span");
+      title.className = "service-day-label-item-title";
+      title.textContent = entry.detailLabel || entry.shortLabel || entry.token;
+
+      const meta = document.createElement("span");
+      meta.className = "service-day-label-item-meta";
+      const locationCount = Number(entry.locationCount) || 0;
+      meta.textContent = `${locationCount.toLocaleString()} labels`;
+
+      label.append(checkbox, title);
+      item.append(label, meta);
+      dayList.appendChild(item);
+    });
+  };
+
+  const renderFrequencyList = () => {
+    const entries = sortFrequencyEntries();
+    if (!entries.length) {
+      renderEmptyState(frequencyList, "No service frequencies found yet.");
+      return;
+    }
+
+    frequencyList.innerHTML = "";
+    entries.forEach(entry => {
+      const item = document.createElement("div");
+      item.className = "service-day-label-item";
+
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.frequencyKey = entry.key;
+      checkbox.checked = isMultiDayLabelFrequencyVisibleByKey(entry.key);
+
+      const title = document.createElement("span");
+      title.className = "service-day-label-item-title";
+      title.textContent = entry.detailLabel || "Unknown";
+
+      const meta = document.createElement("span");
+      meta.className = "service-day-label-item-meta";
+      const locationCount = Number(entry.locationCount) || 0;
+      meta.textContent = `${locationCount.toLocaleString()} labels`;
+
+      label.append(checkbox, title);
+      item.append(label, meta);
+      frequencyList.appendChild(item);
+    });
+  };
+
+  const renderSidebarUi = () => {
+    masterToggle.checked = !!multiDayServiceEnabled;
+    renderDayList();
+    renderFrequencyList();
+  };
+
+  toggleHeader.addEventListener("click", event => {
+    if (event.target === allBtn || event.target === noneBtn) return;
+    const collapsed = content.classList.toggle("collapsed");
+    toggleHeader.classList.toggle("open", !collapsed);
+  });
+
+  allBtn.addEventListener("click", () => {
+    setMultiDayServiceEnabled(true);
+    setAllMultiDayLabelDayVisibility(true);
+    setAllMultiDayLabelFrequencyVisibility(true);
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  noneBtn.addEventListener("click", () => {
+    setMultiDayServiceEnabled(false);
+    setAllMultiDayLabelDayVisibility(false);
+    setAllMultiDayLabelFrequencyVisibility(false);
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  daysAllBtn.addEventListener("click", () => {
+    setAllMultiDayLabelDayVisibility(true);
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  daysNoneBtn.addEventListener("click", () => {
+    setAllMultiDayLabelDayVisibility(false);
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  freqAllBtn.addEventListener("click", () => {
+    setAllMultiDayLabelFrequencyVisibility(true);
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  freqNoneBtn.addEventListener("click", () => {
+    setAllMultiDayLabelFrequencyVisibility(false);
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  masterToggle.addEventListener("change", () => {
+    setMultiDayServiceEnabled(masterToggle.checked);
+  });
+
+  dayList.addEventListener("change", event => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    const token = String(input.dataset.dayToken || "").trim();
+    if (!token) return;
+    if (!setMultiDayLabelDayVisibility(token, input.checked)) return;
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  frequencyList.addEventListener("change", event => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    const key = String(input.dataset.frequencyKey || "");
+    if (!key) return;
+    if (!setMultiDayLabelFrequencyVisibility(key, input.checked)) return;
+    renderMultiDayServiceLabels();
+    refreshMultiDayManagerUi();
+  });
+
+  multiDaySidebarUiRenderer = renderSidebarUi;
+  renderSidebarUi();
+}
+
+function escapeTexasLandfillText(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function pickTexasLandfillProperty(properties, candidates) {
+  const source = properties && typeof properties === "object" ? properties : {};
+  const normalizedEntries = Object.entries(source).map(([key, value]) => ({
+    key,
+    norm: String(key || "").trim().toLowerCase().replace(/[^a-z0-9]/g, ""),
+    value
+  }));
+
+  const direct = normalizedEntries.find(entry => candidates.includes(entry.norm));
+  if (direct) return String(direct.value ?? "").trim();
+
+  const fuzzy = normalizedEntries.find(entry =>
+    candidates.some(candidate => entry.norm.includes(candidate) || candidate.includes(entry.norm))
+  );
+  return fuzzy ? String(fuzzy.value ?? "").trim() : "";
+}
+
+function normalizeTexasLandfillToken(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
+
+function formatTexasLandfillDate(raw) {
+  if (raw == null || raw === "") return "";
+  const asNumber = Number(raw);
+  if (Number.isFinite(asNumber) && asNumber > 0) {
+    const date = new Date(asNumber);
+    if (!Number.isNaN(date.getTime())) return date.toLocaleDateString();
+  }
+  const parsed = new Date(String(raw));
+  if (!Number.isNaN(parsed.getTime())) return parsed.toLocaleDateString();
+  return String(raw).trim();
+}
+
+function hasExplicitTexasLandfillAddress(properties) {
+  return !!pickTexasLandfillProperty(properties, [
+    "address",
+    "address1",
+    "address2",
+    "streetaddress",
+    "physicaladdress",
+    "locationaddress",
+    "siteaddress",
+    "mailingaddress"
+  ]);
+}
+
+function buildTexasLandfillAddressLabel(properties) {
+  const line1 = pickTexasLandfillProperty(properties, [
+    "address",
+    "address1",
+    "address2",
+    "streetaddress",
+    "physicaladdress",
+    "locationaddress",
+    "siteaddress",
+    "mailingaddress"
+  ]);
+  const city = pickTexasLandfillProperty(properties, [
+    "nearcity",
+    "city",
+    "cityname",
+    "town"
+  ]);
+  const state = pickTexasLandfillProperty(properties, ["state", "st"]) || "TX";
+  const zip = pickTexasLandfillProperty(properties, ["zip", "zipcode", "postalcode"]);
+  const county = pickTexasLandfillProperty(properties, ["county", "countyname"]);
+
+  if (line1) {
+    const locality = [city, state, zip].filter(Boolean).join(" ");
+    return [line1, locality].filter(Boolean).join(", ");
+  }
+
+  if (city || county) {
+    const regionBits = [
+      city,
+      county ? `${county} County` : "",
+      state || "TX"
+    ].filter(Boolean);
+    return regionBits.join(", ");
+  }
+
+  return "";
+}
+
+function isMajorTexasLandfillFeature(feature) {
+  const properties = feature?.properties && typeof feature.properties === "object"
+    ? feature.properties
+    : {};
+
+  const category = normalizeTexasLandfillToken(pickTexasLandfillProperty(properties, ["category"]));
+  if (category && category !== "LANDFILL") return false;
+
+  const typeCode = normalizeTexasLandfillToken(pickTexasLandfillProperty(properties, ["typecode"]));
+  if (typeCode && !TEXAS_LANDFILL_MAJOR_TYPE_ALLOWLIST.has(typeCode)) return false;
+
+  const siteStatus = normalizeTexasLandfillToken(pickTexasLandfillProperty(properties, [
+    "sitestatu",
+    "status",
+    "operatingstatus",
+    "currentstatus"
+  ]));
+  if (siteStatus && TEXAS_LANDFILL_EXCLUDED_SITE_STATUSES.has(siteStatus)) return false;
+
+  const cecStatus = normalizeTexasLandfillToken(pickTexasLandfillProperty(properties, ["cecstat"]));
+  if (cecStatus && TEXAS_LANDFILL_EXCLUDED_CEC_STATUSES.has(cecStatus)) return false;
+
+  const legalStatus = normalizeTexasLandfillToken(pickTexasLandfillProperty(properties, ["legalstat"]));
+  if (legalStatus && TEXAS_LANDFILL_EXCLUDED_LEGAL_STATUSES.has(legalStatus)) return false;
+
+  return true;
+}
+
+function buildTexasLandfillPopupContent(properties, lat = null, lon = null) {
+  const name = pickTexasLandfillProperty(properties, [
+    "sitename",
+    "facilityname",
+    "landfillname",
+    "name",
+    "facility",
+    "locationname"
+  ]) || "Landfill";
+  const category = pickTexasLandfillProperty(properties, ["category"]);
+  const typeCode = pickTexasLandfillProperty(properties, ["typecode"]);
+  const siteStatus = pickTexasLandfillProperty(properties, ["sitestatu", "status", "operatingstatus", "currentstatus"]);
+  const cecStatus = pickTexasLandfillProperty(properties, ["cecstat"]);
+  const legalStatus = pickTexasLandfillProperty(properties, ["legalstat"]);
+  const statusDate = formatTexasLandfillDate(pickTexasLandfillProperty(properties, ["statusdat", "statusdate"]));
+  const permit = pickTexasLandfillProperty(properties, ["permit", "permitnumber", "permitno", "permitid"]);
+  const rn = pickTexasLandfillProperty(properties, ["rn", "regnum", "registrationnumber"]);
+  const county = pickTexasLandfillProperty(properties, ["county", "countyname"]);
+  const nearCity = pickTexasLandfillProperty(properties, ["nearcity", "city", "cityname", "town"]);
+  const region = pickTexasLandfillProperty(properties, ["region"]);
+  const tons2017 = pickTexasLandfillProperty(properties, ["f2017tons", "tons", "annualtons"]);
+  const remainYards = pickTexasLandfillProperty(properties, ["remainyds", "remainingyards", "remainingcapacity"]);
+  const remainYears = pickTexasLandfillProperty(properties, ["remainyea", "remainingyears", "remaininglife"]);
+  const addressLabel = buildTexasLandfillAddressLabel(properties);
+  const hasAddress = hasExplicitTexasLandfillAddress(properties);
+
+  const latitude = Number.isFinite(Number(lat))
+    ? Number(lat)
+    : Number(pickTexasLandfillProperty(properties, ["latdd", "latitude"]));
+  const longitude = Number.isFinite(Number(lon))
+    ? Number(lon)
+    : Number(pickTexasLandfillProperty(properties, ["longdd", "longitude", "lon"]));
+  const coordinateText = Number.isFinite(latitude) && Number.isFinite(longitude)
+    ? `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
+    : "";
+
+  const rows = [
+    `<div><strong>${escapeTexasLandfillText(name)}</strong></div>`
+  ];
+  if (category) rows.push(`<div><strong>Category:</strong> ${escapeTexasLandfillText(category)}</div>`);
+  if (typeCode) rows.push(`<div><strong>Type:</strong> ${escapeTexasLandfillText(typeCode)}</div>`);
+  if (siteStatus) rows.push(`<div><strong>Site Status:</strong> ${escapeTexasLandfillText(siteStatus)}</div>`);
+  if (cecStatus) rows.push(`<div><strong>CEC Status:</strong> ${escapeTexasLandfillText(cecStatus)}</div>`);
+  if (legalStatus) rows.push(`<div><strong>Legal Status:</strong> ${escapeTexasLandfillText(legalStatus)}</div>`);
+  if (statusDate) rows.push(`<div><strong>Status Date:</strong> ${escapeTexasLandfillText(statusDate)}</div>`);
+  if (permit) rows.push(`<div><strong>Permit:</strong> ${escapeTexasLandfillText(permit)}</div>`);
+  if (rn) rows.push(`<div><strong>RN:</strong> ${escapeTexasLandfillText(rn)}</div>`);
+  if (addressLabel) {
+    const addressLabelTitle = hasAddress ? "Address" : "Approx. Address";
+    rows.push(`<div><strong>${addressLabelTitle}:</strong> ${escapeTexasLandfillText(addressLabel)}</div>`);
+  }
+  if (nearCity) rows.push(`<div><strong>Near City:</strong> ${escapeTexasLandfillText(nearCity)}</div>`);
+  if (county) rows.push(`<div><strong>County:</strong> ${escapeTexasLandfillText(county)}</div>`);
+  if (region) rows.push(`<div><strong>Region:</strong> ${escapeTexasLandfillText(region)}</div>`);
+  if (tons2017) rows.push(`<div><strong>2017 Tons:</strong> ${escapeTexasLandfillText(tons2017)}</div>`);
+  if (remainYards) rows.push(`<div><strong>Remaining Yards:</strong> ${escapeTexasLandfillText(remainYards)}</div>`);
+  if (remainYears) rows.push(`<div><strong>Remaining Years:</strong> ${escapeTexasLandfillText(remainYears)}</div>`);
+  if (coordinateText) rows.push(`<div><strong>Coordinates:</strong> ${escapeTexasLandfillText(coordinateText)}</div>`);
+
+  return `<div style="font-size:12px; line-height:1.35;">${rows.join("")}</div>`;
+}
+
+function createTexasLandfillMarkerIcon(properties) {
+  const typeCode = normalizeTexasLandfillToken(pickTexasLandfillProperty(properties, ["typecode"]));
+  const isMunicipalStyle = typeCode.startsWith("1");
+  const pinFill = isMunicipalStyle ? "#4f6c32" : "#6f5432";
+  const groundFill = isMunicipalStyle ? "#7f9d56" : "#8f734f";
+  const wasteFill = isMunicipalStyle ? "#5f7a45" : "#7a6343";
+  const truckFill = "#2f3742";
+  const truckWindowFill = "#d9e1ea";
+
+  const html = `
+    <span class="landfill-marker-wrap" aria-hidden="true">
+      <svg class="landfill-marker-svg" viewBox="0 0 36 46">
+        <path class="landfill-marker-pin" d="M18 1.8C10.4 1.8 4.2 8 4.2 15.6c0 10.9 10.6 19 12.8 28.8.3 1.1 1.7 1.1 2 0 2.2-9.8 12.8-17.9 12.8-28.8C31.8 8 25.6 1.8 18 1.8z" fill="${pinFill}" />
+        <circle class="landfill-marker-core" cx="18" cy="15.2" r="9.2" />
+        <path class="landfill-marker-ground" d="M8.4 20c2.4-3.2 5.8-4.8 9.6-4.8 3.8 0 7.2 1.6 9.6 4.8v3.9H8.4z" fill="${groundFill}" />
+        <path class="landfill-marker-waste" d="M10.9 18.5l2.3-2.6 2.2 1.3 2.4-2.5 2.6 2 2.3-1.3 2.5 2.9V20h-14.3z" fill="${wasteFill}" />
+        <rect class="landfill-marker-truck-bed" x="10.2" y="20.9" width="8.3" height="3.3" rx="0.8" fill="${truckFill}" />
+        <rect class="landfill-marker-truck-cab" x="18.1" y="21.3" width="3.8" height="2.9" rx="0.7" fill="${truckFill}" />
+        <rect class="landfill-marker-truck-window" x="19.1" y="21.7" width="1.9" height="1.2" rx="0.25" fill="${truckWindowFill}" />
+        <circle class="landfill-marker-wheel" cx="12.5" cy="24.8" r="1.1" />
+        <circle class="landfill-marker-wheel" cx="19.4" cy="24.8" r="1.1" />
+      </svg>
+    </span>
+  `;
+
+  return L.divIcon({
+    className: "landfill-marker-icon",
+    html,
+    iconSize: [32, 42],
+    iconAnchor: [16, 40],
+    popupAnchor: [0, -36]
+  });
+}
+
+function updateTexasLandfillsLayerStatus(message = "") {
+  const statusNode = document.getElementById("texasLandfillsLayerStatus");
+  if (!statusNode) return;
+
+  if (message) {
+    statusNode.textContent = String(message);
+    return;
+  }
+
+  const visible = map.hasLayer(texasLandfillsLayerGroup);
+  const shownCount = Number(texasLandfillsState.featureCount) || 0;
+  const sourceCount = Number(texasLandfillsState.sourceFeatureCount) || shownCount;
+  const filteredOutCount = Number(texasLandfillsState.filteredOutCount) || 0;
+  if (texasLandfillsState.loading) {
+    statusNode.textContent = "Loading Texas landfills...";
+    return;
+  }
+  if (texasLandfillsState.lastError) {
+    statusNode.textContent = `Unable to load Texas landfills: ${texasLandfillsState.lastError}`;
+    return;
+  }
+  if (visible) {
+    if (filteredOutCount > 0 && sourceCount > shownCount) {
+      statusNode.textContent = `Layer is on (${shownCount.toLocaleString()} major landfill sites shown; ${filteredOutCount.toLocaleString()} filtered out).`;
+    } else {
+      statusNode.textContent = `Layer is on (${shownCount.toLocaleString()} landfill sites).`;
+    }
+    return;
+  }
+  if (texasLandfillsState.loaded) {
+    if (filteredOutCount > 0 && sourceCount > shownCount) {
+      statusNode.textContent = `Layer is off (${shownCount.toLocaleString()} major landfill sites ready; ${filteredOutCount.toLocaleString()} filtered out).`;
+    } else {
+      statusNode.textContent = `Layer is off (${shownCount.toLocaleString()} landfill sites ready).`;
+    }
+    return;
+  }
+  statusNode.textContent = "Layer is off.";
+}
+
+function texasLandfillFeatureToMarker(feature) {
+  if (!feature || feature.type !== "Feature") return null;
+  const geometry = feature.geometry || {};
+  if (geometry.type !== "Point" || !Array.isArray(geometry.coordinates) || geometry.coordinates.length < 2) {
+    return null;
+  }
+
+  const lon = Number(geometry.coordinates[0]);
+  const lat = Number(geometry.coordinates[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const properties = feature.properties && typeof feature.properties === "object"
+    ? feature.properties
+    : {};
+  const name = pickTexasLandfillProperty(properties, [
+    "sitename",
+    "facilityname",
+    "landfillname",
+    "name",
+    "facility",
+    "locationname"
+  ]) || "Landfill";
+
+  const marker = L.marker([lat, lon], {
+    icon: createTexasLandfillMarkerIcon(properties),
+    keyboard: true,
+    title: name
+  });
+  marker.bindPopup(buildTexasLandfillPopupContent(properties, lat, lon));
+  return marker;
+}
+
+function getTexasLandfillsArcGisErrorMessage(payload) {
+  const error = payload?.error;
+  if (!error || typeof error !== "object") return "";
+  const code = Number(error.code);
+  const message = String(error.message || "").trim();
+  const details = Array.isArray(error.details)
+    ? error.details.map(v => String(v || "").trim()).filter(Boolean)
+    : [];
+
+  const parts = [];
+  if (Number.isFinite(code)) parts.push(`code ${code}`);
+  if (message) parts.push(message);
+  if (details.length) parts.push(details.join(" | "));
+  return parts.join(": ").trim();
+}
+
+async function fetchTexasLandfillsRawJson(queryParams) {
+  const params = queryParams instanceof URLSearchParams
+    ? queryParams
+    : new URLSearchParams(queryParams || {});
+  if (!params.get("f")) params.set("f", "json");
+
+  const response = await fetch(`${TEXAS_LANDFILLS_QUERY_URL}?${params.toString()}`, {
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) {
+    let extra = "";
+    try {
+      const text = await response.text();
+      const parsed = text ? JSON.parse(text) : null;
+      const serviceError = getTexasLandfillsArcGisErrorMessage(parsed);
+      if (serviceError) extra = `: ${serviceError}`;
+    } catch (_) {
+      // Ignore non-JSON response bodies.
+    }
+    throw new Error(`Landfill query failed (${response.status})${extra}`);
+  }
+
+  const payload = await response.json();
+  const serviceError = getTexasLandfillsArcGisErrorMessage(payload);
+  if (serviceError) {
+    throw new Error(serviceError);
+  }
+  return payload;
+}
+
+async function fetchTexasLandfillsObjectIds() {
+  const params = new URLSearchParams({
+    where: "1=1",
+    returnIdsOnly: "true",
+    f: "json"
+  });
+
+  const payload = await fetchTexasLandfillsRawJson(params);
+  const ids = Array.isArray(payload?.objectIds) ? payload.objectIds : [];
+  return ids
+    .map(v => Number(v))
+    .filter(v => Number.isFinite(v))
+    .sort((a, b) => a - b);
+}
+
+function convertArcGisJsonToGeoJson(payload) {
+  const rawFeatures = Array.isArray(payload?.features) ? payload.features : [];
+  const features = rawFeatures
+    .map(item => {
+      const attributes = item?.attributes && typeof item.attributes === "object" ? item.attributes : {};
+      const geom = item?.geometry || {};
+      const x = Number(geom?.x);
+      const y = Number(geom?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return {
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [x, y]
+        },
+        properties: attributes
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    type: "FeatureCollection",
+    features
+  };
+}
+
+async function fetchTexasLandfillFeaturesByIds(idChunk) {
+  const ids = Array.isArray(idChunk) ? idChunk : [];
+  if (!ids.length) {
+    return { type: "FeatureCollection", features: [] };
+  }
+
+  const queryBase = {
+    objectIds: ids.join(","),
+    outFields: "*",
+    returnGeometry: "true",
+    outSR: "4326"
+  };
+
+  const geoParams = new URLSearchParams({ ...queryBase, f: "geojson" });
+  const geoResponse = await fetch(`${TEXAS_LANDFILLS_QUERY_URL}?${geoParams.toString()}`, {
+    headers: { Accept: "application/geo+json, application/json" }
+  });
+  if (geoResponse.ok) {
+    const geoPayload = await geoResponse.json();
+    if (Array.isArray(geoPayload?.features)) return geoPayload;
+  }
+
+  const jsonParams = new URLSearchParams({ ...queryBase, f: "json" });
+  const jsonPayload = await fetchTexasLandfillsRawJson(jsonParams);
+  return convertArcGisJsonToGeoJson(jsonPayload);
+}
+
+function chunkTexasLandfillIds(ids, size) {
+  const input = Array.isArray(ids) ? ids : [];
+  const chunkSize = Math.max(1, Number(size) || 1);
+  const chunks = [];
+  for (let i = 0; i < input.length; i += chunkSize) {
+    chunks.push(input.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+async function fetchTexasLandfillsGeoJson() {
+  let objectIds = [];
+  try {
+    objectIds = await fetchTexasLandfillsObjectIds();
+  } catch (error) {
+    console.warn("Texas landfill ID lookup fallback to direct query:", error);
+  }
+
+  if (objectIds.length) {
+    const allFeatures = [];
+    const chunks = chunkTexasLandfillIds(objectIds, TEXAS_LANDFILLS_FETCH_BATCH_SIZE);
+    for (const chunk of chunks) {
+      const collection = await fetchTexasLandfillFeaturesByIds(chunk);
+      if (Array.isArray(collection?.features) && collection.features.length) {
+        allFeatures.push(...collection.features);
+      }
+    }
+    return { type: "FeatureCollection", features: allFeatures };
+  }
+
+  const jsonFallbackParams = new URLSearchParams({
+    where: "1=1",
+    outFields: "*",
+    returnGeometry: "true",
+    outSR: "4326",
+    f: "json"
+  });
+  const jsonFallbackPayload = await fetchTexasLandfillsRawJson(jsonFallbackParams);
+  const jsonFallbackCollection = convertArcGisJsonToGeoJson(jsonFallbackPayload);
+  if (Array.isArray(jsonFallbackCollection?.features) && jsonFallbackCollection.features.length) {
+    return jsonFallbackCollection;
+  }
+
+  const fallbackParams = new URLSearchParams({
+    where: "1=1",
+    outFields: "*",
+    returnGeometry: "true",
+    outSR: "4326",
+    f: "geojson"
+  });
+  const fallbackResponse = await fetch(`${TEXAS_LANDFILLS_QUERY_URL}?${fallbackParams.toString()}`, {
+    headers: { Accept: "application/geo+json, application/json" }
+  });
+  if (!fallbackResponse.ok) {
+    throw new Error(`Landfill query failed (${fallbackResponse.status})`);
+  }
+  const fallbackPayload = await fallbackResponse.json();
+  if (!Array.isArray(fallbackPayload?.features)) {
+    throw new Error("Landfill query returned no features.");
+  }
+  return fallbackPayload;
+}
+
+function loadTexasLandfillsIntoLayerGroup(collection) {
+  texasLandfillsLayerGroup.clearLayers();
+  const features = Array.isArray(collection?.features) ? collection.features : [];
+  texasLandfillsState.sourceFeatureCount = features.length;
+  let added = 0;
+  let filteredOut = 0;
+  features.forEach(feature => {
+    if (!isMajorTexasLandfillFeature(feature)) {
+      filteredOut += 1;
+      return;
+    }
+    const marker = texasLandfillFeatureToMarker(feature);
+    if (!marker) return;
+    texasLandfillsLayerGroup.addLayer(marker);
+    added += 1;
+  });
+  texasLandfillsState.filteredOutCount = filteredOut;
+  return added;
+}
+
+async function ensureTexasLandfillsLoaded() {
+  if (texasLandfillsState.loaded && texasLandfillsState.featureCount > 0) return true;
+  if (texasLandfillsState.loadPromise) return texasLandfillsState.loadPromise;
+
+  texasLandfillsState.loading = true;
+  texasLandfillsState.lastError = "";
+  updateTexasLandfillsLayerStatus("Loading Texas landfills...");
+
+  texasLandfillsState.loadPromise = (async () => {
+    try {
+      const collection = await fetchTexasLandfillsGeoJson();
+      const count = loadTexasLandfillsIntoLayerGroup(collection);
+      texasLandfillsState.featureCount = count;
+      texasLandfillsState.loaded = count > 0;
+      if (!count) {
+        texasLandfillsState.lastError = texasLandfillsState.sourceFeatureCount > 0
+          ? "No major/active landfill features matched the current filter."
+          : "No landfill features were returned.";
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.warn("Texas landfill layer load failed:", error);
+      texasLandfillsLayerGroup.clearLayers();
+      texasLandfillsState.loaded = false;
+      texasLandfillsState.featureCount = 0;
+      texasLandfillsState.sourceFeatureCount = 0;
+      texasLandfillsState.filteredOutCount = 0;
+      texasLandfillsState.lastError = error?.message || "Request failed.";
+      return false;
+    } finally {
+      texasLandfillsState.loading = false;
+      texasLandfillsState.loadPromise = null;
+    }
+  })();
+
+  const ok = await texasLandfillsState.loadPromise;
+  updateTexasLandfillsLayerStatus();
+  return ok;
+}
+
+async function setTexasLandfillsLayerEnabled(enabled, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const persist = opts.persist !== false;
+  const shouldShow = !!enabled;
+  const toggleNode = document.getElementById("texasLandfillsLayerEnabled");
+
+  if (toggleNode && toggleNode.checked !== shouldShow) {
+    toggleNode.checked = shouldShow;
+  }
+  if (persist) {
+    storageSet(TEXAS_LANDFILLS_LAYER_VISIBLE_KEY, shouldShow ? "on" : "off");
+  }
+
+  if (!shouldShow) {
+    map.removeLayer(texasLandfillsLayerGroup);
+    updateTexasLandfillsLayerStatus();
+    return;
+  }
+
+  const loaded = await ensureTexasLandfillsLoaded();
+  const stillRequested = !!document.getElementById("texasLandfillsLayerEnabled")?.checked;
+  if (!stillRequested) {
+    map.removeLayer(texasLandfillsLayerGroup);
+    updateTexasLandfillsLayerStatus();
+    return;
+  }
+
+  if (!loaded) {
+    if (toggleNode) toggleNode.checked = false;
+    storageSet(TEXAS_LANDFILLS_LAYER_VISIBLE_KEY, "off");
+    map.removeLayer(texasLandfillsLayerGroup);
+    updateTexasLandfillsLayerStatus();
+    return;
+  }
+
+  if (!map.hasLayer(texasLandfillsLayerGroup)) {
+    texasLandfillsLayerGroup.addTo(map);
+  }
+  updateTexasLandfillsLayerStatus();
+}
+
+function initTexasLandfillsLayerControls() {
+  const toggleHeader = document.getElementById("texasLandfillsLayerToggleHeader");
+  const content = document.getElementById("texasLandfillsLayerContent");
+  const masterToggle = document.getElementById("texasLandfillsLayerEnabled");
+  const statusNode = document.getElementById("texasLandfillsLayerStatus");
+  if (!toggleHeader || !content || !masterToggle || !statusNode) return;
+  if (toggleHeader.dataset.texasLandfillsBound === "1") return;
+  toggleHeader.dataset.texasLandfillsBound = "1";
+
+  content.classList.add("collapsed");
+  toggleHeader.classList.remove("open");
+
+  toggleHeader.addEventListener("click", () => {
+    const collapsed = content.classList.toggle("collapsed");
+    toggleHeader.classList.toggle("open", !collapsed);
+  });
+
+  masterToggle.addEventListener("change", () => {
+    setTexasLandfillsLayerEnabled(masterToggle.checked).catch(error => {
+      console.warn("Unable to toggle Texas landfill layer:", error);
+      updateTexasLandfillsLayerStatus("Unable to update layer visibility.");
+    });
+  });
+
+  const stored = storageGet(TEXAS_LANDFILLS_LAYER_VISIBLE_KEY);
+  const shouldShow = stored === "on";
+  masterToggle.checked = shouldShow;
+  updateTexasLandfillsLayerStatus();
+
+  if (shouldShow) {
+    setTexasLandfillsLayerEnabled(true, { persist: false }).catch(error => {
+      console.warn("Unable to restore Texas landfill layer visibility:", error);
+      updateTexasLandfillsLayerStatus("Unable to restore landfill layer.");
+    });
+  }
+}
+
 function getFilteredAttributeRows() {
   const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
   const headers = window._attributeHeaders || [];
@@ -10745,17 +12264,13 @@ const fullAddress = [
   row["CSSFUX"] || ""
 ].join(" ").replace(/\s+/g, " ").trim();
 
-// Solution Reviewer popup: route + day only.
-const popupContent = `
-  <div style="font-size:14px; line-height:1.4;">
-    <div><strong>Route:</strong> ${route || "-"}</div>
-    <div><strong>Day:</strong> ${dayName(day) || day || "-"}</div>
-  </div>
-`;
-
 const marker = createMarker(lat, lon, symbol)
-  .bindPopup(popupContent)
   .addTo(map);
+marker._routeToken = route;
+marker._dayToken = day;
+marker._multiDayLatToken = row?.LATITUDE;
+marker._multiDayLonToken = row?.LONGITUDE;
+syncRecordPopupContent(marker);
 // ===== STREET LABEL (ZOOM-BASED) =====
 const streetNumber = row["CSADR#"] ? String(row["CSADR#"]).trim() : "";
 const streetName = row["CSSTRT"] ? String(row["CSSTRT"]).trim() : "";
@@ -10786,6 +12301,7 @@ if (labelText) {
 
   buildRouteCheckboxes([...routeSet]);
   buildRouteDayLayerControls();
+  rebuildMultiDayServiceProfilesFromMapLayers();
   applyFilters();
   renderAttributeTable();
   refreshAttributeStatus();
@@ -11081,6 +12597,171 @@ function showRouteSummary(rows, headers) {
   });
   thead.appendChild(headerRow);
 
+  const normalizeSummaryHeader = value =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+
+  const normalizedHeaders = headers.map(h => ({
+    original: h,
+    norm: normalizeSummaryHeader(h)
+  }));
+
+  const findHeaderByAliases = aliases => {
+    const aliasNorms = aliases.map(normalizeSummaryHeader).filter(Boolean);
+    if (!aliasNorms.length) return null;
+
+    const direct = normalizedHeaders.find(h => aliasNorms.includes(h.norm));
+    if (direct) return direct.original;
+
+    const fuzzy = normalizedHeaders.find(h =>
+      aliasNorms.some(alias => h.norm.includes(alias) || alias.includes(h.norm))
+    );
+    return fuzzy ? fuzzy.original : null;
+  };
+
+  const routeHeader = findHeaderByAliases([
+    "route",
+    "newroute",
+    "routeid",
+    "rte",
+    "routecode"
+  ]);
+
+  const dayHeader = findHeaderByAliases([
+    "day",
+    "newday",
+    "dispatchday",
+    "serviceday",
+    "weekday"
+  ]);
+
+  const routeDayHeader = findHeaderByAliases([
+    "routeplusday",
+    "routeandday",
+    "route_day",
+    "routebyday",
+    "routewithday",
+    "route day"
+  ]);
+
+  const parseRouteDayCombinedValue = rawValue => {
+    const raw = String(rawValue ?? "").trim();
+    if (!raw) return null;
+
+    const separators = ["|", "/", "\\", " - ", "-", ":"];
+    for (const separator of separators) {
+      if (!raw.includes(separator)) continue;
+      const parts = raw
+        .split(separator)
+        .map(part => String(part).trim())
+        .filter(Boolean);
+      if (parts.length === 2) {
+        return { route: parts[0], day: parts[1] };
+      }
+    }
+
+    const trailingDayMatch = raw.match(/^(.*?)\s+(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|[1-7])$/i);
+    if (trailingDayMatch) {
+      return {
+        route: String(trailingDayMatch[1] || "").trim(),
+        day: String(trailingDayMatch[2] || "").trim()
+      };
+    }
+
+    return null;
+  };
+
+  const getRouteDayFromSummaryRow = row => {
+    let routeValue = routeHeader ? String(row?.[routeHeader] ?? "").trim() : "";
+    let dayValue = dayHeader ? String(row?.[dayHeader] ?? "").trim() : "";
+
+    if ((!routeValue || !dayValue) && routeDayHeader) {
+      const parsed = parseRouteDayCombinedValue(row?.[routeDayHeader]);
+      if (parsed) {
+        if (!routeValue) routeValue = parsed.route;
+        if (!dayValue) dayValue = parsed.day;
+      }
+    }
+
+    return { routeValue, dayValue };
+  };
+
+  const clearActiveSummaryRow = () => {
+    tbody.querySelectorAll("tr.summary-route-day-row.active").forEach(rowNode => {
+      rowNode.classList.remove("active");
+      rowNode.setAttribute("aria-selected", "false");
+    });
+  };
+
+  const activateSummaryRow = rowNode => {
+    clearActiveSummaryRow();
+    rowNode.classList.add("active");
+    rowNode.setAttribute("aria-selected", "true");
+  };
+
+  let summaryRowHoverHint = document.getElementById("summaryRowHoverHint");
+  if (!summaryRowHoverHint) {
+    summaryRowHoverHint = document.createElement("div");
+    summaryRowHoverHint.id = "summaryRowHoverHint";
+    summaryRowHoverHint.className = "summary-row-hover-hint";
+    summaryRowHoverHint.textContent = "Click to highlight and select this Route + Day";
+    document.body.appendChild(summaryRowHoverHint);
+  }
+
+  let summaryRowHoverHintTimer = null;
+  const hideSummaryRowHoverHint = (delayMs = 0) => {
+    if (summaryRowHoverHintTimer) {
+      clearTimeout(summaryRowHoverHintTimer);
+      summaryRowHoverHintTimer = null;
+    }
+    const runHide = () => summaryRowHoverHint.classList.remove("show");
+    if (delayMs > 0) {
+      summaryRowHoverHintTimer = setTimeout(runHide, delayMs);
+      return;
+    }
+    runHide();
+  };
+
+  const showSummaryRowHoverHint = (event, rowNode) => {
+    if (!summaryRowHoverHint || !rowNode) return;
+    if (summaryRowHoverHintTimer) {
+      clearTimeout(summaryRowHoverHintTimer);
+      summaryRowHoverHintTimer = null;
+    }
+
+    const rowRect = rowNode.getBoundingClientRect();
+    const anchorX = Number.isFinite(event?.clientX)
+      ? event.clientX
+      : rowRect.left + Math.min(rowRect.width * 0.6, 220);
+    const anchorY = Number.isFinite(event?.clientY)
+      ? event.clientY
+      : rowRect.top + (rowRect.height / 2);
+
+    let left = anchorX + 14;
+    let top = anchorY - 20;
+
+    summaryRowHoverHint.style.left = `${Math.round(left)}px`;
+    summaryRowHoverHint.style.top = `${Math.round(top)}px`;
+    summaryRowHoverHint.classList.add("show");
+
+    const hintRect = summaryRowHoverHint.getBoundingClientRect();
+    if (hintRect.right > window.innerWidth - 10) {
+      left = Math.max(10, anchorX - hintRect.width - 14);
+    }
+    if (hintRect.bottom > window.innerHeight - 10) {
+      top = Math.max(10, window.innerHeight - hintRect.height - 10);
+    }
+    if (hintRect.top < 10) {
+      top = 10;
+    }
+
+    summaryRowHoverHint.style.left = `${Math.round(left)}px`;
+    summaryRowHoverHint.style.top = `${Math.round(top)}px`;
+    hideSummaryRowHoverHint(1200);
+  };
+
   rows.forEach(r => {
     const tr = document.createElement("tr");
     headers.forEach(h => {
@@ -11088,6 +12769,43 @@ function showRouteSummary(rows, headers) {
       td.textContent = r[h] ?? "";
       tr.appendChild(td);
     });
+
+    const { routeValue, dayValue } = getRouteDayFromSummaryRow(r);
+    if (routeValue && dayValue) {
+      tr.classList.add("summary-route-day-row");
+      tr.setAttribute("tabindex", "0");
+      tr.setAttribute("role", "button");
+      tr.setAttribute("aria-selected", "false");
+      tr.dataset.route = routeValue;
+      tr.dataset.day = dayValue;
+      tr.setAttribute("aria-label", `Click to highlight ${routeValue} ${dayValue} on map`);
+
+      const onActivate = () => {
+        hideSummaryRowHoverHint();
+        const result = window.highlightRouteDayOnMap(routeValue, dayValue, {
+          selectRecords: true,
+          fitBounds: true
+        });
+        if (result?.ok) {
+          activateSummaryRow(tr);
+        }
+      };
+
+      tr.addEventListener("click", onActivate);
+      tr.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onActivate();
+        }
+      });
+      tr.addEventListener("mouseenter", event => {
+        showSummaryRowHoverHint(event, tr);
+      });
+      tr.addEventListener("mouseleave", () => {
+        hideSummaryRowHoverHint(180);
+      });
+    }
+
     tbody.appendChild(tr);
   });
 
@@ -11344,7 +13062,6 @@ function syncSelectionBoxTop() {
     return;
   }
 
-  // Keep sidebar fully below sticky header on desktop.
   const topOffset = headerHeight + 8;
   selectionBox.style.top = `${topOffset}px`;
   selectionBox.style.maxHeight = `calc(100vh - ${topOffset + 12}px)`;
@@ -11776,6 +13493,9 @@ window.addEventListener("resize", () => {
 syncAttributePanelLayout();
 setAttributeTableMode("records");
 renderAttributeTable();
+initMultiDayManagerControls();
+initServiceDayLabelLayerControls();
+initTexasLandfillsLayerControls();
 
 const importWizardBtn = document.getElementById("importWizardBtn");
 const importWizardBtnMobile = document.getElementById("importWizardBtnMobile");
@@ -12041,13 +13761,28 @@ if (mobileSelBtn && selectionBox) {
 
       newHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
       panel.style.height = newHeight + "px";
+
+      // If user drags upward from collapsed state, immediately reveal summary content.
+      if (panel.classList.contains("collapsed") && newHeight > minHeight + 2) {
+        panel.classList.remove("collapsed");
+        if (toggleBtn) toggleBtn.textContent = "â–¼";
+      }
     });
 
     document.addEventListener("pointerup", () => {
       if (!isDragging) return;
       isDragging = false;
       document.body.style.userSelect = "";
-      storageSet("summaryHeight", panel.offsetHeight);
+      const minHeight = 40;
+      if (panel.offsetHeight <= minHeight + 2) {
+        panel.classList.add("collapsed");
+        panel.style.height = "40px";
+        if (toggleBtn) toggleBtn.textContent = "â–²";
+      } else {
+        panel.classList.remove("collapsed");
+        if (toggleBtn) toggleBtn.textContent = "â–¼";
+        storageSet("summaryHeight", panel.offsetHeight);
+      }
 
       // Hide resize hint after first drag
       const hint = document.querySelector(".resize-hint");
@@ -12200,6 +13935,38 @@ if (toggleBtn) {
               tr:hover td {
                 background: #edf5ff;
               }
+              tr.summary-route-day-row { cursor: pointer; }
+              tr.summary-route-day-row:focus { outline: none; }
+              tr.summary-route-day-row:focus td {
+                box-shadow: inset 0 0 0 1px rgba(105, 188, 255, 0.82);
+              }
+              tr.summary-route-day-row.active td {
+                background: rgba(255, 213, 74, 0.27);
+                box-shadow: inset 0 0 0 1px rgba(236, 168, 32, 0.58);
+              }
+              .summary-row-hover-hint {
+                position: fixed;
+                z-index: 2200;
+                pointer-events: none;
+                max-width: min(320px, calc(100vw - 20px));
+                padding: 8px 12px;
+                border-radius: 11px;
+                border: 1px solid rgba(96, 135, 171, 0.72);
+                background: linear-gradient(160deg, rgba(25, 40, 56, 0.96) 0%, rgba(19, 31, 44, 0.96) 100%);
+                color: #e9f5ff;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.01em;
+                box-shadow: 0 12px 28px rgba(8, 16, 24, 0.48);
+                backdrop-filter: blur(6px);
+                opacity: 0;
+                transform: translateY(6px) scale(0.98);
+                transition: opacity 0.18s ease, transform 0.18s ease;
+              }
+              .summary-row-hover-hint.show {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+              }
               th:first-child, td:first-child { border-left: 1px solid var(--line); }
             </style>
           </head>
@@ -12225,6 +13992,191 @@ if (toggleBtn) {
                 } catch (e) {}
                 window.location.href = ${JSON.stringify(mapUrl)};
               }
+
+              (function initSummaryRowInteractions() {
+                const rowCandidates = Array.from(document.querySelectorAll("tbody tr"));
+                if (!rowCandidates.length) return;
+
+                const normalizeHeader = value =>
+                  String(value || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]/g, "");
+
+                const headerNodes = Array.from(document.querySelectorAll("thead th"));
+                const headerNorms = headerNodes.map(th => normalizeHeader(th.textContent));
+
+                const findIndexByAliases = aliases => {
+                  const aliasNorms = aliases.map(normalizeHeader).filter(Boolean);
+                  if (!aliasNorms.length) return -1;
+                  const direct = headerNorms.findIndex(norm => aliasNorms.includes(norm));
+                  if (direct >= 0) return direct;
+                  return headerNorms.findIndex(norm =>
+                    aliasNorms.some(alias => norm.includes(alias) || alias.includes(norm))
+                  );
+                };
+
+                const routeIndex = findIndexByAliases(["route", "newroute", "routeid", "rte", "routecode"]);
+                const dayIndex = findIndexByAliases(["day", "newday", "dispatchday", "serviceday", "weekday"]);
+                const routeDayIndex = findIndexByAliases(["routeplusday", "routeandday", "route_day", "routebyday", "routewithday", "route day"]);
+
+                const parseCombinedRouteDay = value => {
+                  const raw = String(value || "").trim();
+                  if (!raw) return null;
+                  const separators = ["|", "/", "\\\\", " - ", "-", ":"];
+                  for (const separator of separators) {
+                    if (!raw.includes(separator)) continue;
+                    const parts = raw.split(separator).map(part => String(part).trim()).filter(Boolean);
+                    if (parts.length === 2) {
+                      return { route: parts[0], day: parts[1] };
+                    }
+                  }
+                  const trailingDay = raw.match(/^(.*?)\\s+(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|[1-7])$/i);
+                  if (trailingDay) {
+                    return {
+                      route: String(trailingDay[1] || "").trim(),
+                      day: String(trailingDay[2] || "").trim()
+                    };
+                  }
+                  return null;
+                };
+
+                const resolveRowRouteDay = row => {
+                  let route = String(row.dataset.route || "").trim();
+                  let day = String(row.dataset.day || "").trim();
+                  const cells = row.cells || [];
+
+                  if (!route && routeIndex >= 0 && cells[routeIndex]) {
+                    route = String(cells[routeIndex].textContent || "").trim();
+                  }
+                  if (!day && dayIndex >= 0 && cells[dayIndex]) {
+                    day = String(cells[dayIndex].textContent || "").trim();
+                  }
+                  if ((!route || !day) && routeDayIndex >= 0 && cells[routeDayIndex]) {
+                    const parsed = parseCombinedRouteDay(cells[routeDayIndex].textContent);
+                    if (parsed) {
+                      if (!route) route = parsed.route;
+                      if (!day) day = parsed.day;
+                    }
+                  }
+                  return { route, day };
+                };
+
+                const rows = rowCandidates
+                  .map(row => {
+                    const { route, day } = resolveRowRouteDay(row);
+                    if (!route || !day) return null;
+                    row.classList.add("summary-route-day-row");
+                    row.dataset.route = route;
+                    row.dataset.day = day;
+                    return row;
+                  })
+                  .filter(Boolean);
+                if (!rows.length) return;
+
+                const clearActiveRows = () => {
+                  rows.forEach(row => {
+                    row.classList.remove("active");
+                    row.setAttribute("aria-selected", "false");
+                  });
+                };
+
+                const setActiveRow = row => {
+                  clearActiveRows();
+                  row.classList.add("active");
+                  row.setAttribute("aria-selected", "true");
+                };
+
+                const hint = document.createElement("div");
+                hint.className = "summary-row-hover-hint";
+                hint.textContent = "Click to highlight and select this Route + Day";
+                document.body.appendChild(hint);
+
+                let hintTimer = null;
+                const hideHint = (delayMs = 0) => {
+                  if (hintTimer) {
+                    clearTimeout(hintTimer);
+                    hintTimer = null;
+                  }
+                  const run = () => hint.classList.remove("show");
+                  if (delayMs > 0) {
+                    hintTimer = setTimeout(run, delayMs);
+                    return;
+                  }
+                  run();
+                };
+
+                const showHint = (event, row) => {
+                  if (hintTimer) {
+                    clearTimeout(hintTimer);
+                    hintTimer = null;
+                  }
+                  const rowRect = row.getBoundingClientRect();
+                  const anchorX = Number.isFinite(event?.clientX)
+                    ? event.clientX
+                    : rowRect.left + Math.min(rowRect.width * 0.6, 220);
+                  const anchorY = Number.isFinite(event?.clientY)
+                    ? event.clientY
+                    : rowRect.top + (rowRect.height / 2);
+
+                  let left = anchorX + 14;
+                  let top = anchorY - 20;
+                  hint.style.left = Math.round(left) + "px";
+                  hint.style.top = Math.round(top) + "px";
+                  hint.classList.add("show");
+
+                  const hintRect = hint.getBoundingClientRect();
+                  if (hintRect.right > window.innerWidth - 10) {
+                    left = Math.max(10, anchorX - hintRect.width - 14);
+                  }
+                  if (hintRect.bottom > window.innerHeight - 10) {
+                    top = Math.max(10, window.innerHeight - hintRect.height - 10);
+                  }
+                  if (hintRect.top < 10) {
+                    top = 10;
+                  }
+
+                  hint.style.left = Math.round(left) + "px";
+                  hint.style.top = Math.round(top) + "px";
+                  hideHint(1200);
+                };
+
+                const activateRow = row => {
+                  hideHint();
+                  const { route, day } = resolveRowRouteDay(row);
+                  if (!route || !day) return;
+
+                  const mapWindow = window.opener && !window.opener.closed ? window.opener : null;
+                  if (!mapWindow || typeof mapWindow.highlightRouteDayOnMap !== "function") return;
+
+                  let result = null;
+                  try {
+                    result = mapWindow.highlightRouteDayOnMap(route, day, {
+                      selectRecords: true,
+                      fitBounds: true
+                    });
+                  } catch (_) {
+                    return;
+                  }
+                  if (result && result.ok) setActiveRow(row);
+                };
+
+                rows.forEach(row => {
+                  row.setAttribute("tabindex", row.getAttribute("tabindex") || "0");
+                  row.setAttribute("role", "button");
+                  row.setAttribute("aria-selected", row.classList.contains("active") ? "true" : "false");
+
+                  row.addEventListener("click", () => activateRow(row));
+                  row.addEventListener("keydown", event => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      activateRow(row);
+                    }
+                  });
+                  row.addEventListener("mouseenter", event => showHint(event, row));
+                  row.addEventListener("mouseleave", () => hideHint(180));
+                });
+              })();
             </script>
           </body>
         </html>
@@ -12323,7 +14275,7 @@ if (toggleBtn) {
         { key: "facilityTime", label: "Facility Time", aliases: ["facilitytime", "totfacilitytime", "totalfacilitytime"] },
         { key: "totalTime", label: "Total Time", aliases: ["totaltime", "totalroutetime", "routetime", "hours"] },
         { key: "miles", label: "Miles", aliases: ["miles", "totalmiles", "route miles", "distance", "distancemiles"] },
-        { key: "demand", label: "Demand", aliases: ["demand", "totaldemand", "volume", "load"] },
+        { key: "demand", label: "Demand (Tons)", aliases: ["demand", "totaldemand", "volume", "load", "tons", "tonnage", "totaltons"] },
         { key: "trips", label: "Number of Trips", aliases: ["numberoftrips", "trips", "tripcount", "totaltrips"] }
       ];
 
@@ -12409,27 +14361,206 @@ if (toggleBtn) {
       });
 
       const dayTotals = Array.from(dayTotalsMap.values()).sort((a, b) => b.routeDayCount - a.routeDayCount);
+      const demandUnitLabel = "Tons";
 
-      function makeBars(items, labelKey, valueKey, alt, kind) {
-        if (!items.length) return '<div class="empty">No data available.</div>';
-        const max = Math.max(1, ...items.map(i => i[valueKey]));
-        return items
+      function makeBars(items, labelKey, valueKey, alt, kind, options = {}) {
+        const config = options && typeof options === "object" ? options : {};
+        const emptyMessage = String(config.emptyMessage || "No data available.");
+        const requirePositive = !!config.requirePositive;
+        const rows = Array.isArray(items) ? items : [];
+
+        if (!rows.length) return `<div class="empty">${escapeHtml(emptyMessage)}</div>`;
+
+        const values = rows.map(i => Number(i?.[valueKey]) || 0);
+        if (requirePositive && !values.some(v => v > 0)) {
+          return `<div class="empty">${escapeHtml(emptyMessage)}</div>`;
+        }
+
+        const max = Math.max(1, ...values);
+        return rows
           .slice()
-          .sort((a, b) => b[valueKey] - a[valueKey])
+          .sort((a, b) => (Number(b?.[valueKey]) || 0) - (Number(a?.[valueKey]) || 0))
           .map(i => `
             <div class="bar-row section-route-row" data-kind="${escapeHtml(kind || "")}" data-key="${encodeURIComponent(String(i[labelKey] ?? ""))}">
               <div class="bar-label">${escapeHtml(i[labelKey])}</div>
-              <div class="bar-track ${alt ? "alt" : ""}"><div class="bar-fill ${alt ? "alt" : ""}" style="width:${(i[valueKey] / max) * 100}%"></div></div>
-              <div class="bar-value">${i[valueKey].toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+              <div class="bar-track ${alt ? "alt" : ""}"><div class="bar-fill ${alt ? "alt" : ""}" style="width:${((Number(i?.[valueKey]) || 0) / max) * 100}%"></div></div>
+              <div class="bar-value">${(Number(i?.[valueKey]) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
             </div>
           `)
           .join("");
       }
 
-      const dayDemandBars = makeBars(dayTotals, "day", "demand", false, "day");
-      const dayMilesBars = makeBars(dayTotals, "day", "miles", true, "day");
-      const dayStopsBars = makeBars(dayTotals, "day", "stops", false, "day");
-      const dayTripsBars = makeBars(dayTotals, "day", "trips", true, "day");
+      const demandAliases = [
+        "demand",
+        "totaldemand",
+        "volume",
+        "load",
+        "tons",
+        "tonnage",
+        "totaltons",
+        "tonsweek"
+      ];
+
+      function resolveMapDemandField(sourceRows) {
+        const aliasNorms = demandAliases.map(alias => normalize(alias)).filter(Boolean);
+        const scores = new Map();
+        (sourceRows || []).slice(0, 120).forEach(row => {
+          Object.keys(row || {}).forEach(rawKey => {
+            const norm = normalize(rawKey);
+            if (!norm) return;
+            let score = 0;
+            aliasNorms.forEach(aliasNorm => {
+              if (norm === aliasNorm) score = Math.max(score, 4);
+              else if (norm.includes(aliasNorm) || aliasNorm.includes(norm)) score = Math.max(score, 2);
+            });
+            if (!score) return;
+            scores.set(rawKey, (scores.get(rawKey) || 0) + score);
+          });
+        });
+
+        let bestKey = "";
+        let bestScore = 0;
+        scores.forEach((score, key) => {
+          if (score > bestScore) {
+            bestScore = score;
+            bestKey = key;
+          }
+        });
+        return bestKey || "";
+      }
+
+      const mapRows = Array.isArray(window._currentRows) ? window._currentRows : [];
+      const mapDemandField = resolveMapDemandField(mapRows);
+
+      function readDemandTonsFromRow(row) {
+        if (!row || typeof row !== "object") return 0;
+
+        if (mapDemandField && Object.prototype.hasOwnProperty.call(row, mapDemandField)) {
+          const directValue = toNumber(row[mapDemandField]);
+          if (Number.isFinite(directValue)) return directValue;
+        }
+
+        const fallbackEntry = Object.entries(row).find(([rawKey]) => {
+          const norm = normalize(rawKey);
+          if (!norm) return false;
+          return demandAliases.some(alias => {
+            const aliasNorm = normalize(alias);
+            return norm === aliasNorm || norm.includes(aliasNorm) || aliasNorm.includes(norm);
+          });
+        });
+        if (!fallbackEntry) return 0;
+        const parsed = toNumber(fallbackEntry[1]);
+        return Number.isFinite(parsed) ? parsed : 0;
+      }
+
+      const frequencyDemandMap = new Map();
+      if (multiDayServiceByLocation && multiDayServiceByLocation.size) {
+        multiDayServiceByLocation.forEach(profile => {
+          const tokenSet = new Set(
+            Array.isArray(profile?.dayTokens) && profile.dayTokens.length
+              ? profile.dayTokens
+              : (profile?.days || [])
+          );
+          const summary = buildMultiDayServiceSummary(tokenSet);
+          const key = String(
+            profile?.frequencyKey ||
+            buildMultiDayFrequencyKey(summary.tokens || collectSortedMultiDayDayTokens(tokenSet)) ||
+            JSON.stringify(collectSortedMultiDayDayTokens(tokenSet))
+          );
+          const label = String(profile?.detailLabel || summary.detail || summary.short || "No Day").trim() || "No Day";
+          const shortLabel = String(profile?.shortLabel || summary.short || label).trim() || label;
+          const layers = Array.isArray(profile?.layers) ? profile.layers : [];
+
+          const frequencyEntry = frequencyDemandMap.get(key) || {
+            key,
+            label,
+            shortLabel,
+            demand: 0,
+            recordCount: 0,
+            locationCount: 0,
+            routeDaySet: new Set(),
+            routeNames: new Set()
+          };
+
+          let profileDemand = 0;
+          layers.forEach(layer => {
+            profileDemand += readDemandTonsFromRow(layer?._rowRef);
+            frequencyEntry.recordCount += 1;
+
+            const routeToken = String(layer?._routeToken ?? "").trim() || "Unassigned";
+            const rawDay = String(layer?._dayToken ?? "").trim();
+            const dayToken = normalizeDayToken(rawDay) || rawDay || "No Day";
+            const dayLabel = dayName(Number(dayToken)) || dayToken || "No Day";
+            frequencyEntry.routeNames.add(routeToken);
+            frequencyEntry.routeDaySet.add(`${routeToken} | ${dayLabel}`);
+          });
+
+          frequencyEntry.demand += profileDemand;
+          frequencyEntry.locationCount += 1;
+          frequencyDemandMap.set(key, frequencyEntry);
+        });
+      }
+
+      const frequencyDemandRows = Array.from(frequencyDemandMap.values())
+        .map(entry => {
+          const routeDayList = Array.from(entry.routeDaySet.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+          const routeList = Array.from(entry.routeNames.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+          const avgDemandPerStop = entry.recordCount > 0 ? (entry.demand / entry.recordCount) : 0;
+          return {
+            key: entry.key,
+            label: entry.label,
+            shortLabel: entry.shortLabel,
+            demand: entry.demand,
+            avgDemandPerStop,
+            demandSharePct: 0,
+            recordCount: entry.recordCount,
+            locationCount: entry.locationCount,
+            routeDayCount: routeDayList.length,
+            routeDayList,
+            routeList
+          };
+        })
+        .sort((a, b) => b.demand - a.demand);
+
+      const totalFrequencyDemand = frequencyDemandRows.reduce((sum, row) => sum + row.demand, 0);
+      frequencyDemandRows.forEach(row => {
+        row.demandSharePct = totalFrequencyDemand > 0
+          ? (row.demand / totalFrequencyDemand) * 100
+          : 0;
+      });
+
+      const dayDemandBars = makeBars(dayTotals, "day", "demand", false, "day", {
+        requirePositive: true,
+        emptyMessage: `No demand (${demandUnitLabel}) values were found for day totals.`
+      });
+      const demandByFrequencyBars = makeBars(frequencyDemandRows, "label", "demand", false, "frequency", {
+        requirePositive: true,
+        emptyMessage: `No service-frequency demand (${demandUnitLabel}) values are available.`
+      });
+      const demandPerStopFrequencyBars = makeBars(frequencyDemandRows, "label", "avgDemandPerStop", true, "frequency", {
+        requirePositive: true,
+        emptyMessage: `No service-frequency stop and demand values are available to compute average demand per stop.`
+      });
+      const demandShareFrequencyBars = makeBars(frequencyDemandRows, "label", "demandSharePct", true, "frequency", {
+        requirePositive: true,
+        emptyMessage: "No service-frequency demand share values are available."
+      });
+      const dayMilesBars = makeBars(dayTotals, "day", "miles", true, "day", {
+        requirePositive: true,
+        emptyMessage: "No miles values were found for day totals."
+      });
+      const dayStopsBars = makeBars(dayTotals, "day", "stops", false, "day", {
+        requirePositive: true,
+        emptyMessage: "No stops values were found for day totals."
+      });
+      const dayTripsBars = makeBars(dayTotals, "day", "trips", true, "day", {
+        requirePositive: true,
+        emptyMessage: "No trips values were found for day totals."
+      });
+      const hasFrequencyDemandRows = frequencyDemandRows.length > 0;
+      const frequencySourceNote = hasFrequencyDemandRows
+        ? `Service-frequency totals are derived from the Service Day Label layer frequency groups in the uploaded route file, and demand values are treated as ${demandUnitLabel}.`
+        : `No service-day frequency groups are available yet. Load route records first so the Service Day Label layer can be built.`;
 
       const totalDemand = routeDayRows.reduce((a, r) => a + r.demand, 0);
       const totalMiles = routeDayRows.reduce((a, r) => a + r.miles, 0);
@@ -12465,7 +14596,23 @@ if (toggleBtn) {
           day: r.day,
           stops: Number(r.stops) || 0,
           miles: Number(r.miles) || 0,
+          demand: Number(r.demand) || 0,
           totalTime: Number(r.totalTime) || 0
+        }))
+      ).replace(/</g, "\\u003c");
+      const frequencyDemandDataJson = JSON.stringify(
+        frequencyDemandRows.map(r => ({
+          key: r.key,
+          label: r.label,
+          shortLabel: r.shortLabel,
+          demand: Number(r.demand) || 0,
+          avgDemandPerStop: Number(r.avgDemandPerStop) || 0,
+          demandSharePct: Number(r.demandSharePct) || 0,
+          recordCount: Number(r.recordCount) || 0,
+          locationCount: Number(r.locationCount) || 0,
+          routeDayCount: Number(r.routeDayCount) || 0,
+          routeDayList: Array.isArray(r.routeDayList) ? r.routeDayList : [],
+          routeList: Array.isArray(r.routeList) ? r.routeList : []
         }))
       ).replace(/</g, "\\u003c");
 
@@ -12540,6 +14687,7 @@ if (toggleBtn) {
               .chart-controls { display:flex; gap:10px; flex-wrap:wrap; margin:0 0 10px 0; }
               .chart-controls label { font-size:12px; color:var(--muted); display:flex; gap:6px; align-items:center; }
               .chart-controls select, .chart-controls input { border:1px solid #c8d8e8; border-radius:8px; padding:6px 8px; font-size:12px; }
+              .metric-bars-panel.hidden { display:none; }
               .scatter-tooltip { position:fixed; pointer-events:none; background:#102a44; color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; z-index:99999; box-shadow:0 10px 24px rgba(0,0,0,.22); display:none; white-space:nowrap; }
               .chart-toast { position:fixed; right:18px; bottom:18px; z-index:99999; background:#1f7a3f; color:#fff; border-radius:10px; padding:9px 12px; font-size:12px; box-shadow:0 10px 24px rgba(0,0,0,.2); opacity:0; transform:translateY(8px); transition:opacity .2s ease, transform .2s ease; pointer-events:none; }
               .chart-toast.show { opacity:1; transform:translateY(0); }
@@ -12605,16 +14753,26 @@ if (toggleBtn) {
                 ${timeTargetBars}
               </div>
               <div class="section">
-                <h3>Distribution of Demand Per Day</h3>
-                ${dayDemandBars}
-              </div>
-              <div class="section">
-                <h3>Distribution of Miles Per Day</h3>
-                ${dayMilesBars}
-              </div>
-              <div class="section">
-                <h3>Distribution of Stops Per Day</h3>
-                ${dayStopsBars}
+                <h3>Distribution by Day</h3>
+                <div class="chart-controls">
+                  <label>Metric
+                    <select id="dayDistributionMetric">
+                      <option value="demand">Demand (${demandUnitLabel})</option>
+                      <option value="miles">Miles</option>
+                      <option value="stops">Stops</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="dayDistributionMetricNote" class="note">Demand in this dashboard is interpreted as ${demandUnitLabel}.</p>
+                <div id="dayDistributionDemandPanel" class="metric-bars-panel">
+                  ${dayDemandBars}
+                </div>
+                <div id="dayDistributionMilesPanel" class="metric-bars-panel hidden">
+                  ${dayMilesBars}
+                </div>
+                <div id="dayDistributionStopsPanel" class="metric-bars-panel hidden">
+                  ${dayStopsBars}
+                </div>
               </div>
               <div class="section">
                 <h3>Distribution of Trips Per Day</h3>
@@ -12624,7 +14782,7 @@ if (toggleBtn) {
                 <h3>Route + Day Detail</h3>
                 <p class="note">Each row below is grouped by route and day to make day-level performance easier to interpret.</p>
                 ${missingFields.length ? `<p class="note">Missing in this file: ${escapeHtml(missingFields.join(", "))}</p>` : ""}
-                <p class="note">Totals: Stops ${totalStops.toLocaleString(undefined, { maximumFractionDigits: 2 })}, Demand ${totalDemand.toLocaleString(undefined, { maximumFractionDigits: 2 })}, Miles ${totalMiles.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                <p class="note">Totals: Stops ${totalStops.toLocaleString(undefined, { maximumFractionDigits: 2 })}, Demand (${demandUnitLabel}) ${totalDemand.toLocaleString(undefined, { maximumFractionDigits: 2 })}, Miles ${totalMiles.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
                 <div class="table-wrap">
                   <table>
                     <thead>
@@ -12638,7 +14796,7 @@ if (toggleBtn) {
                         <th>Facility Time</th>
                         <th>Total Time</th>
                         <th>Miles</th>
-                        <th>Demand</th>
+                        <th>Demand (${demandUnitLabel})</th>
                         <th>Number of Trips</th>
                       </tr>
                     </thead>
@@ -12674,12 +14832,21 @@ if (toggleBtn) {
 
               (() => {
                 const data = ${scatterDataJson};
+                const frequencyRows = ${frequencyDemandDataJson};
                 const host = document.getElementById("stopsMilesScatterHost");
                 const tooltip = document.getElementById("scatterTooltip");
                 const chartToast = document.getElementById("chartToast");
                 const dayFilter = document.getElementById("scatterDayFilter");
                 const overOnly = document.getElementById("scatterOverOnly");
                 const targetHours = ${targetHours};
+                const demandUnitLabel = ${JSON.stringify(demandUnitLabel)};
+                const dayDistributionMetric = document.getElementById("dayDistributionMetric");
+                const dayDistributionMetricNote = document.getElementById("dayDistributionMetricNote");
+                const dayDistributionPanels = {
+                  demand: document.getElementById("dayDistributionDemandPanel"),
+                  miles: document.getElementById("dayDistributionMilesPanel"),
+                  stops: document.getElementById("dayDistributionStopsPanel")
+                };
                 const sectionRows = Array.from(document.querySelectorAll(".section-route-row"));
                 const modal = document.getElementById("sectionRouteDayModal");
                 const modalTitle = document.getElementById("sectionRouteDayTitle");
@@ -12704,8 +14871,20 @@ if (toggleBtn) {
                     modalList.innerHTML = sorted.map(r =>
                       "<li><strong>" + escapeHtmlLocal(r.routeDay) + "</strong> - Stops: " + Number(r.stops || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) +
                       ", Miles: " + Number(r.miles || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) +
+                      ", Demand: " + Number(r.demand || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + " " + demandUnitLabel +
                       ", Time: " + Number(r.totalTime || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + "h</li>"
                     ).join("");
+                  }
+                  modal.classList.remove("hidden");
+                }
+
+                function openSimpleListModal(title, lines) {
+                  modalTitle.textContent = title;
+                  const items = Array.isArray(lines) ? lines : [];
+                  if (!items.length) {
+                    modalList.innerHTML = "<li>No entries found.</li>";
+                  } else {
+                    modalList.innerHTML = items.map(line => "<li>" + escapeHtmlLocal(line) + "</li>").join("");
                   }
                   modal.classList.remove("hidden");
                 }
@@ -12724,8 +14903,32 @@ if (toggleBtn) {
                   }, 1900);
                 }
 
-                modalClose.addEventListener("click", closeRouteDayModal);
-                modal.addEventListener("click", e => {
+                function updateDayDistributionMetricView() {
+                  const metric = (dayDistributionMetric && dayDistributionMetric.value) || "demand";
+                  Object.entries(dayDistributionPanels).forEach(([key, panel]) => {
+                    if (!panel) return;
+                    panel.classList.toggle("hidden", key !== metric);
+                  });
+
+                  if (!dayDistributionMetricNote) return;
+                  if (metric === "demand") {
+                    dayDistributionMetricNote.textContent = "Demand in this dashboard is interpreted as " + demandUnitLabel + ".";
+                    return;
+                  }
+                  if (metric === "miles") {
+                    dayDistributionMetricNote.textContent = "Miles are total route miles grouped by day.";
+                    return;
+                  }
+                  dayDistributionMetricNote.textContent = "Stops are total stop counts grouped by day.";
+                }
+
+                if (dayDistributionMetric) {
+                  dayDistributionMetric.addEventListener("change", updateDayDistributionMetricView);
+                }
+                updateDayDistributionMetricView();
+
+                modalClose?.addEventListener("click", closeRouteDayModal);
+                modal?.addEventListener("click", e => {
                   if (e.target === modal) closeRouteDayModal();
                 });
 
@@ -12745,28 +14948,73 @@ if (toggleBtn) {
                       const isOverBucket = key.toLowerCase().startsWith("over ");
                       const matched = data.filter(d => isOverBucket ? Number(d.totalTime) > targetHours : Number(d.totalTime) <= targetHours);
                       openRouteDayModal("Route+Day entries: " + key, matched);
+                      return;
+                    }
+
+                    if (kind === "frequency") {
+                      const matchedFrequency = frequencyRows.find(item => String(item.label || "") === key);
+                      if (!matchedFrequency) {
+                        openSimpleListModal("Service Frequency", ["No matching service-frequency details found."]);
+                        return;
+                      }
+
+                      const detailLines = [
+                        "Total demand: " + Number(matchedFrequency.demand || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + " " + demandUnitLabel,
+                        "Average demand per stop: " + Number(matchedFrequency.avgDemandPerStop || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + " " + demandUnitLabel,
+                        "Demand share: " + Number(matchedFrequency.demandSharePct || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%",
+                        "Records in frequency: " + Number(matchedFrequency.recordCount || 0).toLocaleString(),
+                        "Locations in frequency: " + Number(matchedFrequency.locationCount || 0).toLocaleString(),
+                        "Route+Day combinations: " + Number(matchedFrequency.routeDayCount || 0).toLocaleString()
+                      ];
+
+                      const routeLines = (Array.isArray(matchedFrequency.routeList) ? matchedFrequency.routeList : [])
+                        .slice()
+                        .sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: "base" }))
+                        .map(route => "Route: " + String(route || ""));
+
+                      const routeDayLines = (Array.isArray(matchedFrequency.routeDayList) ? matchedFrequency.routeDayList : [])
+                        .slice()
+                        .sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: "base" }))
+                        .map(routeDay => "Route+Day: " + String(routeDay || ""));
+
+                      openSimpleListModal(
+                        "Service Frequency: " + (matchedFrequency.shortLabel || matchedFrequency.label || key),
+                        detailLines.concat(routeLines, routeDayLines)
+                      );
                     }
                   });
                 });
 
                 const days = Array.from(new Set(data.map(d => String(d.day || "").trim()).filter(Boolean))).sort();
-                days.forEach(day => {
-                  const opt = document.createElement("option");
-                  opt.value = day;
-                  opt.textContent = day;
-                  dayFilter.appendChild(opt);
-                });
+                if (dayFilter) {
+                  days.forEach(day => {
+                    const opt = document.createElement("option");
+                    opt.value = day;
+                    opt.textContent = day;
+                    dayFilter.appendChild(opt);
+                  });
+                }
 
                 function render() {
-                  const selectedDay = dayFilter.value;
+                  const selectedDay = dayFilter ? dayFilter.value : "all";
                   const filtered = data.filter(d => {
                     if (selectedDay !== "all" && String(d.day) !== selectedDay) return false;
-                    if (overOnly.checked && !(d.totalTime > targetHours)) return false;
+                    if (overOnly && overOnly.checked && !(d.totalTime > targetHours)) return false;
                     return true;
                   });
 
                   if (!filtered.length) {
                     host.innerHTML = '<div class="empty">No points match the selected filters.</div>';
+                    return;
+                  }
+
+                  const hasStopsMilesSignal = filtered.some(p => {
+                    const stops = Number(p?.stops) || 0;
+                    const miles = Number(p?.miles) || 0;
+                    return stops > 0 || miles > 0;
+                  });
+                  if (!hasStopsMilesSignal) {
+                    host.innerHTML = '<div class="empty">No stops/miles values were found in the loaded summary, so this scatter chart cannot be drawn.</div>';
                     return;
                   }
 
@@ -12797,9 +15045,9 @@ if (toggleBtn) {
                       '<text x="' + (padL - 8) + '" y="' + (py + 4) + '" text-anchor="end" fill="#627d97" font-size="11">' + val.toFixed(0) + '</text>';
                   }).join("");
 
-                  const circles = filtered.map((p, idx) => {
+                  const circles = filtered.map(p => {
                     const color = p.totalTime > targetHours ? "#e25b53" : "#2f89df";
-                    const info = (String(p.routeDay || "") + " | Stops: " + p.stops.toFixed(2) + " | Miles: " + p.miles.toFixed(2) + " | Total Time: " + p.totalTime.toFixed(2) + "h")
+                    const info = (String(p.routeDay || "") + " | Stops: " + p.stops.toFixed(2) + " | Miles: " + p.miles.toFixed(2) + " | Demand: " + p.demand.toFixed(2) + " " + demandUnitLabel + " | Total Time: " + p.totalTime.toFixed(2) + "h")
                       .replace(/&/g, "&amp;")
                       .replace(/</g, "&lt;")
                       .replace(/>/g, "&gt;");
@@ -12854,8 +15102,8 @@ if (toggleBtn) {
                   });
                 }
 
-                dayFilter.addEventListener("change", render);
-                overOnly.addEventListener("change", render);
+                dayFilter?.addEventListener("change", render);
+                overOnly?.addEventListener("change", render);
                 render();
               })();
             </script>
@@ -12896,6 +15144,8 @@ if (resetBtn) {
 
     // 7. Reset bounds tracker
     globalBounds = L.latLngBounds();
+    rebuildMultiDayServiceProfilesFromMapLayers();
+    renderMultiDayServiceLabels();
 
     // 8. Clear bottom summary
     const summary = document.getElementById("routeSummaryTable");
@@ -13134,6 +15384,12 @@ if (layer._hasStreetLabel) {
 
     });
   });
+
+  renderMultiDayServiceLabels();
+});
+
+map.on("moveend", () => {
+  renderMultiDayServiceLabels();
 });
 
   
@@ -13168,122 +15424,415 @@ if (streetToggle) {
 }
   
 ////////////////////////////////////////////////////////////////////
-// 🔍 MAP ADDRESS SEARCH (PASTE RIGHT BELOW STREET TOGGLE)
+// TEXAS LOCATOR (COORDINATES + ADDRESS + PLACE SEARCH)
 ////////////////////////////////////////////////////////////////////
 
 const searchInput = document.getElementById("mapSearchInput");
-const searchBtn   = document.getElementById("mapSearchBtn");
+const searchBtn = document.getElementById("mapSearchBtn");
+const TEXAS_LOCATOR_BOUNDS = L.latLngBounds(
+  [25.8372, -106.6456], // south-west
+  [36.5007, -93.5080]   // north-east
+);
+const TEXAS_LOCATOR_VIEWBOX = "-106.6456,36.5007,-93.5080,25.8372";
+const MAP_SEARCH_MAX_LOCAL_RESULTS = 90;
+const MAP_SEARCH_MAX_GEOCODER_RESULTS = 10;
+let mapSearchFocusMarker = null;
+let mapSearchHighlightedRecord = null;
 
-function searchMapByAddress() {
+function isTexasLatLng(lat, lng) {
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return false;
+  return TEXAS_LOCATOR_BOUNDS.contains(L.latLng(latNum, lngNum));
+}
 
-  if (!searchInput) return;
-
-  const query = searchInput.value.trim().toLowerCase();
-  if (!query) return;
-
-  const resultsPanel = document.getElementById("searchResultsPanel");
-  const resultsList  = document.getElementById("searchResultsList");
-
-  resultsList.innerHTML = "";
-  let matches = [];
-
-  Object.values(routeDayGroups).forEach(group => {
-
-    group.layers.forEach(marker => {
-
-      const row = marker._rowRef;
-      if (!row) return;
-
-      const address = [
-        row["CSADR#"] || "",
-        row["CSSDIR"] || "",
-        row["CSSTRT"] || "",
-        row["CSSFUX"] || ""
-      ].join(" ").toLowerCase();
-
-      if (address.includes(query)) {
-        matches.push({ marker, row });
-      }
-
+function clearMapSearchHighlight() {
+  if (mapSearchHighlightedRecord?._base?.symbol) {
+    const sym = mapSearchHighlightedRecord._base.symbol;
+    mapSearchHighlightedRecord.setStyle?.({
+      color: sym.color,
+      fillColor: sym.color,
+      fillOpacity: 0.95,
+      opacity: 1,
+      weight: 1
     });
+  }
+  mapSearchHighlightedRecord = null;
+}
 
+function clearMapSearchFocusMarker() {
+  if (!mapSearchFocusMarker) return;
+  try {
+    map.removeLayer(mapSearchFocusMarker);
+  } catch (_) {}
+  mapSearchFocusMarker = null;
+}
+
+function clearMapSearchVisualFocus() {
+  clearMapSearchHighlight();
+  clearMapSearchFocusMarker();
+}
+
+function openSearchResultsPanel() {
+  const panel = document.getElementById("searchResultsPanel");
+  if (panel) panel.classList.remove("hidden");
+}
+
+function hideSearchResultsPanel() {
+  const panel = document.getElementById("searchResultsPanel");
+  if (panel) panel.classList.add("hidden");
+}
+
+function setSearchStatusMessage(message, isError = false) {
+  const resultsList = document.getElementById("searchResultsList");
+  if (!resultsList) return;
+  resultsList.innerHTML = "";
+  const node = document.createElement("div");
+  node.className = `search-result-status${isError ? " error" : ""}`;
+  node.textContent = String(message || "");
+  resultsList.appendChild(node);
+}
+
+function markSearchResultSelected(node) {
+  document
+    .querySelectorAll(".search-result-item")
+    .forEach(el => el.classList.remove("selected"));
+  node.classList.add("selected");
+}
+
+function buildRecordAddressLabel(row) {
+  const value = [
+    row?.["CSADR#"] || "",
+    row?.["CSSDIR"] || "",
+    row?.["CSSTRT"] || "",
+    row?.["CSSFUX"] || ""
+  ]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return value || "Unnamed stop";
+}
+
+function buildRecordSearchText(row) {
+  const preferred = [];
+  Object.entries(row || {}).forEach(([key, value]) => {
+    if (value == null || value === "") return;
+    const k = String(key || "").toLowerCase();
+    if (k === "latitude" || k === "longitude") return;
+    if (/(address|street|city|state|zip|route|day|name|account|customer|stop|id|cs)/i.test(k)) {
+      preferred.push(String(value));
+    }
+  });
+  if (preferred.length) return preferred.join(" ").toLowerCase();
+
+  return Object.values(row || {})
+    .filter(v => v != null && String(v).trim() !== "")
+    .slice(0, 30)
+    .map(v => String(v))
+    .join(" ")
+    .toLowerCase();
+}
+
+function parseCoordinateQuery(query) {
+  const parts = String(query || "").match(/[-+]?\d+(?:\.\d+)?/g);
+  if (!parts || parts.length < 2) return null;
+
+  const first = Number(parts[0]);
+  const second = Number(parts[1]);
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
+
+  const isValidLatLng = (lat, lng) => (
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 && lat <= 90 &&
+    lng >= -180 && lng <= 180
+  );
+
+  const candidates = [
+    { lat: first, lng: second, swapped: false },
+    { lat: second, lng: first, swapped: true }
+  ].filter(c => isValidLatLng(c.lat, c.lng));
+
+  if (!candidates.length) return null;
+
+  const texasCandidate = candidates.find(c => isTexasLatLng(c.lat, c.lng));
+  if (texasCandidate) return { ...texasCandidate, inTexas: true };
+  return { ...candidates[0], inTexas: false };
+}
+
+function focusRecordSearchResult(entry) {
+  const marker = entry?.marker;
+  if (!marker) return;
+
+  clearMapSearchFocusMarker();
+  if (mapSearchHighlightedRecord && mapSearchHighlightedRecord !== marker) {
+    clearMapSearchHighlight();
+  }
+
+  mapSearchHighlightedRecord = marker;
+  marker.setStyle?.({
+    color: "#ffe066",
+    fillColor: "#ffe066",
+    fillOpacity: 1,
+    opacity: 1,
+    weight: 2
   });
 
-  if (!matches.length) {
-    alert("No matching addresses found.");
+  const ll = getLayerLatLng(marker);
+  if (ll) map.setView(ll, Math.max(map.getZoom(), 17));
+  marker.openPopup?.();
+}
+
+function focusCoordinateOrGeocodeResult(entry) {
+  const lat = Number(entry?.lat);
+  const lng = Number(entry?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+  clearMapSearchHighlight();
+  clearMapSearchFocusMarker();
+
+  mapSearchFocusMarker = L.circleMarker([lat, lng], {
+    radius: 8,
+    color: "#ffd24c",
+    fillColor: "#ff8c32",
+    fillOpacity: 0.96,
+    weight: 2
+  }).addTo(map);
+
+  if (entry?.title) {
+    mapSearchFocusMarker.bindPopup(String(entry.title)).openPopup();
+  }
+
+  map.setView([lat, lng], Math.max(map.getZoom(), 16));
+}
+
+function appendSearchResultItem(container, { title, meta, type = "", onSelect }) {
+  if (!container) return;
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = `search-result-item${type ? ` ${type}` : ""}`;
+
+  const titleNode = document.createElement("div");
+  titleNode.className = "search-result-title";
+  titleNode.textContent = String(title || "Result");
+
+  const metaNode = document.createElement("div");
+  metaNode.className = "search-result-meta";
+  metaNode.textContent = String(meta || "");
+
+  node.append(titleNode, metaNode);
+  node.addEventListener("click", () => {
+    markSearchResultSelected(node);
+    onSelect?.();
+  });
+  container.appendChild(node);
+}
+
+function collectLocalTexasSearchResults(queryText) {
+  const needle = String(queryText || "").trim().toLowerCase();
+  if (!needle) return [];
+
+  const seen = new Set();
+  const matches = [];
+
+  Object.entries(routeDayGroups).forEach(([key, group]) => {
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(marker => {
+      const row = marker?._rowRef;
+      const latlng = getLayerLatLng(marker);
+      if (!row || !latlng || !isTexasLatLng(latlng.lat, latlng.lng)) return;
+
+      const address = buildRecordAddressLabel(row);
+      const searchable = `${address} ${buildRecordSearchText(row)}`;
+      if (!searchable.includes(needle)) return;
+
+      const rowId = Number(marker?._rowId);
+      const dedupeKey = Number.isFinite(rowId)
+        ? `row:${rowId}`
+        : `${latlng.lat.toFixed(7)}|${latlng.lng.toFixed(7)}|${address}`;
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+
+      const route = String(row?.NEWROUTE ?? "").trim() || "Unassigned";
+      const dayToken = normalizeDayToken(row?.NEWDAY) || String(row?.NEWDAY ?? "").trim();
+      const dayLabel = dayName(Number(dayToken)) || dayToken || "No Day";
+
+      matches.push({
+        marker,
+        row,
+        title: address,
+        meta: `Record stop - Route ${route} | ${dayLabel}`
+      });
+    });
+  });
+
+  matches.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base" }));
+  return matches.slice(0, MAP_SEARCH_MAX_LOCAL_RESULTS);
+}
+
+function buildTexasGeocoderQuery(queryText) {
+  const raw = String(queryText || "").trim();
+  if (!raw) return "";
+  if (/\btexas\b|\btx\b/i.test(raw)) return raw;
+  return `${raw}, Texas`;
+}
+
+async function fetchTexasGeocoderResults(queryText) {
+  const geocoderQuery = buildTexasGeocoderQuery(queryText);
+  if (!geocoderQuery) return [];
+
+  const params = new URLSearchParams({
+    q: geocoderQuery,
+    format: "jsonv2",
+    addressdetails: "1",
+    limit: String(MAP_SEARCH_MAX_GEOCODER_RESULTS),
+    countrycodes: "us",
+    bounded: "1",
+    viewbox: TEXAS_LOCATOR_VIEWBOX
+  });
+
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+    headers: {
+      Accept: "application/json",
+      "Accept-Language": "en-US,en"
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`Texas geocoder request failed (${response.status}).`);
+  }
+
+  const payload = await response.json();
+  const rows = Array.isArray(payload) ? payload : [];
+  const seen = new Set();
+  const results = [];
+
+  rows.forEach(item => {
+    const lat = Number(item?.lat);
+    const lng = Number(item?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (!isTexasLatLng(lat, lng)) return;
+
+    const key = `${lat.toFixed(6)}|${lng.toFixed(6)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    results.push({
+      lat,
+      lng,
+      title: String(item?.display_name || geocoderQuery).trim(),
+      meta: "Texas locator result"
+    });
+  });
+
+  return results.slice(0, MAP_SEARCH_MAX_GEOCODER_RESULTS);
+}
+
+async function searchMapByAddress() {
+  if (!searchInput) return;
+
+  const rawQuery = String(searchInput.value || "").trim();
+  if (!rawQuery) return;
+
+  openSearchResultsPanel();
+  setSearchStatusMessage("Searching Texas locations...");
+
+  const resultsList = document.getElementById("searchResultsList");
+  if (!resultsList) return;
+
+  const coordinateMatch = parseCoordinateQuery(rawQuery);
+  if (coordinateMatch) {
+    if (!coordinateMatch.inTexas) {
+      setSearchStatusMessage("Coordinates were recognized, but they are outside Texas. Texas-only search is enabled.", true);
+      return;
+    }
+    resultsList.innerHTML = "";
+    const coordText = `${coordinateMatch.lat.toFixed(6)}, ${coordinateMatch.lng.toFixed(6)}`;
+    appendSearchResultItem(resultsList, {
+      title: `Coordinates: ${coordText}`,
+      meta: coordinateMatch.swapped ? "Texas coordinate (interpreted as lon,lat input)" : "Texas coordinate",
+      type: "search-result-coordinate",
+      onSelect: () => focusCoordinateOrGeocodeResult({
+        lat: coordinateMatch.lat,
+        lng: coordinateMatch.lng,
+        title: `Texas coordinates: ${coordText}`
+      })
+    });
+    const first = resultsList.querySelector(".search-result-item");
+    first?.click();
     return;
   }
 
-  matches.forEach((item, index) => {
+  const localMatches = collectLocalTexasSearchResults(rawQuery);
+  let geocoderMatches = [];
+  let geocoderError = "";
 
-    const div = document.createElement("div");
-    div.className = "search-result-item";
+  try {
+    geocoderMatches = await fetchTexasGeocoderResults(rawQuery);
+  } catch (error) {
+    geocoderError = error?.message || "Texas geocoder is unavailable.";
+    console.warn("Texas geocoder search failed:", error);
+  }
 
-    const displayAddress = [
-      item.row["CSADR#"] || "",
-      item.row["CSSDIR"] || "",
-      item.row["CSSTRT"] || "",
-      item.row["CSSFUX"] || ""
-    ].join(" ");
+  if (!localMatches.length && !geocoderMatches.length) {
+    const fallback = geocoderError
+      ? `No Texas matches found in map records. ${geocoderError}`
+      : "No Texas matches found. Try a full address, city, ZIP, or coordinates.";
+    setSearchStatusMessage(fallback, true);
+    return;
+  }
 
-    div.textContent = displayAddress;
+  resultsList.innerHTML = "";
 
-    div.onclick = () => {
-
-      // Remove previous selected styling
-      document.querySelectorAll(".search-result-item")
-        .forEach(el => el.classList.remove("selected"));
-
-      div.classList.add("selected");
-
-      map.setView(item.marker.getLatLng(), 18);
-
-      item.marker.setStyle?.({
-        color: "#ffff00",
-        fillColor: "#ffff00",
-        fillOpacity: 1
-      });
-
-    };
-
-    resultsList.appendChild(div);
-
+  localMatches.forEach(match => {
+    appendSearchResultItem(resultsList, {
+      title: match.title,
+      meta: match.meta,
+      type: "search-result-local",
+      onSelect: () => focusRecordSearchResult(match)
+    });
   });
 
-  resultsPanel.classList.remove("hidden");
+  geocoderMatches.forEach(match => {
+    appendSearchResultItem(resultsList, {
+      title: match.title,
+      meta: match.meta,
+      type: "search-result-geocode",
+      onSelect: () => focusCoordinateOrGeocodeResult(match)
+    });
+  });
+
+  if (geocoderError && (localMatches.length || geocoderMatches.length)) {
+    const note = document.createElement("div");
+    note.className = "search-result-status";
+    note.textContent = `Note: ${geocoderError}`;
+    resultsList.appendChild(note);
+  }
+
+  const first = resultsList.querySelector(".search-result-item");
+  first?.click();
 }
-  // Hook up search button + Enter key
+
 if (searchBtn) {
   searchBtn.addEventListener("click", searchMapByAddress);
 }
 
 if (searchInput) {
-  searchInput.addEventListener("keydown", function(e) {
-    if (e.key === "Enter") {
+  searchInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
       searchMapByAddress();
     }
   });
 }
-  // ===== CLEAR SEARCH RESULTS =====
+
 const clearSearchBtn = document.getElementById("clearSearchResults");
 
 if (clearSearchBtn) {
   clearSearchBtn.addEventListener("click", () => {
-
-    // Clear search input
-    const searchInput = document.getElementById("mapSearchInput");
     if (searchInput) searchInput.value = "";
-
-    // Clear results list
     const resultsList = document.getElementById("searchResultsList");
     if (resultsList) resultsList.innerHTML = "";
-
-    // Hide results panel
-    const resultsPanel = document.getElementById("searchResultsPanel");
-    if (resultsPanel) {
-      resultsPanel.classList.add("hidden");
-    }
-
+    clearMapSearchVisualFocus();
+    hideSearchResultsPanel();
   });
 }
 ////////////////central save function

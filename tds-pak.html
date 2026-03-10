@@ -81,6 +81,10 @@
       <span class="street-attributes-icon" aria-hidden="true"></span>
       <span>Street Attributes</span>
     </button>
+    <button id="multiDayToggleBtn" class="primary-btn multiday-toggle-btn" type="button" aria-pressed="false" title="Open Multi-Day manager">
+      <span class="multiday-toggle-icon" aria-hidden="true"></span>
+      <span class="multiday-toggle-label">Multi-Day</span>
+    </button>
     <button id="selectByAttributesBtn" class="primary-btn select-attributes-btn" type="button">
       <span class="select-attributes-icon" aria-hidden="true"></span>
       <span>Select By Attributes</span>
@@ -204,21 +208,58 @@
       
     </div>
 
-<div class="map-search-container">
-  <input 
-    type="text" 
-    id="mapSearchInput" 
-    placeholder="Search by address or number"
-  />
-  <button id="mapSearchBtn">Search</button>
-</div>
-<div id="searchResultsPanel" class="search-results hidden">
-  <div class="search-results-header">
-    Search Results
-    <button id="clearSearchResults">Clear</button>
-  </div>
-  <div id="searchResultsList"></div>
-</div>
+    <div class="filter-group service-day-label-group">
+      <div class="filter-header collapsible-header" id="serviceDayLabelLayerToggle">
+        <div class="days-title">
+          <span class="arrow">▶</span>
+          <strong>Service Day Label Layer</strong>
+        </div>
+        <div class="days-buttons">
+          <button class="mini-btn" id="serviceDayLabelLayerAll" type="button">All</button>
+          <button class="mini-btn" id="serviceDayLabelLayerNone" type="button">None</button>
+        </div>
+      </div>
+      <div id="serviceDayLabelLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master">
+          <input type="checkbox" id="serviceDayLabelLayerEnabled" />
+          Show Service Day Labels
+        </label>
+        <div class="service-day-label-subhead-row">
+          <div class="service-day-label-subhead">Days</div>
+          <div class="service-day-label-sub-actions">
+            <button class="mini-btn" id="serviceDayLabelDaysAll" type="button">All</button>
+            <button class="mini-btn" id="serviceDayLabelDaysNone" type="button">None</button>
+          </div>
+        </div>
+        <div id="serviceDayLabelDayFilters" class="service-day-label-list"></div>
+        <div class="service-day-label-subhead-row">
+          <div class="service-day-label-subhead">Frequencies</div>
+          <div class="service-day-label-sub-actions">
+            <button class="mini-btn" id="serviceDayLabelFreqAll" type="button">All</button>
+            <button class="mini-btn" id="serviceDayLabelFreqNone" type="button">None</button>
+          </div>
+        </div>
+        <div id="serviceDayLabelFrequencyFilters" class="service-day-label-list"></div>
+      </div>
+    </div>
+
+    <div class="filter-group texas-landfills-group">
+      <div class="filter-header collapsible-header" id="texasLandfillsLayerToggleHeader">
+        <div class="days-title">
+          <span class="arrow">▶</span>
+          <strong>Texas Landfills Layer</strong>
+        </div>
+      </div>
+      <div id="texasLandfillsLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master texas-landfills-master">
+          <input type="checkbox" id="texasLandfillsLayerEnabled" />
+          Show Texas Landfills
+        </label>
+        <div id="texasLandfillsLayerStatus" class="service-day-label-empty texas-landfills-status">
+          Layer is off.
+        </div>
+      </div>
+    </div>
 
 <button id="resetMapBtn" class="primary-btn" aria-label="Reset map and clear selections">
       <span class="reset-map-icon" aria-hidden="true"></span>
@@ -247,6 +288,23 @@
 
    <main class="map-container">
     <div id="map"></div>
+    <div class="map-search-overlay" role="region" aria-label="Texas locator">
+      <div class="map-search-container">
+        <input 
+          type="text" 
+          id="mapSearchInput" 
+          placeholder="Search Texas by address, place, or lat/lon"
+        />
+        <button id="mapSearchBtn">Search</button>
+      </div>
+      <div id="searchResultsPanel" class="search-results hidden">
+        <div class="search-results-header">
+          Search Results
+          <button id="clearSearchResults">Clear</button>
+        </div>
+        <div id="searchResultsList"></div>
+      </div>
+    </div>
   </main>
 
   
@@ -746,6 +804,33 @@
     <div id="layerManagerStatus" class="layer-manager-status">Ready.</div>
     <div class="modal-actions">
       <button id="layerManagerCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<div id="multiDayManagerModal" class="modal">
+  <div class="modal-content multiday-manager-modal-content">
+    <div class="multiday-manager-head">
+      <h3>Multi-Day Manager</h3>
+      <p>Turn map labels on/off and control which service frequencies are visible on the map.</p>
+    </div>
+
+    <label class="multiday-manager-label-toggle">
+      <input type="checkbox" id="multiDayLabelsToggle" />
+      <span>Show Multi-Day labels on map</span>
+    </label>
+
+    <div class="multiday-manager-toolbar">
+      <button id="multiDayFreqShowAllBtn" class="mini-btn" type="button">Show All</button>
+      <button id="multiDayFreqHideAllBtn" class="mini-btn" type="button">Hide All</button>
+      <button id="multiDayFreqSingleOnlyBtn" class="mini-btn" type="button">Single-Day Only</button>
+      <button id="multiDayFreqMultiOnlyBtn" class="mini-btn" type="button">Multi-Day Only</button>
+    </div>
+
+    <div id="multiDayFrequencyList" class="multiday-frequency-list" role="group" aria-label="Service frequency visibility"></div>
+    <div id="multiDayManagerStatus" class="multiday-manager-status">All service frequencies are visible.</div>
+
+    <div class="modal-actions">
+      <button id="multiDayManagerCloseBtn" type="button">Close</button>
     </div>
   </div>
 </div>
