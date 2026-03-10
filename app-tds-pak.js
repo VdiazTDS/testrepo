@@ -10796,6 +10796,32 @@ if (labelText) {
 
 
 // ================= LIST FILES FROM CLOUD =================
+const SAVED_FILES_SORT_MODE_KEY = "savedFilesSortMode";
+
+function normalizeSavedFilesSortMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "date-desc" || mode === "date-asc" || mode === "summary-name") return mode;
+  return "summary-name";
+}
+
+function getSavedFileAddedTimestamp(file) {
+  const candidates = [
+    file?.created_at,
+    file?.createdAt,
+    file?.updated_at,
+    file?.last_accessed_at,
+    file?.metadata?.created_at,
+    file?.metadata?.updated_at,
+    file?.metadata?.lastModified
+  ];
+  for (const value of candidates) {
+    if (!value) continue;
+    const ts = Date.parse(String(value));
+    if (Number.isFinite(ts)) return ts;
+  }
+  return 0;
+}
+
 async function listFiles() {
   const { data, error } = await sb.storage.from(BUCKET).list();
   if (error) return console.error(error);
@@ -10805,99 +10831,143 @@ async function listFiles() {
   const routeFiles = data.filter(file => !isRouteSummaryFileName(file.name));
   const allFileNames = data.map(f => f.name);
   cleanupSummaryAttachments(allFileNames);
+  const sortSelect = document.getElementById("savedFilesSortSelect");
+  const storedSortMode = normalizeSavedFilesSortMode(storageGet(SAVED_FILES_SORT_MODE_KEY));
+  const activeSortMode = normalizeSavedFilesSortMode(sortSelect?.value || storedSortMode);
+  if (sortSelect) sortSelect.value = activeSortMode;
+  storageSet(SAVED_FILES_SORT_MODE_KEY, activeSortMode);
 
-  routeFiles.forEach(file => {
-    const routeName = file.name;
-    const summaryName = resolveSummaryForRoute(routeName, data);
-
-    const li = document.createElement("li");
-
-    // OPEN MAP
-    const openBtn = document.createElement("button");
-    openBtn.className = "saved-file-btn";
-openBtn.textContent = "Open Map";
-   openBtn.onclick = async () => {
-  try {
-
-    showLoading("Loading Excel file...");
-
-    const { data } = sb.storage.from(BUCKET).getPublicUrl(routeName);
-
-    const urlWithBypass = data.publicUrl + "?v=" + Date.now();
-
-    const r = await fetch(urlWithBypass, {
-      cache: "no-store"
+  const routeEntries = routeFiles
+    .map(file => {
+      const routeName = file.name;
+      const summaryName = resolveSummaryForRoute(routeName, data);
+      const addedTimestamp = getSavedFileAddedTimestamp(file);
+      return { routeName, summaryName, addedTimestamp };
+    })
+    .sort((a, b) => {
+      if (activeSortMode === "date-desc") {
+        const delta = b.addedTimestamp - a.addedTimestamp;
+        if (delta !== 0) return delta;
+        return a.routeName.localeCompare(b.routeName, undefined, { numeric: true, sensitivity: "base" });
+      }
+      if (activeSortMode === "date-asc") {
+        const delta = a.addedTimestamp - b.addedTimestamp;
+        if (delta !== 0) return delta;
+        return a.routeName.localeCompare(b.routeName, undefined, { numeric: true, sensitivity: "base" });
+      }
+      const aHasSummary = !!a.summaryName;
+      const bHasSummary = !!b.summaryName;
+      if (aHasSummary !== bHasSummary) return bHasSummary ? 1 : -1;
+      return a.routeName.localeCompare(b.routeName, undefined, { numeric: true, sensitivity: "base" });
     });
 
-    window._currentFilePath = routeName;
-    setCurrentFileDisplay(window._currentFilePath);
+  routeEntries.forEach(({ routeName, summaryName }) => {
+    const li = document.createElement("li");
+    li.className = `saved-route-item${summaryName ? " has-summary" : ""}`;
 
-    processExcelBuffer(await r.arrayBuffer());
-    await loadSummaryFor(routeName);
+    const infoWrap = document.createElement("div");
+    infoWrap.className = "saved-route-info";
 
-    hideLoading("File Loaded Successfully ✅");
-    if (fileManagerModal) fileManagerModal.style.display = "none";
+    const nameNode = document.createElement("div");
+    nameNode.className = "saved-route-name";
+    nameNode.textContent = routeName;
 
-  } catch (err) {
-    console.error(err);
-    hideLoading();
-    alert("Error loading file.");
-  }
-};
+    const metaRow = document.createElement("div");
+    metaRow.className = "saved-route-meta";
+    const badge = document.createElement("span");
+    badge.className = `saved-summary-badge${summaryName ? "" : " missing"}`;
+    badge.textContent = summaryName ? "Summary Attached" : "No Summary";
+    metaRow.appendChild(badge);
 
+    if (summaryName) {
+      const summaryFileNode = document.createElement("span");
+      summaryFileNode.className = "saved-summary-file";
+      summaryFileNode.textContent = summaryName;
+      metaRow.appendChild(summaryFileNode);
+    }
 
+    infoWrap.append(nameNode, metaRow);
 
-    li.appendChild(openBtn);
+    const actions = document.createElement("div");
+    actions.className = "saved-route-actions";
 
-    // SUMMARY BUTTON
+    const openBtn = document.createElement("button");
+    openBtn.className = "saved-file-btn open-btn";
+    openBtn.textContent = "Open Map";
+    openBtn.onclick = async () => {
+      try {
+        showLoading("Loading Excel file...");
+
+        const { data } = sb.storage.from(BUCKET).getPublicUrl(routeName);
+        const urlWithBypass = data.publicUrl + "?v=" + Date.now();
+        const r = await fetch(urlWithBypass, {
+          cache: "no-store"
+        });
+
+        window._currentFilePath = routeName;
+        setCurrentFileDisplay(window._currentFilePath);
+
+        processExcelBuffer(await r.arrayBuffer());
+        await loadSummaryFor(routeName);
+
+        hideLoading("File Loaded Successfully ✅");
+        if (fileManagerModal) fileManagerModal.style.display = "none";
+      } catch (err) {
+        console.error(err);
+        hideLoading();
+        alert("Error loading file.");
+      }
+    };
+    actions.appendChild(openBtn);
+
     if (summaryName) {
       const summaryBtn = document.createElement("button");
+      summaryBtn.className = "saved-file-btn summary-btn";
       summaryBtn.textContent = "Summary";
-      summaryBtn.style.marginLeft = "5px";
       summaryBtn.onclick = async () => {
         await loadSummaryFor(routeName);
         if (fileManagerModal) fileManagerModal.style.display = "none";
       };
-      li.appendChild(summaryBtn);
+      actions.appendChild(summaryBtn);
+    } else {
+      const summarySpacer = document.createElement("span");
+      summarySpacer.className = "saved-file-btn-spacer";
+      summarySpacer.setAttribute("aria-hidden", "true");
+      actions.appendChild(summarySpacer);
     }
 
-    // DELETE
     const delBtn = document.createElement("button");
+    delBtn.className = "saved-file-btn delete-btn";
     delBtn.textContent = "Delete";
-    delBtn.style.marginLeft = "5px";
+    delBtn.onclick = async () => {
+      const entered = prompt("Enter password to delete this file:");
+      if (entered !== DELETE_PASSWORD) {
+        alert("❌ Incorrect password. File not deleted.");
+        return;
+      }
 
-  delBtn.onclick = async () => {
+      const confirmed = confirm("Are you sure you want to permanently delete this file?");
+      if (!confirmed) return;
 
-  const entered = prompt("Enter password to delete this file:");
+      const toDelete = [routeName];
+      if (summaryName) toDelete.push(summaryName);
 
-  if (entered !== DELETE_PASSWORD) {
-    alert("❌ Incorrect password. File not deleted.");
-    return;
-  }
+      await sb.storage.from(BUCKET).remove(toDelete);
+      removeRouteSummaryAttachment(routeName);
+      if (summaryName) {
+        const map = getSummaryAttachments();
+        Object.keys(map).forEach(routeKey => {
+          if (map[routeKey] === summaryName) delete map[routeKey];
+        });
+        setSummaryAttachments(map);
+      }
 
-  const confirmed = confirm("Are you sure you want to permanently delete this file?");
-  if (!confirmed) return;
+      alert("✅ File deleted successfully.");
+      listFiles();
+    };
+    actions.appendChild(delBtn);
 
-  const toDelete = [routeName];
-  if (summaryName) toDelete.push(summaryName);
-
-  await sb.storage.from(BUCKET).remove(toDelete);
-  removeRouteSummaryAttachment(routeName);
-  if (summaryName) {
-    const map = getSummaryAttachments();
-    Object.keys(map).forEach(routeKey => {
-      if (map[routeKey] === summaryName) delete map[routeKey];
-    });
-    setSummaryAttachments(map);
-  }
-
-  alert("✅ File deleted successfully.");
-  listFiles();
-};
-
-
-    li.appendChild(delBtn);
-    li.appendChild(document.createTextNode(" " + routeName));
+    li.append(infoWrap, actions);
     ul.appendChild(li);
   });
 }
@@ -12879,6 +12949,7 @@ window.removeEventListener("deviceorientation", updateHeading);
 const fileManagerModal = document.getElementById("fileManagerModal");
 const openFileManagerBtn = document.getElementById("openFileManagerBtn");
 const closeFileManagerBtn = document.getElementById("closeFileManager");
+const savedFilesSortSelect = document.getElementById("savedFilesSortSelect");
 const savedFilesGuide = document.getElementById("savedFilesGuide");
 
 function markSavedFilesGuideSeen() {
@@ -12899,6 +12970,14 @@ if (openFileManagerBtn) {
 if (closeFileManagerBtn) {
   closeFileManagerBtn.addEventListener("click", () => {
     fileManagerModal.style.display = "none";
+  });
+}
+
+if (savedFilesSortSelect) {
+  savedFilesSortSelect.value = normalizeSavedFilesSortMode(storageGet(SAVED_FILES_SORT_MODE_KEY));
+  savedFilesSortSelect.addEventListener("change", () => {
+    storageSet(SAVED_FILES_SORT_MODE_KEY, normalizeSavedFilesSortMode(savedFilesSortSelect.value));
+    listFiles();
   });
 }
 
@@ -13337,6 +13416,7 @@ if (routesToggle && routesContent) {
 
   listFiles();
 }
+
 
 
 

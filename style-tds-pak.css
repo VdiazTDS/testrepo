@@ -5676,8 +5676,52 @@ body.sun-mode .file-manager-btn.attention {
   color: #c8d6e4;
 }
 
+.saved-files-sort-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.saved-files-sort-row label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #d7e6f5;
+}
+
+#savedFilesSortSelect {
+  min-height: 32px;
+  border-radius: 8px;
+  border: 1px solid #48617b;
+  background: #1a2734;
+  color: #eef6ff;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 body.sun-mode .saved-files-modal-help {
   color: #35516d;
+}
+
+body.sun-mode .saved-files-sort-row label {
+  color: #31506d;
+}
+
+body.sun-mode #savedFilesSortSelect {
+  border-color: #bed3e7;
+  background: #ffffff;
+  color: #16324d;
+}
+
+@media (max-width: 640px) {
+  .saved-files-sort-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
 }
 
 /* ================= MODAL BASE ================= */
@@ -8168,5 +8212,202 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   body.print-mode-map.print-map-span-legend-left.print-mode-map-legend-pos-outside-right .map-print-legend-panel {
     top: auto !important;
     bottom: 0.55in !important;
+  }
+}
+
+/* ===== Saved Files: Summary Visibility ===== */
+#savedFiles {
+  display: grid;
+  gap: 8px;
+}
+
+#savedFiles .saved-route-item {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: start;
+  column-gap: 0;
+  row-gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 11px;
+  border: 1px solid #3a4f64;
+  background: linear-gradient(160deg, #1f2d3a 0%, #17232e 100%);
+}
+
+#savedFiles .saved-route-item.has-summary {
+  border-color: #4ca3e8;
+  box-shadow: inset 0 0 0 1px rgba(76, 163, 232, 0.3), 0 6px 14px rgba(19, 47, 71, 0.22);
+  background: linear-gradient(160deg, #243749 0%, #1a2b3a 100%);
+}
+
+#savedFiles .saved-route-info {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+#savedFiles .saved-route-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #ecf6ff;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+}
+
+#savedFiles .saved-route-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+#savedFiles .saved-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid #53b17d;
+  background: rgba(47, 143, 88, 0.2);
+  color: #b8f5cf;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#savedFiles .saved-summary-badge.missing {
+  border-color: #8ca1b6;
+  background: rgba(95, 118, 142, 0.2);
+  color: #d3e0ed;
+}
+
+#savedFiles .saved-summary-file {
+  font-size: 11px;
+  color: #b7ccdf;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+  max-width: none;
+}
+
+#savedFiles .saved-route-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: 6px;
+  justify-content: stretch;
+  width: 100%;
+}
+
+#savedFiles .saved-route-actions .saved-file-btn {
+  width: 100%;
+  min-height: 28px;
+  border-radius: 8px;
+  padding: 0 8px;
+  border: 1px solid #5a7591;
+  background: linear-gradient(160deg, #2f4458 0%, #27394a 100%);
+  color: #f0f7ff;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#savedFiles .saved-file-btn-spacer {
+  width: 100%;
+  min-height: 28px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#savedFiles .saved-route-actions .saved-file-btn:hover {
+  background: linear-gradient(160deg, #3a5670 0%, #314a62 100%);
+  color: #ffffff;
+}
+
+#savedFiles .saved-route-actions .open-btn {
+  border-color: #4f90c9;
+  background: linear-gradient(160deg, #2b6da3 0%, #1f5685 100%);
+}
+
+#savedFiles .saved-route-actions .summary-btn {
+  border-color: #53b17d;
+  background: linear-gradient(160deg, #2c7a53 0%, #205e3f 100%);
+}
+
+#savedFiles .saved-route-actions .delete-btn {
+  border-color: #be6464;
+  background: linear-gradient(160deg, #903838 0%, #702c2c 100%);
+}
+
+body.sun-mode #savedFiles .saved-route-item {
+  border-color: #cad9e8 !important;
+  background: linear-gradient(160deg, #ffffff 0%, #f4f8fc 100%) !important;
+}
+
+body.sun-mode #savedFiles .saved-route-item.has-summary {
+  border-color: #5aa3df !important;
+  box-shadow: inset 0 0 0 1px rgba(90, 163, 223, 0.24), 0 6px 12px rgba(36, 81, 118, 0.14) !important;
+  background: linear-gradient(160deg, #f6fbff 0%, #edf5fc 100%) !important;
+}
+
+body.sun-mode #savedFiles .saved-route-name {
+  color: #12324c !important;
+}
+
+body.sun-mode #savedFiles .saved-summary-badge {
+  border-color: #6eb88d !important;
+  background: rgba(67, 163, 106, 0.14) !important;
+  color: #1f5e38 !important;
+}
+
+body.sun-mode #savedFiles .saved-summary-badge.missing {
+  border-color: #b5c8dc !important;
+  background: rgba(162, 180, 198, 0.2) !important;
+  color: #33526c !important;
+}
+
+body.sun-mode #savedFiles .saved-summary-file {
+  color: #4f6f89 !important;
+}
+
+body.sun-mode #savedFiles .saved-route-actions .saved-file-btn {
+  border-color: #b9cce0 !important;
+  background: linear-gradient(160deg, #ffffff 0%, #edf4fb 100%) !important;
+  color: #1c3f5f !important;
+}
+
+body.sun-mode #savedFiles .saved-route-actions .open-btn {
+  border-color: #7cb5e3 !important;
+  background: linear-gradient(160deg, #eef7ff 0%, #dcebfa 100%) !important;
+}
+
+body.sun-mode #savedFiles .saved-route-actions .summary-btn {
+  border-color: #90c7a4 !important;
+  background: linear-gradient(160deg, #edf8f1 0%, #deefe4 100%) !important;
+}
+
+body.sun-mode #savedFiles .saved-route-actions .delete-btn {
+  border-color: #d9a5a5 !important;
+  background: linear-gradient(160deg, #fff2f2 0%, #fbe4e4 100%) !important;
+}
+
+@media (max-width: 760px) {
+  #savedFiles .saved-route-item {
+    align-items: flex-start;
+  }
+
+  #savedFiles .saved-route-actions {
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #savedFiles .saved-summary-file {
+    max-width: 100%;
   }
 }
