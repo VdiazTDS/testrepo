@@ -137,12 +137,22 @@
       <select id="baseMapSelect" aria-label="Basemap">
         <option value="streets">Streets (Detailed)</option>
         <option value="freeStreets">OSM Streets (Free)</option>
+        <option value="topographic">Topographic</option>
+        <option value="terrain">Terrain</option>
+        <option value="natGeo">National Geographic</option>
+        <option value="lightGray">Light Gray Canvas</option>
+        <option value="darkGray">Dark Gray Canvas</option>
         <option value="satellite">Satellite (Imagery)</option>
       </select>
     </div>
-    <label class="map-network-toggle street-network-sidebar-toggle">
-      <input type="checkbox" id="streetNetworkLayerToggle" checked />
-      Street Network Layer
+    <label class="map-network-toggle street-network-sidebar-toggle street-network-toggle-wrap">
+      <input type="checkbox" id="streetNetworkLayerToggle" />
+      <span class="street-network-toggle-copy">
+        <span class="street-network-toggle-title">Street Network Layer</span>
+        <span id="streetNetworkSidebarBackendPrompt" class="street-network-backend-prompt" role="status" aria-live="polite" hidden>
+          Street Network backend is not connected. Open Street Network Manager to complete setup and start the backend.
+        </span>
+      </span>
     </label>
 
 
@@ -609,7 +619,7 @@
           <label class="street-symbology-slider">
             <span>Opacity</span>
             <input id="streetSymbologyOpacityInput" type="range" min="0.2" max="1" step="0.05" />
-            <span id="streetSymbologyOpacityValue">0.65</span>
+            <span id="streetSymbologyOpacityValue">0.96</span>
           </label>
         </div>
 

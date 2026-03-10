@@ -335,6 +335,44 @@ header p {
   justify-content: flex-start;
 }
 
+.street-network-toggle-wrap {
+  align-items: flex-start;
+}
+
+.street-network-toggle-wrap input {
+  margin-top: 2px;
+}
+
+.street-network-toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  box-sizing: border-box;
+  padding-right: 2px;
+  min-width: 0;
+}
+
+.street-network-toggle-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.street-network-backend-prompt {
+  margin-top: 1px;
+  margin-right: 4px;
+  margin-bottom: 2px;
+  max-width: calc(100% - 4px);
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid #7d5a36;
+  background: rgba(124, 84, 32, 0.17);
+  color: #f2dfc8;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .local-street-source {
   margin-top: 8px;
   padding: 8px;
@@ -2496,6 +2534,12 @@ body.sun-mode .map-network-toggle {
   border-color: #bfd4ea;
   background: #f3f8ff;
   color: #16324d;
+}
+
+body.sun-mode .street-network-backend-prompt {
+  border-color: #e0c4a2;
+  background: #fff7ec;
+  color: #6d471f;
 }
 
 .road-attributes-modal-content {

@@ -594,6 +594,9 @@ setCurrentFileDisplay(window._currentFilePath);
 const map = L.map("map", { preferCanvas: true }).setView([31.0, -99.0], 6);
 // Shared Canvas renderer for high-performance drawing
 const canvasRenderer = L.canvas({ padding: 0.5 });
+// Keep all street casings under all street centerlines to prevent visual cut-outs.
+const streetCasingCanvasRenderer = L.canvas({ padding: 0.5 });
+const streetCenterCanvasRenderer = L.canvas({ padding: 0.5 });
 
 
 // ===== BASE MAP LAYERS =====
@@ -607,6 +610,26 @@ const baseMaps = {
       maxNativeZoom: 19,
       subdomains: ["a", "b", "c"],
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }),
+  topographic: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
+      maxNativeZoom: 19
+    }),
+  terrain: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Terrain_Base/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
+      maxNativeZoom: 13
+    }),
+  natGeo: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
+      maxNativeZoom: 16
+    }),
+  lightGray: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
+      maxNativeZoom: 16
+    }),
+  darkGray: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20,
+      maxNativeZoom: 16
     }),
 
   satellite: L.tileLayer(
@@ -659,6 +682,44 @@ const STREET_BASE_LINE_WEIGHT = 3;
 const STREET_BASE_LINE_OPACITY = 0.65;
 const STREET_SYMBOLOGY_EMPTY_KEY = "__EMPTY__";
 const STREET_NETWORK_MANAGER_TAB_KEY = "streetNetworkManagerTab";
+const STREET_FUNC_CLASS_VALUE_ORDER = ["1", "2", "3", "4", "5"];
+const STREET_FUNC_CLASS_DEFAULT_COLORS = Object.freeze({
+  "1": "#ff3b30",
+  "2": "#f4d447",
+  "3": "#1f1f1f",
+  "4": "#5f6670",
+  "5": "#8a9099",
+  [STREET_SYMBOLOGY_EMPTY_KEY]: "#b8bec7"
+});
+const STREET_FUNC_CLASS_DEFAULT_WEIGHTS = Object.freeze({
+  "1": 5.0,
+  "2": 4.3,
+  "3": 3.4,
+  "4": 2.7,
+  "5": 2.2
+});
+const STREET_FUNC_CLASS_CASING_COLORS = Object.freeze({
+  "1": "#861714",
+  "2": "#151515",
+  "3": "#101010",
+  "4": "#3f454d",
+  "5": "#5a6069",
+  [STREET_SYMBOLOGY_EMPTY_KEY]: "#636a74"
+});
+const STREET_FUNC_CLASS_DEFAULT_LINE_WIDTH = STREET_BASE_LINE_WEIGHT;
+const STREET_FUNC_CLASS_DEFAULT_OPACITY = 0.96;
+const STREET_CASING_FALLBACK_COLOR = "#242a33";
+const STREET_SELECTION_INNER_COLOR = "#ffe066";
+const STREET_SELECTION_OUTER_COLOR = "#101114";
+const STREET_CASING_AUTO_DISABLE_SEGMENT_COUNT = 6000;
+const STREET_FUNC_CLASS_PREVIOUS_DEFAULT_COLORS = Object.freeze({
+  "1": "#f44336",
+  "2": "#f2cc4d",
+  "3": "#1f2937",
+  "4": "#6b7280",
+  "5": "#9ca3af",
+  [STREET_SYMBOLOGY_EMPTY_KEY]: "#b0b8c2"
+});
 const STREET_SYMBOLOGY_PALETTE = [
   "#4ea2f5",
   "#ef4444",
@@ -673,6 +734,16 @@ const STREET_SYMBOLOGY_PALETTE = [
   "#eab308",
   "#3b82f6"
 ];
+
+function darkenStreetHexColor(colorHex, amount = 0.55) {
+  const text = String(colorHex || "").trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(text)) return STREET_CASING_FALLBACK_COLOR;
+  const factor = 1 - Math.max(0, Math.min(0.9, Number(amount) || 0));
+  const r = Math.max(0, Math.min(255, Math.round(parseInt(text.slice(1, 3), 16) * factor)));
+  const g = Math.max(0, Math.min(255, Math.round(parseInt(text.slice(3, 5), 16) * factor)));
+  const b = Math.max(0, Math.min(255, Math.round(parseInt(text.slice(5, 7), 16) * factor)));
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
 const localStreetSourceState = {
   loaded: false,
   sourceName: "",
@@ -705,12 +776,20 @@ const LOCAL_STREET_FCLASS_WHITELIST = new Set([
   "service",
   "track",
   "road",
+  "bus_guideway"
+]);
+const LOCAL_STREET_NON_MOTOR_CLASS_DENYLIST = new Set([
   "pedestrian",
   "footway",
   "cycleway",
   "bridleway",
   "path",
-  "steps"
+  "steps",
+  "corridor",
+  "platform",
+  "via_ferrata",
+  "proposed",
+  "construction"
 ]);
 const LOCAL_STREET_SOURCE_META_KEY = "localStreetSourceMeta";
 const LOCAL_STREET_HANDLE_DB_NAME = "tdsPakLocalStreetSource";
@@ -729,6 +808,8 @@ const LOCAL_STREET_BACKEND_URL_DEFAULT = "http://127.0.0.1:8787";
 const LOCAL_STREET_BACKEND_HEALTH_TTL_MS = 12000;
 const LOCAL_STREET_BACKEND_REQUEST_TIMEOUT_MS = 25000;
 const LOCAL_STREET_BACKEND_QUERY_LIMIT = 220000;
+const LOCAL_STREET_BACKEND_QUERY_TILE_MAX_DEPTH = 4;
+const LOCAL_STREET_BACKEND_QUERY_TILE_MIN_SPAN_DEG = 0.01;
 const TEXAS_LANDFILLS_LAYER_VISIBLE_KEY = "texasLandfillsLayerVisible";
 const TEXAS_LANDFILLS_FEATURE_LAYER_URL = "https://services6.arcgis.com/MhhE5pgCPypps4To/ArcGIS/rest/services/Texas_Landfills_Web_Map/FeatureServer/0";
 const TEXAS_LANDFILLS_QUERY_URL = `${TEXAS_LANDFILLS_FEATURE_LAYER_URL}/query`;
@@ -757,11 +838,11 @@ const localStreetBackendState = {
   lastCheckedAt: 0
 };
 let streetSymbologyState = {
-  enabled: false,
-  field: "highway",
-  valueColors: {},
-  lineWidth: STREET_BASE_LINE_WEIGHT,
-  opacity: STREET_BASE_LINE_OPACITY
+  enabled: true,
+  field: "func_class",
+  valueColors: { ...STREET_FUNC_CLASS_DEFAULT_COLORS },
+  lineWidth: STREET_FUNC_CLASS_DEFAULT_LINE_WIDTH,
+  opacity: STREET_FUNC_CLASS_DEFAULT_OPACITY
 };
 
 function localStreetCellKey(latIdx, lonIdx) {
@@ -790,18 +871,114 @@ function localStreetHasProvider() {
   return !!localStreetSourceState.loaded || (!!localStreetBackendState.available && !!localStreetBackendState.hasIndex);
 }
 
+function cloneStreetFuncClassDefaultColors() {
+  return { ...STREET_FUNC_CLASS_DEFAULT_COLORS };
+}
+
+function normalizeStreetFuncClassValue(value) {
+  const text = String(value ?? "").trim().toUpperCase();
+  if (!text || text === "UNKNOWN") return "";
+  if (/^[1-5]$/.test(text)) return text;
+  const firstDigit = text.match(/[1-5]/);
+  if (firstDigit) return firstDigit[0];
+  return "";
+}
+
+function deriveStreetFuncClassFromTags(props = {}) {
+  const source = props && typeof props === "object" ? props : {};
+
+  const directCandidates = [
+    source.func_class,
+    source.funcClass,
+    source.FUNC_CLASS,
+    source.funclass,
+    source.FUNCLASS
+  ];
+  for (const candidate of directCandidates) {
+    const direct = normalizeStreetFuncClassValue(candidate);
+    if (direct) return direct;
+  }
+
+  const rawHighway = String(
+    source.highway ??
+    source.HIGHWAY ??
+    source.road_class ??
+    source.fclass ??
+    source.FCLASS ??
+    ""
+  ).trim().toLowerCase();
+  if (!rawHighway || rawHighway === "unknown") return "";
+
+  if (["motorway", "motorway_link", "trunk", "trunk_link"].includes(rawHighway)) return "1";
+  if (["primary", "primary_link"].includes(rawHighway)) return "2";
+  if (["secondary", "secondary_link"].includes(rawHighway)) return "3";
+  if (["tertiary", "tertiary_link"].includes(rawHighway)) return "4";
+  return "5";
+}
+
+function isLegacyStreetSymbologyDefault(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const field = String(raw.field || "").trim().toLowerCase();
+  const enabled = !!raw.enabled;
+  const colors = raw.valueColors && typeof raw.valueColors === "object" && !Array.isArray(raw.valueColors)
+    ? Object.keys(raw.valueColors)
+    : [];
+  const width = Number(raw.lineWidth);
+  const opacity = Number(raw.opacity);
+
+  return (
+    field === "highway" &&
+    enabled === false &&
+    colors.length === 0 &&
+    (!Number.isFinite(width) || width === STREET_BASE_LINE_WEIGHT) &&
+    (!Number.isFinite(opacity) || opacity === STREET_BASE_LINE_OPACITY)
+  );
+}
+
+function isPreviousFuncClassSymbologyDefault(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const field = String(raw.field || "").trim().toLowerCase();
+  if (field !== "func_class") return false;
+
+  const colors = raw.valueColors && typeof raw.valueColors === "object" && !Array.isArray(raw.valueColors)
+    ? raw.valueColors
+    : null;
+  if (!colors) return false;
+
+  const oldKeys = Object.keys(STREET_FUNC_CLASS_PREVIOUS_DEFAULT_COLORS);
+  const rawKeys = Object.keys(colors).map(k => String(k || "").trim()).filter(Boolean);
+  if (rawKeys.length !== oldKeys.length) return false;
+  if (!oldKeys.every(key => rawKeys.includes(key))) return false;
+
+  const allMatch = oldKeys.every(key =>
+    String(colors[key] || "").trim().toLowerCase() === String(STREET_FUNC_CLASS_PREVIOUS_DEFAULT_COLORS[key]).toLowerCase()
+  );
+  if (!allMatch) return false;
+
+  const width = Number(raw.lineWidth);
+  const opacity = Number(raw.opacity);
+  return (
+    (!Number.isFinite(width) || width === STREET_BASE_LINE_WEIGHT) &&
+    (!Number.isFinite(opacity) || opacity === STREET_BASE_LINE_OPACITY)
+  );
+}
+
 function normalizeStreetSymbologyState(raw) {
   const base = {
-    enabled: false,
-    field: "highway",
-    valueColors: {},
-    lineWidth: STREET_BASE_LINE_WEIGHT,
-    opacity: STREET_BASE_LINE_OPACITY
+    enabled: true,
+    field: "func_class",
+    valueColors: cloneStreetFuncClassDefaultColors(),
+    lineWidth: STREET_FUNC_CLASS_DEFAULT_LINE_WIDTH,
+    opacity: STREET_FUNC_CLASS_DEFAULT_OPACITY
   };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+  if (isLegacyStreetSymbologyDefault(raw)) return base;
+  if (isPreviousFuncClassSymbologyDefault(raw)) return base;
 
-  const field = String(raw.field || "highway").trim() || "highway";
-  const valueColors = {};
+  const field = String(raw.field || base.field).trim() || base.field;
+  const valueColors = String(field).toLowerCase() === "func_class"
+    ? cloneStreetFuncClassDefaultColors()
+    : {};
   if (raw.valueColors && typeof raw.valueColors === "object" && !Array.isArray(raw.valueColors)) {
     Object.keys(raw.valueColors).forEach(key => {
       const normalizedKey = String(key || "").trim();
@@ -813,12 +990,17 @@ function normalizeStreetSymbologyState(raw) {
 
   const widthNum = Number(raw.lineWidth);
   const opacityNum = Number(raw.opacity);
+  const fieldLower = String(field).toLowerCase();
   return {
-    enabled: !!raw.enabled,
+    enabled: raw.enabled === undefined ? base.enabled : !!raw.enabled,
     field,
     valueColors,
-    lineWidth: Number.isFinite(widthNum) ? Math.max(1, Math.min(8, widthNum)) : STREET_BASE_LINE_WEIGHT,
-    opacity: Number.isFinite(opacityNum) ? Math.max(0.2, Math.min(1, opacityNum)) : STREET_BASE_LINE_OPACITY
+    lineWidth: Number.isFinite(widthNum)
+      ? Math.max(1, Math.min(8, widthNum))
+      : (fieldLower === "func_class" ? STREET_FUNC_CLASS_DEFAULT_LINE_WIDTH : STREET_BASE_LINE_WEIGHT),
+    opacity: Number.isFinite(opacityNum)
+      ? Math.max(0.2, Math.min(1, opacityNum))
+      : (fieldLower === "func_class" ? STREET_FUNC_CLASS_DEFAULT_OPACITY : STREET_BASE_LINE_OPACITY)
   };
 }
 
@@ -863,7 +1045,7 @@ function getStreetSymbologyPaletteColorByKey(key) {
 }
 
 function getStreetSymbologyAvailableFields() {
-  const preferredOrder = ["highway", "surface", "lanes", "maxspeed", "oneway", "name", "ref", "id"];
+  const preferredOrder = ["func_class", "highway", "surface", "lanes", "maxspeed", "oneway", "name", "ref", "id"];
   const fieldSet = new Set(preferredOrder);
   streetAttributeById.forEach(entry => {
     const row = entry?.row;
@@ -888,6 +1070,7 @@ function getStreetSymbologyAvailableFields() {
 
 function getStreetSymbologyClassStats(fieldName) {
   const field = String(fieldName || "").trim();
+  const fieldLower = field.toLowerCase();
   const counts = new Map();
   streetAttributeById.forEach(entry => {
     const row = entry?.row || {};
@@ -896,7 +1079,27 @@ function getStreetSymbologyClassStats(fieldName) {
     item.count += 1;
     counts.set(valueKey, item);
   });
-  return [...counts.values()].sort((a, b) => {
+
+  if (fieldLower === "func_class") {
+    STREET_FUNC_CLASS_VALUE_ORDER.forEach(key => {
+      if (counts.has(key)) return;
+      counts.set(key, { key, label: key, count: 0 });
+    });
+  }
+
+  const values = [...counts.values()];
+  if (fieldLower === "func_class") {
+    const rank = new Map(STREET_FUNC_CLASS_VALUE_ORDER.map((key, idx) => [key, idx]));
+    return values.sort((a, b) => {
+      const aRank = rank.has(a.key) ? rank.get(a.key) : 99;
+      const bRank = rank.has(b.key) ? rank.get(b.key) : 99;
+      if (aRank !== bRank) return aRank - bRank;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+    });
+  }
+
+  return values.sort((a, b) => {
     if (b.count !== a.count) return b.count - a.count;
     return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
   });
@@ -905,21 +1108,88 @@ function getStreetSymbologyClassStats(fieldName) {
 function resolveStreetSymbologyColorForEntry(entry) {
   const state = ensureStreetSymbologyState();
   if (!state.enabled) return STREET_BASE_LINE_COLOR;
-  const field = String(state.field || "highway");
+  const field = String(state.field || "func_class");
   const valueKey = normalizeStreetSymbologyValueKey(entry?.row?.[field]);
   const explicit = state.valueColors?.[valueKey];
   if (typeof explicit === "string" && /^#[0-9a-fA-F]{6}$/.test(explicit)) {
     return explicit.toLowerCase();
   }
+  if (field.toLowerCase() === "func_class") {
+    const classColor = STREET_FUNC_CLASS_DEFAULT_COLORS[valueKey] || STREET_FUNC_CLASS_DEFAULT_COLORS[STREET_SYMBOLOGY_EMPTY_KEY];
+    if (classColor) return classColor.toLowerCase();
+  }
   return getStreetSymbologyPaletteColorByKey(valueKey);
+}
+
+function resolveStreetSymbologyWeightForEntry(entry) {
+  const state = ensureStreetSymbologyState();
+  if (!state.enabled) return STREET_BASE_LINE_WEIGHT;
+
+  const width = Number.isFinite(Number(state.lineWidth))
+    ? Math.max(1, Math.min(8, Number(state.lineWidth)))
+    : STREET_BASE_LINE_WEIGHT;
+
+  const field = String(state.field || "func_class");
+  if (field.toLowerCase() !== "func_class") return width;
+
+  const valueKey = normalizeStreetSymbologyValueKey(entry?.row?.[field]);
+  const classWeight = Number(STREET_FUNC_CLASS_DEFAULT_WEIGHTS[valueKey]);
+  if (!Number.isFinite(classWeight)) return width;
+
+  const scaled = classWeight * (width / STREET_BASE_LINE_WEIGHT);
+  return Math.max(1, Math.min(8, scaled));
+}
+
+function resolveStreetSymbologyCasingStyleForEntry(entry, centerStyle) {
+  const state = ensureStreetSymbologyState();
+  const field = String(state.field || "func_class");
+  const valueKey = normalizeStreetSymbologyValueKey(entry?.row?.[field]);
+  const centerColor = String(centerStyle?.color || resolveStreetSymbologyColorForEntry(entry)).toLowerCase();
+  const centerWeight = Number(centerStyle?.weight);
+  const centerOpacity = Number(centerStyle?.opacity);
+  const explicit = state.valueColors?.[valueKey];
+
+  let casingColor = STREET_CASING_FALLBACK_COLOR;
+  if (field.toLowerCase() === "func_class" && !(typeof explicit === "string" && /^#[0-9a-fA-F]{6}$/.test(explicit))) {
+    casingColor = String(STREET_FUNC_CLASS_CASING_COLORS[valueKey] || "").trim().toLowerCase()
+      || darkenStreetHexColor(centerColor, 0.58);
+  } else {
+    casingColor = darkenStreetHexColor(centerColor, 0.55);
+  }
+
+  const safeCenterWeight = Number.isFinite(centerWeight)
+    ? centerWeight
+    : resolveStreetSymbologyWeightForEntry(entry);
+  const safeCenterOpacity = Number.isFinite(centerOpacity)
+    ? centerOpacity
+    : (state.enabled ? state.opacity : STREET_BASE_LINE_OPACITY);
+  const casingWeight = Math.max(
+    safeCenterWeight + 0.9,
+    Math.min(10, safeCenterWeight * 1.28)
+  );
+
+  return {
+    color: casingColor,
+    weight: casingWeight,
+    opacity: Math.max(0.35, Math.min(1, safeCenterOpacity + 0.02))
+  };
 }
 
 function getStreetSegmentBaseStyle(entry) {
   const state = ensureStreetSymbologyState();
-  return {
+  const center = {
     color: resolveStreetSymbologyColorForEntry(entry),
-    weight: state.enabled ? state.lineWidth : STREET_BASE_LINE_WEIGHT,
+    weight: resolveStreetSymbologyWeightForEntry(entry),
     opacity: state.enabled ? state.opacity : STREET_BASE_LINE_OPACITY
+  };
+  const casing = resolveStreetSymbologyCasingStyleForEntry(entry, center);
+  return {
+    color: center.color,
+    weight: center.weight,
+    opacity: center.opacity,
+    casingColor: casing.color,
+    casingWeight: casing.weight,
+    casingOpacity: casing.opacity
   };
 }
 
@@ -1056,6 +1326,33 @@ function updateStreetNetworkManagerHint(hasProvider = localStreetHasProvider()) 
   }
 }
 
+function updateStreetNetworkSidebarBackendPrompt() {
+  const promptNode = document.getElementById("streetNetworkSidebarBackendPrompt");
+  if (!promptNode) return;
+  const layerToggle = document.getElementById("streetNetworkLayerToggle");
+  const layerRequested = !!layerToggle?.checked;
+
+  if (!layerRequested) {
+    promptNode.hidden = true;
+    return;
+  }
+
+  const backendReady = !!localStreetBackendState.available && !!localStreetBackendState.hasIndex;
+  if (backendReady) {
+    promptNode.hidden = true;
+    return;
+  }
+
+  if (localStreetBackendState.checking) {
+    promptNode.textContent = "Checking Street Network backend connection...";
+    promptNode.hidden = false;
+    return;
+  }
+
+  promptNode.textContent = "Street Network backend is not connected. Open Street Network Manager to complete setup and start the backend.";
+  promptNode.hidden = false;
+}
+
 function updateLocalStreetSourceStatus(message = "") {
   const node = document.getElementById("localStreetsStatus");
   const useLocalToggle = document.getElementById("useLocalStreetSource");
@@ -1067,6 +1364,7 @@ function updateLocalStreetSourceStatus(message = "") {
   }
   setStreetNetworkManagerBadgeState(resolveStreetNetworkManagerBadgeState(message, hasProvider));
   updateStreetNetworkManagerHint(hasProvider);
+  updateStreetNetworkSidebarBackendPrompt();
   if (!node) return;
   if (message) {
     node.textContent = message;
@@ -1349,19 +1647,58 @@ function collectLocalStreetFeatureCollections(parsedSource) {
   return collections;
 }
 
+function normalizeLocalStreetClassValue(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text || text === "unknown") return "";
+  return text;
+}
+
+function getLocalStreetClassFromTags(props = {}) {
+  const source = props && typeof props === "object" ? props : {};
+  const candidates = [
+    source.highway,
+    source.HIGHWAY,
+    source.road_class,
+    source.ROAD_CLASS,
+    source.fclass,
+    source.FCLASS,
+    source.class,
+    source.CLASS,
+    source.road_type,
+    source.ROAD_TYPE,
+    source.route,
+    source.ROUTE
+  ];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const normalized = normalizeLocalStreetClassValue(candidates[i]);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function isMotorVehicleStreetClassValue(classValue) {
+  const value = normalizeLocalStreetClassValue(classValue);
+  if (!value) return false;
+  if (LOCAL_STREET_NON_MOTOR_CLASS_DENYLIST.has(value)) return false;
+  if (LOCAL_STREET_FCLASS_WHITELIST.has(value)) return true;
+  if (/(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|road|track|_link|bus_guideway)/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function isMotorVehicleStreetTags(tags = {}, layerName = "") {
+  const classValue = getLocalStreetClassFromTags(tags);
+  if (classValue) return isMotorVehicleStreetClassValue(classValue);
+  return LOCAL_STREET_ROAD_LAYER_RX.test(String(layerName || ""));
+}
+
 function isLocalStreetFeature(feature, layerName = "") {
   const geometryType = feature?.geometry?.type;
   if (geometryType !== "LineString" && geometryType !== "MultiLineString") return false;
 
   const props = feature?.properties || {};
-  const highway = String(props.highway || props.HIGHWAY || "").trim();
-  if (highway) return true;
-
-  const fclass = String(props.fclass || props.FCLASS || "").trim().toLowerCase();
-  if (fclass) return LOCAL_STREET_FCLASS_WHITELIST.has(fclass);
-
-  if (LOCAL_STREET_ROAD_LAYER_RX.test(String(layerName || ""))) return true;
-  return true;
+  return isMotorVehicleStreetTags(props, layerName);
 }
 
 function pickLocalStreetFeaturesFromParsedSource(parsedSource, preferRoadLayers = false) {
@@ -1613,9 +1950,12 @@ function normalizeLocalStreetTags(props = {}) {
     return text ? text : fallback;
   };
 
+  const resolvedFuncClass = deriveStreetFuncClassFromTags(props);
+
   return {
     name: normalizeTagValue(props.name ?? props.NAME),
     highway: normalizeTagValue(props.highway ?? props.HIGHWAY ?? props.road_class ?? props.fclass ?? props.FCLASS),
+    func_class: normalizeTagValue(resolvedFuncClass, "5"),
     ref: normalizeTagValue(props.ref ?? props.REF ?? props.ref_name ?? props.REF_NAME),
     maxspeed: normalizeTagValue(props.maxspeed ?? props.MAXSPEED ?? props.max_speed ?? props.MAX_SPEED),
     lanes: normalizeTagValue(props.lanes ?? props.LANES ?? props.num_lanes ?? props.NUM_LANES),
@@ -1632,7 +1972,7 @@ function isUnknownStreetTagValue(value) {
 function mergeStreetAttributeRows(existingRow, incomingRow) {
   if (!existingRow) return incomingRow;
   const merged = { ...incomingRow };
-  ["name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"].forEach(key => {
+  ["name", "highway", "func_class", "ref", "maxspeed", "lanes", "surface", "oneway"].forEach(key => {
     const nextVal = incomingRow?.[key];
     if (isUnknownStreetTagValue(nextVal) && !isUnknownStreetTagValue(existingRow?.[key])) {
       merged[key] = existingRow[key];
@@ -2846,7 +3186,7 @@ function initLocalStreetSourceControls() {
   const renderStreetSymbologyClassList = () => {
     if (!streetSymbologyClassList || !streetSymbologyFieldSelect) return;
     ensureStreetSymbologyState();
-    const selectedField = String(streetSymbologyFieldSelect.value || streetSymbologyState.field || "highway");
+    const selectedField = String(streetSymbologyFieldSelect.value || streetSymbologyState.field || "func_class");
     const stats = getStreetSymbologyClassStats(selectedField);
     const maxRows = 80;
     const shown = stats.slice(0, maxRows);
@@ -2902,7 +3242,7 @@ function initLocalStreetSourceControls() {
 
     const fields = getStreetSymbologyAvailableFields();
     if (!fields.includes(streetSymbologyState.field)) {
-      streetSymbologyState.field = fields[0] || "highway";
+      streetSymbologyState.field = fields[0] || "func_class";
     }
 
     streetSymbologyFieldSelect.innerHTML = "";
@@ -2942,7 +3282,7 @@ function initLocalStreetSourceControls() {
   });
 
   streetSymbologyFieldSelect?.addEventListener("change", () => {
-    streetSymbologyState.field = String(streetSymbologyFieldSelect.value || "highway");
+    streetSymbologyState.field = String(streetSymbologyFieldSelect.value || "func_class");
     applyStreetSymbologyToMap(`Symbology field set to [${streetSymbologyState.field}].`);
     renderStreetSymbologyClassList();
   });
@@ -3122,6 +3462,7 @@ function initLocalStreetSourceControls() {
 }
 
 function clearRenderedStreetSegmentState() {
+  resetStreetRenderingPerformanceMode();
   streetAttributeLayerGroup.clearLayers();
   streetAttributeById.clear();
   streetAttributesRows = [];
@@ -3248,8 +3589,7 @@ function normalizeBackendStreetElement(raw) {
   };
 }
 
-async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polygonLayer = null) {
-  const bounds = boundsOverride || map.getBounds();
+async function fetchStreetElementsFromLocalBackendBounds(bounds, limit = LOCAL_STREET_BACKEND_QUERY_LIMIT) {
   const south = bounds.getSouth();
   const west = bounds.getWest();
   const north = bounds.getNorth();
@@ -3259,7 +3599,7 @@ async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polyg
     west: String(west),
     north: String(north),
     east: String(east),
-    limit: String(LOCAL_STREET_BACKEND_QUERY_LIMIT)
+    limit: String(Math.max(1000, Number(limit) || LOCAL_STREET_BACKEND_QUERY_LIMIT))
   });
 
   const backendUrl = `${localStreetBackendState.baseUrl}/api/streets?${query.toString()}`;
@@ -3274,8 +3614,115 @@ async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polyg
 
   const payload = await response.json().catch(() => ({}));
   const rows = Array.isArray(payload?.elements) ? payload.elements : [];
+  const rawCount = Number(payload?.count);
+  const truncated = payload?.truncated === true || String(payload?.truncated || "").toLowerCase() === "true";
+  return {
+    rows,
+    count: Number.isFinite(rawCount) ? rawCount : rows.length,
+    truncated
+  };
+}
+
+function shouldSplitLocalBackendQueryBounds(bounds, depth, maxDepth) {
+  if (!isValidLeafletBounds(bounds)) return false;
+  if (depth >= maxDepth) return false;
+  const latSpan = Math.abs(bounds.getNorth() - bounds.getSouth());
+  const lonSpan = Math.abs(bounds.getEast() - bounds.getWest());
+  return latSpan > LOCAL_STREET_BACKEND_QUERY_TILE_MIN_SPAN_DEG
+    || lonSpan > LOCAL_STREET_BACKEND_QUERY_TILE_MIN_SPAN_DEG;
+}
+
+function splitLocalBackendQueryBounds(bounds) {
+  if (!isValidLeafletBounds(bounds)) return [];
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+  const midLat = (south + north) / 2;
+  const midLon = (west + east) / 2;
+  const quads = [
+    L.latLngBounds([south, west], [midLat, midLon]),
+    L.latLngBounds([south, midLon], [midLat, east]),
+    L.latLngBounds([midLat, west], [north, midLon]),
+    L.latLngBounds([midLat, midLon], [north, east])
+  ];
+  return quads.filter(isValidLeafletBounds);
+}
+
+async function collectStreetElementsFromLocalBackend(bounds, options = {}) {
+  const maxDepth = Math.max(1, Number(options.maxDepth) || LOCAL_STREET_BACKEND_QUERY_TILE_MAX_DEPTH);
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const rowById = new Map();
+  const stats = {
+    requestCount: 0,
+    totalRowsFromBackend: 0,
+    splitQueryCount: 0,
+    unresolvedTruncatedQueries: 0
+  };
+
+  const ingestRows = (rows) => {
+    rows.forEach(raw => {
+      const id = Number(raw?.id);
+      if (!Number.isFinite(id)) return;
+      if (rowById.has(id)) return;
+      rowById.set(id, raw);
+    });
+  };
+
+  const walk = async (targetBounds, depth) => {
+    stats.requestCount += 1;
+    if (onProgress) onProgress(stats.requestCount, depth);
+    const response = await fetchStreetElementsFromLocalBackendBounds(targetBounds, LOCAL_STREET_BACKEND_QUERY_LIMIT);
+    stats.totalRowsFromBackend += Number(response.count) || response.rows.length;
+
+    const shouldSplit = response.truncated && shouldSplitLocalBackendQueryBounds(targetBounds, depth, maxDepth);
+    if (shouldSplit) {
+      stats.splitQueryCount += 1;
+      const chunks = splitLocalBackendQueryBounds(targetBounds);
+      for (let i = 0; i < chunks.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await walk(chunks[i], depth + 1);
+      }
+      return;
+    }
+
+    ingestRows(response.rows);
+    if (response.truncated) {
+      stats.unresolvedTruncatedQueries += 1;
+    }
+  };
+
+  await walk(bounds, 0);
+  return {
+    rows: [...rowById.values()],
+    requestCount: stats.requestCount,
+    totalRowsFromBackend: stats.totalRowsFromBackend,
+    splitQueryCount: stats.splitQueryCount,
+    unresolvedTruncatedQueries: stats.unresolvedTruncatedQueries
+  };
+}
+
+async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polygonLayer = null) {
+  const bounds = boundsOverride || map.getBounds();
+  const queryResult = await collectStreetElementsFromLocalBackend(bounds, {
+    maxDepth: LOCAL_STREET_BACKEND_QUERY_TILE_MAX_DEPTH,
+    onProgress: (requestCount, depth) => {
+      if (requestCount === 1 || requestCount % 3 === 0) {
+        const splitHint = depth > 0 ? " (tiling around dense area)" : "";
+        updateStreetLoadStatus(`Loading local backend streets... request ${requestCount.toLocaleString()}${splitHint}`);
+      }
+    }
+  });
+  const rows = queryResult.rows;
   if (!rows.length) {
-    return { addedCount: 0, totalCount: streetAttributeById.size, candidateCount: 0, knownCount: 0 };
+    return {
+      addedCount: 0,
+      totalCount: streetAttributeById.size,
+      candidateCount: 0,
+      knownCount: 0,
+      backendRequests: queryResult.requestCount,
+      unresolvedTruncatedQueries: queryResult.unresolvedTruncatedQueries
+    };
   }
 
   let addedCount = 0;
@@ -3286,12 +3733,14 @@ async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polyg
     batch.forEach(raw => {
       const element = normalizeBackendStreetElement(raw);
       if (!element) return;
+      if (!isMotorVehicleStreetTags(element.tags || {})) return;
       if (polygonLayer && !streetElementIntersectsPolygon(element, polygonLayer)) return;
       const normalizedTags = normalizeLocalStreetTags(element.tags || {});
       element.tags = normalizedTags;
       if (rowHasKnownStreetAttributes(normalizedTags)) knownCount += 1;
       if (upsertStreetElement(element)) addedCount += 1;
     });
+    maybeEnableStreetCasingPerformanceMode();
     updateStreetLoadStatus(
       `Loading local backend streets... ${Math.min(i + batch.length, rows.length).toLocaleString()}/${rows.length.toLocaleString()}`
     );
@@ -3310,7 +3759,9 @@ async function loadStreetAttributesFromLocalBackend(boundsOverride = null, polyg
     addedCount,
     totalCount: streetAttributeById.size,
     candidateCount: rows.length,
-    knownCount
+    knownCount,
+    backendRequests: queryResult.requestCount,
+    unresolvedTruncatedQueries: queryResult.unresolvedTruncatedQueries
   };
 }
 
@@ -3329,6 +3780,7 @@ async function loadStreetAttributesFromLocalDataset(boundsOverride = null, polyg
     batch.forEach(id => {
       const element = localStreetSourceState.elementsById.get(id);
       if (!element) return;
+      if (!isMotorVehicleStreetTags(element.tags || {})) return;
       if (polygonLayer && !streetElementIntersectsPolygon(element, polygonLayer)) return;
       const normalizedTags = normalizeLocalStreetTags(element.tags || {});
       element.tags = normalizedTags;
@@ -3336,6 +3788,7 @@ async function loadStreetAttributesFromLocalDataset(boundsOverride = null, polyg
       if (upsertStreetElement(element)) addedCount += 1;
     });
 
+    maybeEnableStreetCasingPerformanceMode();
     updateStreetLoadStatus(
       `Loading local street segments... ${Math.min(i + batch.length, candidates.length).toLocaleString()}/${candidates.length.toLocaleString()}`
     );
@@ -3543,11 +3996,7 @@ async function loadStreetSegmentsFromSavedPolygon(savedPolygon) {
 
   lastStreetLoadPolygonSnapshot = cloneStreetPolygonSnapshot(normalized.snapshot);
 
-  streetAttributeLayerGroup.clearLayers();
-  streetAttributeById.clear();
-  streetAttributesRows = [];
-  streetAttributeSelectedIds.clear();
-  if (attributeTableMode === "streets") renderAttributeTable();
+  clearRenderedStreetSegmentState();
 
   updateStreetLoadStatus(`Loading saved polygon "${normalized.name}"...`);
   await loadStreetAttributesForCurrentView(polygonLayer.getBounds(), polygonLayer);
@@ -3695,8 +4144,9 @@ function initStreetNetworkToggle() {
   const polygonLibraryCloseBtn = document.getElementById("streetPolygonLibraryClose");
 
   if (layerToggle) {
-    const storedLayerPref = storageGet(STREET_NETWORK_LAYER_VISIBLE_KEY);
-    layerToggle.checked = storedLayerPref ? storedLayerPref === "on" : true;
+    // Start with street network layer hidden on each app load.
+    layerToggle.checked = false;
+    storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, "off");
     layerToggle.addEventListener("change", () => {
       storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, layerToggle.checked ? "on" : "off");
       syncStreetNetworkOverlay();
@@ -3797,6 +4247,8 @@ let streetAutoLoadTimer = null;
 let pendingStreetReload = false;
 let streetLoadBarHideTimer = null;
 let streetLoadBarShownAt = 0;
+let streetCasingPerformanceModeEnabled = false;
+let streetCasingPerformanceModeNotified = false;
 const STREET_MAX_LOAD_SPAN = 0.9;
 
 function isStreetLoadableView() {
@@ -4102,15 +4554,106 @@ function setAttributeTableMode(mode) {
   }
 }
 
+function isStreetCasingEnabledForRendering() {
+  return !streetCasingPerformanceModeEnabled;
+}
+
+function resetStreetRenderingPerformanceMode() {
+  streetCasingPerformanceModeEnabled = false;
+  streetCasingPerformanceModeNotified = false;
+}
+
+function removeStreetEntryCasingLayer(entry) {
+  if (!entry?.casingLayer) return false;
+  try {
+    streetAttributeLayerGroup.removeLayer(entry.casingLayer);
+  } catch {}
+  try {
+    entry.casingLayer.off?.();
+  } catch {}
+  entry.casingLayer = null;
+  return true;
+}
+
+function maybeEnableStreetCasingPerformanceMode() {
+  if (streetCasingPerformanceModeEnabled) return false;
+  if (streetAttributeById.size < STREET_CASING_AUTO_DISABLE_SEGMENT_COUNT) return false;
+
+  streetCasingPerformanceModeEnabled = true;
+  let removed = 0;
+  streetAttributeById.forEach(entry => {
+    if (removeStreetEntryCasingLayer(entry)) removed += 1;
+  });
+
+  if (removed > 0) {
+    applyStreetSelectionStyles();
+    if (!streetCasingPerformanceModeNotified) {
+      streetCasingPerformanceModeNotified = true;
+      updateStreetLoadStatus(
+        `Performance mode enabled for large street layers (${streetAttributeById.size.toLocaleString()} segments).`,
+        false
+      );
+    }
+  }
+  return removed > 0;
+}
+
+function handleStreetSegmentLayerClick(id) {
+  if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) return;
+  const attributePanel = document.getElementById("attributeTablePanel");
+  if (attributeTableMode !== "streets") {
+    setAttributeTableMode("streets");
+  }
+  if (attributePanel?.classList.contains("closed")) {
+    openAttributePanel();
+  }
+  toggleStreetSegmentSelection(id, null, true);
+}
+
+function bindStreetSegmentLayerClick(layer, id) {
+  if (!layer || typeof layer.on !== "function") return;
+  layer.on("click", () => {
+    handleStreetSegmentLayerClick(id);
+  });
+}
+
 function setStreetSegmentStyle(entry, selected) {
   if (!entry?.layer) return;
   const baseStyle = getStreetSegmentBaseStyle(entry);
-  const selectedWeight = Math.max((Number(baseStyle.weight) || STREET_BASE_LINE_WEIGHT) + 2, 5);
-  entry.layer.setStyle(
-    selected
-      ? { color: "#ffe066", weight: selectedWeight, opacity: 0.96 }
-      : baseStyle
-  );
+  if (selected) {
+    const hasCasing = !!entry.casingLayer;
+    const selectedWeight = Math.max((Number(baseStyle.weight) || STREET_BASE_LINE_WEIGHT) + (hasCasing ? 0.9 : 1.8), 5);
+    const selectedCasingWeight = Math.max(
+      (Number(baseStyle.casingWeight) || selectedWeight + 1),
+      selectedWeight + 1
+    );
+    if (hasCasing && entry.casingLayer?.setStyle) {
+      entry.casingLayer.setStyle({
+        color: STREET_SELECTION_OUTER_COLOR,
+        weight: selectedCasingWeight,
+        opacity: 0.99
+      });
+    }
+    entry.layer.setStyle({
+      color: STREET_SELECTION_INNER_COLOR,
+      weight: selectedWeight,
+      opacity: 0.99
+    });
+    return;
+  }
+
+  if (entry.casingLayer?.setStyle) {
+    entry.casingLayer.setStyle({
+      color: baseStyle.casingColor,
+      weight: baseStyle.casingWeight,
+      opacity: baseStyle.casingOpacity
+    });
+  }
+  entry.layer.setStyle({
+    color: baseStyle.color,
+    weight: baseStyle.weight,
+    opacity: baseStyle.opacity
+  });
 }
 
 function applyStreetSelectionStyles() {
@@ -4180,10 +4723,11 @@ function renderStreetAttributeTable() {
     return;
   }
 
-  const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+  const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
   const labels = {
     id: "Way ID",
     name: "Road Name",
+    func_class: "Func Class",
     highway: "Class",
     ref: "Ref",
     maxspeed: "Max Speed",
@@ -4380,7 +4924,7 @@ function buildStreetOverpassQuery(tile) {
   return `
 [out:json][timeout:20];
 (
-  way["highway"](${s},${w},${n},${e});
+  way["highway"]["highway"!~"^(footway|cycleway|path|steps|pedestrian|bridleway|corridor|platform|via_ferrata|proposed|construction)$"](${s},${w},${n},${e});
 );
 out geom tags;
 `;
@@ -4454,7 +4998,7 @@ async function fetchStreetElementsFromOsmApiRecursive(tile, depth = 0) {
       if (k) tags[k] = v || "";
     });
 
-    if (!tags.highway) return;
+    if (!isMotorVehicleStreetTags(tags)) return;
 
     const geom = [];
     way.querySelectorAll("nd").forEach(nd => {
@@ -4517,7 +5061,7 @@ async function collectStreetElementsForBounds(south, west, north, east, options 
       try {
         const elements = await fetchStreetElementsForTile(tile);
         elements.forEach(e => {
-          if (!e || e.type !== "way" || !e.tags?.highway || !Array.isArray(e.geom) || e.geom.length < 2) return;
+          if (!e || e.type !== "way" || !isMotorVehicleStreetTags(e.tags || {}) || !Array.isArray(e.geom) || e.geom.length < 2) return;
           mergedById.set(e.id, e);
         });
       } catch (tileErr) {
@@ -4542,6 +5086,7 @@ function upsertStreetElement(e) {
     id,
     name: tags.name,
     highway: tags.highway,
+    func_class: tags.func_class,
     ref: tags.ref,
     maxspeed: tags.maxspeed,
     lanes: tags.lanes,
@@ -4551,32 +5096,38 @@ function upsertStreetElement(e) {
   const existing = streetAttributeById.get(id);
   if (existing?.layer) {
     existing.row = mergeStreetAttributeRows(existing.row, incomingRow);
+    if (!isStreetCasingEnabledForRendering() && existing.casingLayer) {
+      removeStreetEntryCasingLayer(existing);
+    }
+    if (typeof existing.casingLayer?.setLatLngs === "function") existing.casingLayer.setLatLngs(latlngs);
     if (typeof existing.layer.setLatLngs === "function") existing.layer.setLatLngs(latlngs);
     setStreetSegmentStyle(existing, streetAttributeSelectedIds.has(id));
     return false;
   }
   const row = mergeStreetAttributeRows(null, incomingRow);
   const baseStyle = getStreetSegmentBaseStyle({ row });
+  const useCasing = isStreetCasingEnabledForRendering();
+  const casingLayer = useCasing
+    ? L.polyline(latlngs, {
+      color: baseStyle.casingColor,
+      weight: baseStyle.casingWeight,
+      opacity: baseStyle.casingOpacity,
+      renderer: streetCasingCanvasRenderer,
+      smoothFactor: 1.2
+    })
+    : null;
   const layer = L.polyline(latlngs, {
     color: baseStyle.color,
     weight: baseStyle.weight,
     opacity: baseStyle.opacity,
-    renderer: canvasRenderer,
+    renderer: streetCenterCanvasRenderer,
     smoothFactor: 1.2
   });
-  layer.on("click", () => {
-    if (!isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY)) return;
-    const attributePanel = document.getElementById("attributeTablePanel");
-    if (attributeTableMode !== "streets") {
-      setAttributeTableMode("streets");
-    }
-    if (attributePanel?.classList.contains("closed")) {
-      openAttributePanel();
-    }
-    toggleStreetSegmentSelection(id, null, true);
-  });
+  bindStreetSegmentLayerClick(casingLayer, id);
+  bindStreetSegmentLayerClick(layer, id);
+  if (casingLayer) streetAttributeLayerGroup.addLayer(casingLayer);
   streetAttributeLayerGroup.addLayer(layer);
-  streetAttributeById.set(id, { id, row, layer });
+  streetAttributeById.set(id, { id, row, layer, casingLayer });
   return true;
 }
 
@@ -4617,15 +5168,28 @@ async function loadStreetAttributesForCurrentView(boundsOverride = null, polygon
       if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
         updateStreetLoadStatus("Loading street segments from local backend...");
         const backendResult = await loadStreetAttributesFromLocalBackend(b, polygonLayer);
-        const { addedCount, totalCount, candidateCount, knownCount } = backendResult;
+        const {
+          addedCount,
+          totalCount,
+          candidateCount,
+          knownCount,
+          backendRequests,
+          unresolvedTruncatedQueries
+        } = backendResult;
         if (!candidateCount) {
           updateStreetLoadStatus("No backend street segments found in this area.", true);
+        } else if (unresolvedTruncatedQueries > 0) {
+          updateStreetLoadStatus(
+            `Loaded ${addedCount} backend street segments (${totalCount} total on map) after ${backendRequests.toLocaleString()} requests, but dense areas may still be incomplete. Zoom in and reload to fill missing portions.`,
+            true
+          );
         } else if (!totalCount) {
           updateStreetLoadStatus("Backend streets loaded, but none intersect this polygon.", true);
         } else if (!knownCount) {
           updateStreetLoadStatus("Street geometry loaded, but local index attributes are empty. Re-run indexer with the latest converter to populate road fields.", true);
         } else {
-          updateStreetLoadStatus(`Loaded ${addedCount} backend street segments (${totalCount} total on map).`, false);
+          const requestSuffix = backendRequests > 1 ? ` in ${backendRequests.toLocaleString()} requests` : "";
+          updateStreetLoadStatus(`Loaded ${addedCount} backend street segments (${totalCount} total on map)${requestSuffix}.`, false);
         }
         return;
       }
@@ -4669,9 +5233,11 @@ async function loadStreetAttributesForCurrentView(boundsOverride = null, polygon
     const applyElementsToMap = (elementsMap) => {
       let chunkAdded = 0;
       elementsMap.forEach(e => {
+        if (!isMotorVehicleStreetTags(e?.tags || {})) return;
         if (polygonLayer && !streetElementIntersectsPolygon(e, polygonLayer)) return;
         if (upsertStreetElement(e)) chunkAdded += 1;
       });
+      maybeEnableStreetCasingPerformanceMode();
       if (chunkAdded > 0) {
         streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
         syncStreetNetworkOverlay();
@@ -4752,9 +5318,11 @@ async function loadStreetAttributesForCurrentView(boundsOverride = null, polygon
 
     if (!streamedToMap) {
       [...mergedById.values()].forEach(e => {
+        if (!isMotorVehicleStreetTags(e?.tags || {})) return;
         if (polygonLayer && !streetElementIntersectsPolygon(e, polygonLayer)) return;
         if (upsertStreetElement(e)) addedCount += 1;
       });
+      maybeEnableStreetCasingPerformanceMode();
     }
     streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
     syncStreetNetworkOverlay();
@@ -5224,11 +5792,7 @@ map.on(L.Draw.Event.CREATED, e => {
       streetLoadPolygonLayerGroup.clearLayers();
     }, 0);
     // Replace old streets only after user confirms a new polygon.
-    streetAttributeLayerGroup.clearLayers();
-    streetAttributeById.clear();
-    streetAttributesRows = [];
-    streetAttributeSelectedIds.clear();
-    if (attributeTableMode === "streets") renderAttributeTable();
+    clearRenderedStreetSegmentState();
     updateStreetLoadStatus("Polygon captured. Loading street segments...");
     loadStreetAttributesForCurrentView(e.layer.getBounds(), e.layer).catch(err => {
       console.error("Street polygon load failed:", err);
@@ -8582,7 +9146,7 @@ function buildAttributeTablePrintDocumentHtml() {
   if (attributeTableMode === "streets") {
     const rows = getFilteredStreetAttributeRows();
     if (!rows.length) return null;
-    const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+    const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
     const maxRows = 4200;
     const slice = rows.slice(0, maxRows);
     const tableRows = slice.map((row, idx) => `
@@ -11411,7 +11975,7 @@ function exportAttributeVisibleRowsToCsv() {
       alert("No street attributes to export.");
       return;
     }
-    const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+    const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
     const esc = (v) => {
       const raw = String(v ?? "");
       if (/[\",\\n]/.test(raw)) return `\"${raw.replace(/\"/g, '\"\"')}\"`;
@@ -11644,7 +12208,7 @@ function zoomToSelectedAttributeRows() {
 }
 
 function openStreetAttributeTablePopout() {
-  const headers = ["id", "name", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+  const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
   const rows = (Array.isArray(streetAttributesRows) && streetAttributesRows.length
     ? streetAttributesRows
     : [...streetAttributeById.values()].map(entry => entry?.row).filter(Boolean))
@@ -15313,7 +15877,6 @@ if (currentBase === "satellite") {
 } else {
   map.removeLayer(satelliteLabelsLayer);
 }
-syncStreetNetworkOverlay();
 
 
   Object.values(routeDayGroups).forEach(group => {
