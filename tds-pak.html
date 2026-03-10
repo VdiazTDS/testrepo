@@ -61,6 +61,15 @@
       <span>Print</span>
     </button>
     <button
+      id="wheelZoomInputBtn"
+      class="primary-btn wheel-zoom-btn wheel-zoom-icon-btn"
+      type="button"
+      aria-label="Mouse Wheel Zoom Input"
+      title="Mouse Wheel Zoom Input"
+    >
+      <span class="wheel-zoom-icon" aria-hidden="true"></span>
+    </button>
+    <button
       id="layerManagerBtn"
       class="primary-btn layer-manager-btn layer-manager-icon-btn"
       type="button"
@@ -68,6 +77,10 @@
       title="Layer Manager"
     >
       <span class="layer-manager-icon" aria-hidden="true"></span>
+    </button>
+    <button id="multiDayToggleBtn" class="primary-btn multiday-toggle-btn" type="button" aria-pressed="false" title="Open Multi-Day manager">
+      <span class="multiday-toggle-icon" aria-hidden="true"></span>
+      <span class="multiday-toggle-label">Multi-Day</span>
     </button>
     <button id="importWizardBtn" class="primary-btn import-wizard-btn" type="button">
       <span class="import-wizard-icon" aria-hidden="true"></span>
@@ -81,17 +94,13 @@
       <span class="street-attributes-icon" aria-hidden="true"></span>
       <span>Street Attributes</span>
     </button>
-    <button id="multiDayToggleBtn" class="primary-btn multiday-toggle-btn" type="button" aria-pressed="false" title="Open Multi-Day manager">
-      <span class="multiday-toggle-icon" aria-hidden="true"></span>
-      <span class="multiday-toggle-label">Multi-Day</span>
+    <button id="attributeTableBtn" class="primary-btn attribute-table-btn" type="button">
+      <span class="attribute-table-icon" aria-hidden="true"></span>
+      <span>Attribute Table</span>
     </button>
     <button id="selectByAttributesBtn" class="primary-btn select-attributes-btn" type="button">
       <span class="select-attributes-icon" aria-hidden="true"></span>
       <span>Select By Attributes</span>
-    </button>
-    <button id="attributeTableBtn" class="primary-btn attribute-table-btn" type="button">
-      <span class="attribute-table-icon" aria-hidden="true"></span>
-      <span>Attribute Table</span>
     </button>
     <div id="desktopSelectionHeader" class="desktop-selection-header"></div>
   </div>
@@ -547,7 +556,7 @@
         </section>
         <section class="street-network-manager-card">
           <h4>Data Source</h4>
-          <p class="street-network-manager-card-desc">Use the setup program workflow, then connect to backend.</p>
+          <p class="street-network-manager-card-desc">Use the setup package workflow to install the desktop Backend Manager app, then connect backend.</p>
           <div class="street-network-manager-actions">
             <button id="openStreetPolygonLibraryBtn" class="mini-btn street-network-action-btn" type="button">
               <span class="street-network-action-title">Saved Polygons</span>
@@ -558,8 +567,8 @@
               <span class="street-network-action-subtitle">Save the last used street polygon for reuse.</span>
             </button>
             <button id="downloadAutoSetupPackageBtn" class="mini-btn street-network-action-btn" type="button">
-              <span class="street-network-action-title">Download Setup Program</span>
-              <span class="street-network-action-subtitle">Get the full converter + index + backend package.</span>
+              <span class="street-network-action-title">Download Installer Package</span>
+              <span class="street-network-action-subtitle">Get installer package with converter, indexer, backend, and desktop manager GUI.</span>
             </button>
             <button id="openStreetSetupWizardBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
               <span class="street-network-action-title">Street Setup Wizard</span>
@@ -569,7 +578,7 @@
         </section>
         <section class="street-network-manager-card">
           <h4>Backend</h4>
-          <p class="street-network-manager-card-desc">Check local server health and set its URL.</p>
+          <p class="street-network-manager-card-desc">Use the desktop Backend Manager app to start backend, then check health and URL here.</p>
           <div class="street-network-manager-actions street-network-manager-actions-two">
             <button id="checkLocalBackendBtn" class="mini-btn street-network-action-btn is-primary-path" type="button">
               <span class="street-network-action-title">Check Backend</span>
@@ -817,6 +826,19 @@
     </div>
   </div>
 </div>
+<div id="wheelZoomInputModal" class="modal">
+  <div class="modal-content wheel-zoom-modal-content">
+    <div class="wheel-zoom-head">
+      <h3>Mouse Wheel Zoom Input</h3>
+      <p>Choose how much the map zooms in/out for each wheel input.</p>
+    </div>
+    <div id="wheelZoomInputOptions" class="wheel-zoom-options" role="group" aria-label="Mouse wheel zoom amount options"></div>
+    <div id="wheelZoomInputStatus" class="wheel-zoom-status">Current: Small</div>
+    <div class="modal-actions">
+      <button id="wheelZoomInputCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
 <div id="multiDayManagerModal" class="modal">
   <div class="modal-content multiday-manager-modal-content">
     <div class="multiday-manager-head">
@@ -952,10 +974,10 @@
 <div id="streetSetupWizardModal" class="modal">
   <div class="modal-content street-setup-wizard-modal-content">
     <h3>Street Setup Wizard</h3>
-    <p>Recommended flow: download setup program, run launcher, check backend, then turn on Street Segments and choose/draw a polygon.</p>
+    <p>Recommended flow: download setup package, run auto-setup launcher (installs Backend Manager app), check backend, then turn on Street Segments and choose/draw a polygon.</p>
     <div class="street-setup-wizard-actions">
       <button id="streetWizardDownloadTexasBtn" class="primary-btn" type="button">Optional: Download Texas Source ZIP</button>
-      <button id="streetWizardAutoSetupBtn" class="primary-btn" type="button">1) Download Setup Program</button>
+      <button id="streetWizardAutoSetupBtn" class="primary-btn" type="button">1) Download Installer Package</button>
       <button id="streetWizardCheckBackendBtn" class="primary-btn" type="button">2) Check Backend</button>
       <button id="streetWizardStartBtn" class="primary-btn" type="button">3) Turn On + Choose/Draw Polygon</button>
     </div>
@@ -976,7 +998,7 @@
   </div>
 </div>
 <script src="https://unpkg.com/shpjs@6.2.0/dist/shp.min.js" defer></script>
-<script src="app-tds-pak.js" defer></script>
+<script src="app-tds-pak.js?v=20260310-3" defer></script>
 <!-- MOBILE Selected Stops Button -->
 <button id="mobileSelectionBtn">Selected: 0</button>
 

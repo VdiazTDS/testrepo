@@ -2,23 +2,26 @@ TDS PAK Local Indexed Streets Backend - Quick Start
 
 Fastest path (one-click)
 - Double-click: tds-local-streets-auto-setup-launcher.cmd
-- It will auto-detect Texas ZIP in Downloads (or download it), convert to GeoJSON, index to SQLite, start backend, and open TDS PAK.
+- It will auto-detect Texas ZIP in Downloads (or download it), convert to GeoJSON, index to SQLite, start backend, install/update the Street Backend Manager app, and open TDS PAK.
 
-1) Build the indexed database
-   - Double-click: tds-street-indexer-launcher.cmd
-   - Select your roads GeoJSON when prompted.
-   - This creates: tds-streets.sqlite
+Already ran older setup before this update?
+- Double-click: tds-street-backend-manager-install-launcher.cmd
+- This installs/updates the Backend Manager desktop app without rerunning full conversion/indexing.
 
-2) Start the backend server
-   - Double-click: tds-street-backend-launcher.cmd
-   - Keep that terminal window open while using TDS PAK.
-   - Backend URL (default): http://127.0.0.1:8787
+1) Start/monitor backend using desktop app
+   - Open Desktop shortcut: TDS PAK Street Backend Manager
+   - Click Start Backend (or enable Auto-start in app settings)
+   - Backend URL default: http://127.0.0.1:8787
 
-3) Use it in TDS PAK
+2) Use it in TDS PAK
    - Open tds-pak page.
    - In local streets controls, click Check Backend.
    - Turn on "Street Segments (Local File)".
    - Draw polygon / work the map as usual.
+
+Manual fallback (advanced)
+- Build index manually: tds-street-indexer-launcher.cmd
+- Start backend manually: tds-street-backend-launcher.cmd
 
 Notes
 - If backend is on a different port/host, click "Backend URL" in TDS PAK and set it.

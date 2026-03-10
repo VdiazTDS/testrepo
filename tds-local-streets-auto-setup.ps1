@@ -8,6 +8,8 @@ param(
   [switch]$SkipConvert,
   [switch]$SkipIndex,
   [switch]$SkipBackendStart,
+  [switch]$SkipManagerInstall,
+  [switch]$OpenBackendManagerAfterSetup,
   [switch]$OpenTdsPakAfterSetup,
   [string]$TdsPakUrl = "http://127.0.0.1:5500/tds-pak.html"
 )
@@ -353,14 +355,46 @@ try {
     }
   }
 
+  $backendManagerLauncher = ""
+  if (-not $SkipManagerInstall) {
+    $managerInstallerScript = Join-Path $scriptDir "tds-street-backend-manager-install.ps1"
+    if (Test-Path -LiteralPath $managerInstallerScript) {
+      Write-Step "Installing/Updating Street Backend Manager app..."
+      powershell -NoProfile -ExecutionPolicy Bypass -STA -File $managerInstallerScript -Quiet
+      if ($LASTEXITCODE -ne 0) {
+        Write-Step "Backend Manager installer returned exit code $LASTEXITCODE. Continuing setup."
+      }
+    } else {
+      Write-Step "Backend Manager installer not found in this package. Skipping manager install."
+    }
+    $backendManagerLauncher = Join-Path $env:LOCALAPPDATA "TDS-Pak\StreetBackendManager\tds-street-backend-manager-launcher.cmd"
+    if (Test-Path -LiteralPath $backendManagerLauncher) {
+      Write-Step "Backend Manager app is installed (Desktop + Start Menu shortcuts created)."
+    }
+  } else {
+    Write-Step "Skipping Backend Manager install by request."
+  }
+
   Write-Host ""
   Write-Host "Setup complete." -ForegroundColor Green
   Write-Host "1) Open TDS PAK."
   Write-Host "2) Click 'Check Backend'."
   Write-Host "3) Turn on 'Street Segments (Local Source)'."
+  if ($backendManagerLauncher -and (Test-Path -LiteralPath $backendManagerLauncher)) {
+    Write-Host "4) Open 'TDS PAK Street Backend Manager' from Desktop to monitor backend + future add-ons."
+  }
   Write-Host ""
   Write-Host "Backend URL: http://127.0.0.1:8787"
   Write-Host "DB path: $DbPath"
+
+  if ($OpenBackendManagerAfterSetup -and $backendManagerLauncher -and (Test-Path -LiteralPath $backendManagerLauncher)) {
+    try {
+      Write-Step "Opening Street Backend Manager app..."
+      Start-Process -FilePath $backendManagerLauncher
+    } catch {
+      Write-Step "Could not open Backend Manager automatically. Use Desktop shortcut."
+    }
+  }
 
   if ($OpenTdsPakAfterSetup) {
     try {

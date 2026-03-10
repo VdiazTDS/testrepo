@@ -12,10 +12,11 @@ if not exist "%PS_SCRIPT%" (
 )
 
 echo Running one-click TDS streets setup...
-echo This will auto-detect your Texas ZIP, convert, index, start backend, and open TDS PAK.
+echo This will auto-detect your Texas ZIP, convert, index, start backend,
+echo install/update the Street Backend Manager app, and open TDS PAK.
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS_SCRIPT%" -OpenTdsPakAfterSetup
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%PS_SCRIPT%" -OpenBackendManagerAfterSetup -OpenTdsPakAfterSetup
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

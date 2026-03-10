@@ -592,11 +592,175 @@ setCurrentFileDisplay(window._currentFilePath);
 // ================= MAP SETUP =================
 // Create Leaflet map
 const map = L.map("map", { preferCanvas: true }).setView([31.0, -99.0], 6);
+// Allow fractional zoom levels so wheel-step amounts like 0.25 and 0.5 are visible.
+map.options.zoomSnap = 0;
+map.options.zoomDelta = 0.25;
+const MAP_WHEEL_INPUT_AMOUNT_KEY = "mapWheelInputAmount";
+const MAP_WHEEL_INPUT_PRESETS = Object.freeze({
+  "very-small": {
+    step: 0.25,
+    title: "Very Small",
+    hint: "0.25 zoom levels per wheel input."
+  },
+  "small": {
+    step: 0.5,
+    title: "Small",
+    hint: "0.5 zoom levels per wheel input."
+  },
+  "medium": {
+    step: 1,
+    title: "Medium",
+    hint: "1 zoom level per wheel input."
+  },
+  "large": {
+    step: 2,
+    title: "Large",
+    hint: "2 zoom levels per wheel input."
+  }
+});
+let mapWheelInputStep = 0.5;
+let mapWheelZoomHandlerBound = false;
+let mapWheelZoomAccumulator = 0;
+let mapWheelZoomAccumulatorTimer = null;
+
+function normalizeMapWheelInputAmount(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(MAP_WHEEL_INPUT_PRESETS, token)) return token;
+  return "small";
+}
+
+function applyMapWheelInputAmount(mode) {
+  const normalized = normalizeMapWheelInputAmount(mode);
+  const preset = MAP_WHEEL_INPUT_PRESETS[normalized];
+  mapWheelInputStep = Math.max(0.1, Number(preset.step) || 0.5);
+  return normalized;
+}
+
+function bindCustomMouseWheelZoomInput() {
+  if (mapWheelZoomHandlerBound) return;
+  mapWheelZoomHandlerBound = true;
+  try { map.scrollWheelZoom?.disable?.(); } catch (_) {}
+  const container = map.getContainer?.();
+  if (!container) return;
+
+  container.addEventListener("wheel", event => {
+    if (!event || typeof event.deltaY !== "number" || event.deltaY === 0) return;
+    event.preventDefault();
+
+    const direction = event.deltaY < 0 ? 1 : -1;
+    mapWheelZoomAccumulator += direction;
+
+    if (mapWheelZoomAccumulatorTimer) {
+      clearTimeout(mapWheelZoomAccumulatorTimer);
+      mapWheelZoomAccumulatorTimer = null;
+    }
+    mapWheelZoomAccumulatorTimer = setTimeout(() => {
+      mapWheelZoomAccumulator = 0;
+      mapWheelZoomAccumulatorTimer = null;
+    }, 160);
+
+    if (Math.abs(mapWheelZoomAccumulator) < 1) return;
+    const stepDirection = mapWheelZoomAccumulator > 0 ? 1 : -1;
+    mapWheelZoomAccumulator = 0;
+
+    const step = mapWheelInputStep;
+    const targetZoom = map.getZoom() + (stepDirection * step);
+    const minZoom = Number.isFinite(map.getMinZoom?.()) ? map.getMinZoom() : 0;
+    const maxZoom = Number.isFinite(map.getMaxZoom?.()) ? map.getMaxZoom() : 20;
+    const limitedTargetZoom = Math.max(minZoom, Math.min(maxZoom, targetZoom));
+
+    const rect = container.getBoundingClientRect();
+    const centerPoint = L.point(
+      event.clientX - rect.left,
+      event.clientY - rect.top
+    );
+
+    map.setZoomAround(centerPoint, limitedTargetZoom, { animate: false });
+  }, { passive: false });
+}
+
+function initWheelZoomInputControls() {
+  const openBtn = document.getElementById("wheelZoomInputBtn");
+  const modal = document.getElementById("wheelZoomInputModal");
+  const closeBtn = document.getElementById("wheelZoomInputCloseBtn");
+  const optionsNode = document.getElementById("wheelZoomInputOptions");
+  const statusNode = document.getElementById("wheelZoomInputStatus");
+  const storageValue = storageGet(MAP_WHEEL_INPUT_AMOUNT_KEY);
+  let activeMode = applyMapWheelInputAmount(storageValue);
+  if (!storageValue) storageSet(MAP_WHEEL_INPUT_AMOUNT_KEY, activeMode);
+  bindCustomMouseWheelZoomInput();
+
+  const setStatusText = () => {
+    if (!statusNode) return;
+    const preset = MAP_WHEEL_INPUT_PRESETS[activeMode] || MAP_WHEEL_INPUT_PRESETS.small;
+    statusNode.textContent = `Current: ${preset.title} (${preset.hint})`;
+  };
+
+  const setMode = mode => {
+    const nextMode = applyMapWheelInputAmount(mode);
+    if (nextMode === activeMode) return;
+    activeMode = nextMode;
+    storageSet(MAP_WHEEL_INPUT_AMOUNT_KEY, activeMode);
+    renderOptions();
+    setStatusText();
+  };
+
+  const renderOptions = () => {
+    if (!optionsNode) return;
+    optionsNode.innerHTML = "";
+    Object.entries(MAP_WHEEL_INPUT_PRESETS).forEach(([key, preset]) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "wheel-zoom-option-btn";
+      btn.classList.toggle("active", key === activeMode);
+      btn.innerHTML = `<span class="wheel-zoom-option-title">${preset.title}</span><span class="wheel-zoom-option-hint">${preset.hint}</span>`;
+      btn.addEventListener("click", () => setMode(key));
+      optionsNode.appendChild(btn);
+    });
+  };
+
+  renderOptions();
+  setStatusText();
+
+  if (!openBtn || !modal || !closeBtn) return;
+  if (openBtn.dataset.wheelZoomBound === "1") return;
+  openBtn.dataset.wheelZoomBound = "1";
+
+  const openModal = () => {
+    renderOptions();
+    setStatusText();
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  openBtn.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+  window.addEventListener("keydown", event => {
+    if (modal.style.display !== "flex") return;
+    if (event.key === "Escape") closeModal();
+  });
+}
+
+initWheelZoomInputControls();
+const ROUTE_DAY_PANE = "routeDayPane";
+const STREET_NETWORK_PANE = "streetNetworkPane";
+const routeDayPane = map.createPane(ROUTE_DAY_PANE);
+if (routeDayPane) routeDayPane.style.zIndex = "380";
+const streetNetworkPane = map.createPane(STREET_NETWORK_PANE);
+if (streetNetworkPane) streetNetworkPane.style.zIndex = "370";
 // Shared Canvas renderer for high-performance drawing
-const canvasRenderer = L.canvas({ padding: 0.5 });
+const canvasRenderer = L.canvas({ padding: 0.5, pane: ROUTE_DAY_PANE });
 // Keep all street casings under all street centerlines to prevent visual cut-outs.
-const streetCasingCanvasRenderer = L.canvas({ padding: 0.5 });
-const streetCenterCanvasRenderer = L.canvas({ padding: 0.5 });
+const streetCasingCanvasRenderer = L.canvas({ padding: 0.5, pane: STREET_NETWORK_PANE });
+const streetCenterCanvasRenderer = L.canvas({ padding: 0.5, pane: STREET_NETWORK_PANE });
 
 
 // ===== BASE MAP LAYERS =====
@@ -801,7 +965,7 @@ const LOCAL_STREET_JSON_PARSE_WARN_MB = 420;
 const LOCAL_STREET_JSON_STREAM_THRESHOLD_MB = 260;
 const LOCAL_STREET_STREAM_YIELD_FEATURE_STEP = 300;
 const LOCAL_STREET_OFFLINE_CONVERTER_PACKAGE = "tds-streets-offline-converter-package.zip?v=20260306-8";
-const LOCAL_STREET_AUTO_SETUP_PACKAGE = "tds-streets-auto-setup-package.zip?v=20260306-6";
+const LOCAL_STREET_AUTO_SETUP_PACKAGE = "tds-streets-auto-setup-package.zip?v=20260310-4";
 const LOCAL_STREET_BACKEND_URL_KEY = "localStreetBackendUrl";
 const STREET_NETWORK_LAYER_VISIBLE_KEY = "streetNetworkLayerVisible";
 const LOCAL_STREET_BACKEND_URL_DEFAULT = "http://127.0.0.1:8787";
@@ -1301,7 +1465,7 @@ function updateStreetNetworkManagerHint(hasProvider = localStreetHasProvider()) 
   const layerVisible = isStreetNetworkLayerVisibleEnabled();
 
   if (!hasProvider) {
-    hintNode.textContent = "Start with Street Setup Wizard: download setup program, run launcher, then check backend.";
+    hintNode.textContent = "Start with Street Setup Wizard: download setup package, run auto-setup, then open Street Backend Manager and click Check Backend.";
     return;
   }
 
@@ -1371,7 +1535,7 @@ function updateLocalStreetSourceStatus(message = "") {
     return;
   }
   if (!hasProvider) {
-    node.textContent = "Street layer: Off. Click Street Setup Wizard, then complete steps 1-3.";
+    node.textContent = "Street layer: Off. Click Street Setup Wizard, run setup, then use Street Backend Manager and complete steps 1-3.";
     return;
   }
 
@@ -2503,7 +2667,7 @@ function startTexasStreetsDownload(skipConfirm = false) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  updateLocalStreetSourceStatus("Downloading Texas source ZIP from Geofabrik... then run the setup program on that ZIP.");
+  updateLocalStreetSourceStatus("Downloading Texas source ZIP from Geofabrik... then run auto-setup and open Backend Manager.");
   return true;
 }
 
@@ -2525,7 +2689,7 @@ function downloadLocalStreetAutoSetupPackage() {
   link.click();
   link.remove();
   updateLocalStreetSourceStatus(
-    "Downloaded setup program package. Extract it, then run tds-local-streets-auto-setup-launcher.cmd."
+    "Downloaded setup package. Extract it, run tds-local-streets-auto-setup-launcher.cmd, then open Backend Manager. Existing users can run tds-street-backend-manager-install-launcher.cmd only."
   );
 }
 
@@ -2828,7 +2992,7 @@ async function loadLocalStreetSourceFromPath(pathInput, options = {}) {
     finishLocalStreetLoadProgress("Could not read saved streets path.", true);
     const baseMsg = `Unable to open "${sourcePath}".`;
     const localHint = isLikelyLocalFilesystemPath(sourcePath)
-      ? "\n\nBrowsers usually block direct local filesystem paths. Use Street Setup Wizard + backend instead."
+      ? "\n\nBrowsers usually block direct local filesystem paths. Use Street Setup Wizard + Backend Manager instead."
       : "";
     throw new Error(`${baseMsg}\n${err?.message || err}${localHint}`);
   }
@@ -2958,7 +3122,7 @@ async function promptForMissingSavedStreetSource(error = null) {
   try {
     await loadLocalStreetSourceFromPath(pastedPath);
   } catch (err) {
-    alert(`Could not load streets from that path.\n\n${err?.message || err}\n\nUse Street Setup Wizard instead.`);
+    alert(`Could not load streets from that path.\n\n${err?.message || err}\n\nUse Street Setup Wizard and Backend Manager instead.`);
   }
 }
 
@@ -3064,7 +3228,7 @@ function openStreetSetupWizardModal() {
   setStreetWizardStatus(
     localStreetBackendState.available && localStreetBackendState.hasIndex
       ? "Backend is ready. Next: turn on Street Segments, then choose a saved polygon or draw a new one."
-      : "Recommended path: Download Setup Program, run launcher, Check Backend, then start polygon load."
+      : "Recommended path: Download Setup Package, run auto-setup launcher, open Backend Manager, Check Backend, then start polygon load."
   );
   modal.style.display = "flex";
 }
@@ -3341,7 +3505,7 @@ function initLocalStreetSourceControls() {
       if (showAlert) {
         alert(
           "Local backend is running, but no streets index is loaded.\n\n" +
-          "Run the setup program (or indexer) first, then click Check Backend again."
+          "Run the setup package again (or open indexer from Backend Manager), then click Check Backend again."
         );
       }
       return false;
@@ -3352,7 +3516,7 @@ function initLocalStreetSourceControls() {
       alert(
         "Local backend is not reachable.\n\n" +
         `URL: ${localStreetBackendState.baseUrl}\n` +
-        "Start the backend server locally, then check again."
+        "Start backend from the Street Backend Manager desktop app, then check again."
       );
     }
     return false;
@@ -3389,7 +3553,7 @@ function initLocalStreetSourceControls() {
 
   downloadAutoSetupPackageBtn?.addEventListener("click", () => {
     downloadLocalStreetAutoSetupPackage();
-    setStreetWizardStatus("Auto setup package downloaded.");
+    setStreetWizardStatus("Installer package downloaded.");
   });
 
   checkLocalBackendBtn?.addEventListener("click", () => {
@@ -3420,12 +3584,12 @@ function initLocalStreetSourceControls() {
 
   streetWizardDownloadTexasBtn?.addEventListener("click", () => {
     startTexasStreetsDownload(false);
-    setStreetWizardStatus("Texas source ZIP download started. Next: run setup program, then check backend.");
+    setStreetWizardStatus("Texas source ZIP download started. Next: run auto-setup launcher, then check backend.");
   });
 
   streetWizardAutoSetupBtn?.addEventListener("click", () => {
     downloadLocalStreetAutoSetupPackage();
-    setStreetWizardStatus("Auto setup package downloaded. Run the launcher file, then click Check Backend.");
+    setStreetWizardStatus("Setup package downloaded. Run auto-setup launcher, then use Backend Manager and click Check Backend.");
   });
 
   streetWizardCheckBackendBtn?.addEventListener("click", () => {
@@ -3971,7 +4135,7 @@ async function loadStreetSegmentsFromSavedPolygon(savedPolygon) {
   }
 
   if (!localStreetHasProvider()) {
-    alert("Start the local backend first, or run the setup program.");
+    alert("Start backend from the Street Backend Manager app, or run the setup package.");
     return;
   }
 
@@ -4166,7 +4330,7 @@ function initStreetNetworkToggle() {
     if (sourceToggle.checked && !localStreetHasProvider()) {
       sourceToggle.checked = false;
       storageSet("streetSegmentsVisible", "off");
-      updateLocalStreetSourceStatus("Street source is not ready. Open Street Setup Wizard and follow steps 1-3.");
+      updateLocalStreetSourceStatus("Street source is not ready. Open Street Setup Wizard, run setup + Backend Manager, then follow steps 1-3.");
       openStreetSetupWizardModal();
       return;
     }
@@ -5898,6 +6062,12 @@ function getLayerManagerDefaultOrder() {
   return [...getSortedRouteDayKeysForLayerManager(), LAYER_MANAGER_STREET_KEY];
 }
 
+function resetLayerManagerOrderToDefault() {
+  layerManagerOrderTop = getLayerManagerDefaultOrder();
+  saveLayerManagerOrder(layerManagerOrderTop);
+  return layerManagerOrderTop;
+}
+
 function isRouteDayLayerManagerEntry(entryId) {
   return entryId !== LAYER_MANAGER_STREET_KEY && Object.prototype.hasOwnProperty.call(routeDayGroups, entryId);
 }
@@ -6104,8 +6274,21 @@ function isRouteDayLayerVisibleOnMap(key) {
   return group.layers.some(layer => map.hasLayer(layer));
 }
 
+function applyLayerManagerPaneOrder(orderTop = ensureLayerManagerOrder()) {
+  const streetOnTop = orderTop[0] === LAYER_MANAGER_STREET_KEY;
+  const routeZ = streetOnTop ? 370 : 380;
+  const streetZ = streetOnTop ? 380 : 370;
+
+  const routePaneEl = map.getPane(ROUTE_DAY_PANE);
+  if (routePaneEl) routePaneEl.style.zIndex = String(routeZ);
+
+  const streetPaneEl = map.getPane(STREET_NETWORK_PANE);
+  if (streetPaneEl) streetPaneEl.style.zIndex = String(streetZ);
+}
+
 function applyLayerManagerOrder() {
   const orderTop = ensureLayerManagerOrder();
+  applyLayerManagerPaneOrder(orderTop);
   for (let i = orderTop.length - 1; i >= 0; i -= 1) {
     const entryId = orderTop[i];
     if (entryId === LAYER_MANAGER_STREET_KEY) {
@@ -12863,6 +13046,19 @@ if (labelText) {
     globalBounds.extend([lat, lon]);
   });
 
+  // Default ordering for a newly loaded route file: records (route+day) above streets.
+  resetLayerManagerOrderToDefault();
+  if (typeof autoExpandRouteDaySidebarIfLayersPresent === "function") {
+    autoExpandRouteDaySidebarIfLayersPresent();
+  } else {
+    const routeDayToggleNode = document.getElementById("routeDayToggle");
+    const routeDayContentNode = document.getElementById("routeDayContent");
+    if (routeDayToggleNode && routeDayContentNode && Object.keys(routeDayGroups).length) {
+      routeDayContentNode.classList.remove("collapsed");
+      routeDayToggleNode.classList.add("open");
+    }
+  }
+
   buildRouteCheckboxes([...routeSet]);
   buildRouteDayLayerControls();
   rebuildMultiDayServiceProfilesFromMapLayers();
@@ -16462,6 +16658,21 @@ window.hideLoading = function(message) {
   }
 };
 //////
+
+function setRouteDaySidebarExpanded(expanded = true) {
+  const routeDayToggle = document.getElementById("routeDayToggle");
+  const routeDayContent = document.getElementById("routeDayContent");
+  if (!routeDayToggle || !routeDayContent) return false;
+  const open = !!expanded;
+  routeDayContent.classList.toggle("collapsed", !open);
+  routeDayToggle.classList.toggle("open", open);
+  return true;
+}
+
+function autoExpandRouteDaySidebarIfLayersPresent() {
+  if (!Object.keys(routeDayGroups).length) return;
+  setRouteDaySidebarExpanded(true);
+}
   
 // ===== ROUTE + DAY COLLAPSIBLE =====
 const routeDayToggle = document.getElementById("routeDayToggle");
@@ -16470,7 +16681,7 @@ const routeDayContent = document.getElementById("routeDayContent");
 if (routeDayToggle && routeDayContent) {
 
   // Closed by default
-  routeDayContent.classList.add("collapsed");
+  setRouteDaySidebarExpanded(false);
 
   routeDayToggle.addEventListener("click", (e) => {
 
