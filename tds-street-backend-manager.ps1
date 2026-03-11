@@ -22,6 +22,7 @@ $script:ManagedBackendProcess = $null
 $script:RuntimeLogOffset = 0
 $script:RuntimeErrorLogOffset = 0
 $script:LastHealthSummary = ""
+$script:DefaultTdsPakUrl = "https://vdiaztds.github.io/"
 $script:Theme = @{
   PageBg = [System.Drawing.Color]::FromArgb(238, 245, 252)
   HeaderBg = [System.Drawing.Color]::FromArgb(252, 254, 255)
@@ -89,7 +90,7 @@ function Load-ManagerConfig {
     host = $DefaultHost
     port = [Math]::Max(1, [Math]::Min(65535, [int]$DefaultPort))
     auto_start = $false
-    tds_pak_url = "http://127.0.0.1:5500/tds-pak.html"
+    tds_pak_url = $script:DefaultTdsPakUrl
   }
 
   if (-not (Test-Path -LiteralPath $script:ConfigPath)) {
@@ -105,7 +106,7 @@ function Load-ManagerConfig {
       host = if ($parsed.host) { [string]$parsed.host } else { $default.host }
       port = if ($parsed.port) { [int]$parsed.port } else { $default.port }
       auto_start = [bool]$parsed.auto_start
-      tds_pak_url = if ($parsed.tds_pak_url) { [string]$parsed.tds_pak_url } else { $default.tds_pak_url }
+      tds_pak_url = (Resolve-TdsPakUrl (if ($parsed.tds_pak_url) { [string]$parsed.tds_pak_url } else { $default.tds_pak_url }))
     }
   } catch {
     return $default
@@ -123,6 +124,26 @@ function Save-ManagerConfig([hashtable]$config) {
   }
   $json = $payload | ConvertTo-Json -Depth 4
   Set-Content -LiteralPath $script:ConfigPath -Value $json -Encoding UTF8
+}
+
+function Resolve-TdsPakUrl([string]$inputUrl) {
+  $candidate = [string]$inputUrl
+  if (-not $candidate) {
+    return $script:DefaultTdsPakUrl
+  }
+
+  try {
+    $uri = [Uri]$candidate
+    if ($uri.IsLoopback) {
+      return $script:DefaultTdsPakUrl
+    }
+  } catch {
+    if ($candidate -match "(?i)^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?(\/|$)") {
+      return $script:DefaultTdsPakUrl
+    }
+  }
+
+  return $candidate
 }
 
 function Get-BackendHealth([string]$backendHost, [int]$port) {
@@ -164,6 +185,136 @@ function Is-ManagedBackendRunning {
   } catch {
     return $false
   }
+}
+
+function Get-BackendPortFromUi {
+  $port = 0
+  if ($script:PortTextBox) {
+    [void][int]::TryParse([string]$script:PortTextBox.Text, [ref]$port)
+  }
+  if ($port -lt 1 -or $port -gt 65535) {
+    $port = 8787
+  }
+  return $port
+}
+
+function Get-ProcessCommandLineById([int]$processId) {
+  if ($processId -le 0) { return "" }
+  try {
+    $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
+    return [string]$proc.CommandLine
+  } catch {
+    return ""
+  }
+}
+
+function Test-BackendProcessId([int]$processId) {
+  if ($processId -le 0) { return $false }
+  $cmd = Get-ProcessCommandLineById -processId $processId
+  if (-not $cmd) { return $false }
+  return [regex]::IsMatch($cmd, "(?i)(^|[\\/""'\s])tds-street-backend\.py([""'\s]|$)")
+}
+
+function Find-ListeningProcessByPort([int]$port) {
+  if ($port -le 0) { return $null }
+
+  try {
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop | Select-Object -First 1
+    if ($conn -and $conn.OwningProcess -gt 0) {
+      return [int]$conn.OwningProcess
+    }
+  } catch {}
+
+  try {
+    $regex = "^\s*TCP\s+\S+:$port\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    $line = netstat -ano -p tcp | Select-String -Pattern $regex | Select-Object -First 1
+    if ($line -and $line.Matches.Count -gt 0) {
+      return [int]$line.Matches[0].Groups[1].Value
+    }
+  } catch {}
+
+  return $null
+}
+
+function Find-BackendProcessIds([int]$port) {
+  $set = @{}
+
+  if (Is-ManagedBackendRunning) {
+    try {
+      $set[[int]$script:ManagedBackendProcess.Id] = $true
+    } catch {}
+  }
+
+  $pidByPort = Find-ListeningProcessByPort -port $port
+  if ($pidByPort) {
+    $includePidByPort = $false
+    if (Test-BackendProcessId -processId $pidByPort) {
+      $includePidByPort = $true
+    } else {
+      try {
+        $procByPort = Get-Process -Id ([int]$pidByPort) -ErrorAction Stop
+        $procNameByPort = [string]$procByPort.ProcessName
+        if ($procNameByPort -match "(?i)^pythonw?$|^py$") {
+          # Fallback: command line can be unavailable in some environments.
+          $includePidByPort = $true
+        }
+      } catch {}
+    }
+    if ($includePidByPort) {
+      $set[[int]$pidByPort] = $true
+    }
+  }
+
+  try {
+    $pythonProcs = Get-CimInstance -ClassName Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe' OR Name='py.exe'" -ErrorAction Stop
+    foreach ($proc in $pythonProcs) {
+      $procId = [int]$proc.ProcessId
+      $cmd = [string]$proc.CommandLine
+      if ($procId -gt 0 -and $cmd -and ([regex]::IsMatch($cmd, "(?i)(^|[\\/""'\s])tds-street-backend\.py([""'\s]|$)"))) {
+        $set[$procId] = $true
+      }
+    }
+  } catch {}
+
+  return @($set.Keys | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+}
+
+function Find-AllBackendProcessIds {
+  $set = @{}
+
+  $portsToCheck = New-Object System.Collections.Generic.HashSet[int]
+  [void]$portsToCheck.Add(8787)
+  [void]$portsToCheck.Add((Get-BackendPortFromUi))
+  try {
+    $cfg = Get-CurrentConfigFromUi
+    if ($cfg -and $cfg.port) {
+      [void]$portsToCheck.Add([int]$cfg.port)
+    }
+  } catch {}
+
+  foreach ($port in $portsToCheck) {
+    foreach ($procId in (Find-BackendProcessIds -port $port)) {
+      $set[[int]$procId] = $true
+    }
+  }
+
+  try {
+    $allProcs = Get-CimInstance -ClassName Win32_Process -ErrorAction Stop
+    foreach ($proc in $allProcs) {
+      $procId = [int]$proc.ProcessId
+      if ($procId -le 0) { continue }
+      $cmd = [string]$proc.CommandLine
+      if (-not $cmd) { continue }
+      if (
+        [regex]::IsMatch($cmd, "(?i)(^|[\\/""'\s])tds-street-backend\.py([""'\s]|$)") -or
+        [regex]::IsMatch($cmd, "(?i)(^|[\\/""'\s])tds-street-backend-launcher\.cmd([""'\s]|$)")
+      ) {
+        $set[$procId] = $true
+      }
+    }
+  } catch {}
+
+  return @($set.Keys | ForEach-Object { [int]$_ } | Sort-Object -Unique)
 }
 
 $script:LogTextBox = $null
@@ -334,7 +485,7 @@ function Get-CurrentConfigFromUi {
     host = if ($backendHost) { $backendHost } else { "127.0.0.1" }
     port = $port
     auto_start = [bool]$script:AutoStartCheckBox.Checked
-    tds_pak_url = [string]$script:TdsPakUrlTextBox.Text
+    tds_pak_url = (Resolve-TdsPakUrl -inputUrl ([string]$script:TdsPakUrlTextBox.Text))
   }
 }
 
@@ -357,6 +508,20 @@ function Start-ManagedBackend {
 
   $cfg = Get-CurrentConfigFromUi
   Save-ManagerConfig -config $cfg
+
+  $existingBackendPids = Find-BackendProcessIds -port ([int]$cfg.port)
+  if ($existingBackendPids.Count -gt 0) {
+    $pidText = ($existingBackendPids | ForEach-Object { $_.ToString() }) -join ", "
+    $primaryPid = [int]$existingBackendPids[0]
+    try {
+      $script:ManagedBackendProcess = Get-Process -Id $primaryPid -ErrorAction Stop
+    } catch {
+      $script:ManagedBackendProcess = $null
+    }
+    Write-ManagerLog "Backend already running (PID: $pidText) on port $($cfg.port)."
+    Update-BackendStatusUi -forceLog:$true
+    return
+  }
 
   $dbPath = [string]$cfg.db_path
   if (-not $dbPath) {
@@ -434,20 +599,137 @@ function Start-ManagedBackend {
 }
 
 function Stop-ManagedBackend {
-  if (-not (Is-ManagedBackendRunning)) {
-    Write-ManagerLog "No backend process started by this app is currently running."
+  $port = Get-BackendPortFromUi
+  $backendPids = Find-BackendProcessIds -port $port
+  if (-not $backendPids -or $backendPids.Count -eq 0) {
+    Write-ManagerLog "No running backend process was found to stop."
+    $script:ManagedBackendProcess = $null
     Update-BackendStatusUi -forceLog:$false
     return
   }
 
-  $pid = $script:ManagedBackendProcess.Id
-  try {
-    Stop-Process -Id $pid -Force -ErrorAction Stop
-    Write-ManagerLog "Stopped backend process (PID $pid)."
-  } catch {
-    Write-ManagerLog "Failed to stop backend process (PID $pid): $($_.Exception.Message)"
-  } finally {
+  $result = Stop-BackendProcessIds -processIds $backendPids -actionLabel "Stop"
+  if ($result.StoppedCount -gt 0) {
+    Write-ManagerLog "Stop complete. Terminated PID(s): $($result.StoppedText)"
+  }
+  if ($result.AlreadyStoppedCount -gt 0) {
+    Write-ManagerLog "Stop note: PID(s) already stopped: $($result.AlreadyStoppedText)"
+  }
+  if ($result.FailedCount -gt 0) {
+    Write-ManagerLog "Stop attempted with failures: $($result.FailedText)"
+  }
+
+  Start-Sleep -Milliseconds 300
+  Read-BackendRuntimeLogTail
+  Update-BackendStatusUi -forceLog:$true
+}
+
+function Stop-BackendProcessIds(
+  [int[]]$processIds,
+  [string]$actionLabel = "Stop"
+) {
+  $stopped = New-Object System.Collections.Generic.List[int]
+  $alreadyStopped = New-Object System.Collections.Generic.List[int]
+  $failed = New-Object System.Collections.Generic.List[string]
+
+  foreach ($backendProcId in ($processIds | Select-Object -Unique)) {
+    $targetPid = 0
+    if (-not [int]::TryParse([string]$backendProcId, [ref]$targetPid)) { continue }
+    if ($targetPid -le 0) { continue }
+    $existingProc = $null
+    try {
+      $existingProc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+    } catch {}
+    if (-not $existingProc) {
+      [void]$alreadyStopped.Add($targetPid)
+      Write-ManagerLog "${actionLabel}: backend process (PID $targetPid) was already stopped."
+      continue
+    }
+    try {
+      Stop-Process -Id $targetPid -Force -ErrorAction Stop
+      [void]$stopped.Add($targetPid)
+      Write-ManagerLog "${actionLabel}: stopped backend process (PID $targetPid)."
+    } catch {
+      $message = [string]$_.Exception.Message
+      if ($message -match "(?i)cannot find a process with the process identifier|no process.+found") {
+        [void]$alreadyStopped.Add($targetPid)
+        Write-ManagerLog "${actionLabel}: backend process (PID $targetPid) exited before it could be terminated."
+        continue
+      }
+      [void]$failed.Add("$targetPid ($message)")
+      Write-ManagerLog "${actionLabel}: failed to stop backend process (PID $targetPid): $message"
+    }
+  }
+
+  $script:ManagedBackendProcess = $null
+  $stoppedText = ($stopped | ForEach-Object { $_.ToString() } | Sort-Object -Unique) -join ", "
+  $alreadyStoppedText = ($alreadyStopped | ForEach-Object { $_.ToString() } | Sort-Object -Unique) -join ", "
+  $failedText = ($failed | ForEach-Object { $_.ToString() }) -join " | "
+  return @{
+    StoppedCount = $stopped.Count
+    AlreadyStoppedCount = $alreadyStopped.Count
+    FailedCount = $failed.Count
+    StoppedText = $stoppedText
+    AlreadyStoppedText = $alreadyStoppedText
+    FailedText = $failedText
+  }
+}
+
+function Force-StopAllBackendInstances {
+  $answer = [System.Windows.Forms.MessageBox]::Show(
+    "Force Stop All will terminate every detected TDS street backend instance, including orphaned processes from old managers/installations.`r`n`r`nContinue?",
+    "TDS PAK Backend Manager",
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning
+  )
+  if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+    Write-ManagerLog "Force Stop All canceled by user."
+    return
+  }
+
+  $allPids = Find-AllBackendProcessIds
+  if (-not $allPids -or $allPids.Count -eq 0) {
+    Write-ManagerLog "Force Stop All: no TDS backend-related processes were detected."
     $script:ManagedBackendProcess = $null
+    Update-BackendStatusUi -forceLog:$true
+    return
+  }
+
+  $pidText = ($allPids | ForEach-Object { $_.ToString() }) -join ", "
+  Write-ManagerLog "Force Stop All: detected PID(s): $pidText"
+
+  $result = Stop-BackendProcessIds -processIds $allPids -actionLabel "Force Stop All"
+  if ($result.StoppedCount -gt 0) {
+    Write-ManagerLog "Force Stop All complete. Terminated PID(s): $($result.StoppedText)"
+  }
+  if ($result.AlreadyStoppedCount -gt 0) {
+    Write-ManagerLog "Force Stop All note: PID(s) already stopped: $($result.AlreadyStoppedText)"
+  }
+  if ($result.FailedCount -gt 0) {
+    Write-ManagerLog "Force Stop All had failures: $($result.FailedText)"
+    [System.Windows.Forms.MessageBox]::Show(
+      "Some processes could not be terminated.`r`n`r`n$($result.FailedText)",
+      "TDS PAK Backend Manager",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning
+    ) | Out-Null
+  } elseif ($result.StoppedCount -gt 0 -or $result.AlreadyStoppedCount -gt 0) {
+    $summaryLines = New-Object System.Collections.Generic.List[string]
+    [void]$summaryLines.Add("Force Stop All completed successfully.")
+    if ($result.StoppedCount -gt 0) {
+      [void]$summaryLines.Add("")
+      [void]$summaryLines.Add("Terminated PID(s): $($result.StoppedText)")
+    }
+    if ($result.AlreadyStoppedCount -gt 0) {
+      [void]$summaryLines.Add("")
+      [void]$summaryLines.Add("Already stopped PID(s): $($result.AlreadyStoppedText)")
+    }
+    [System.Windows.Forms.MessageBox]::Show(
+      ($summaryLines -join "`r`n"),
+      "TDS PAK Backend Manager",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
   }
 
   Start-Sleep -Milliseconds 300
@@ -558,7 +840,7 @@ $topPanel.Controls.Add($urlLabel)
 $script:TdsPakUrlTextBox = New-Object System.Windows.Forms.TextBox
 $script:TdsPakUrlTextBox.Location = New-Object System.Drawing.Point(116, 140)
 $script:TdsPakUrlTextBox.Size = New-Object System.Drawing.Size(470, 26)
-$script:TdsPakUrlTextBox.Text = [string]$config.tds_pak_url
+$script:TdsPakUrlTextBox.Text = (Resolve-TdsPakUrl -inputUrl ([string]$config.tds_pak_url))
 $topPanel.Controls.Add($script:TdsPakUrlTextBox)
 
 $startBtn = New-Object System.Windows.Forms.Button
@@ -573,33 +855,39 @@ $stopBtn.Size = New-Object System.Drawing.Size(126, 32)
 $stopBtn.Location = New-Object System.Drawing.Point(146, 178)
 $topPanel.Controls.Add($stopBtn)
 
+$forceStopAllBtn = New-Object System.Windows.Forms.Button
+$forceStopAllBtn.Text = "Force Stop All"
+$forceStopAllBtn.Size = New-Object System.Drawing.Size(130, 32)
+$forceStopAllBtn.Location = New-Object System.Drawing.Point(278, 178)
+$topPanel.Controls.Add($forceStopAllBtn)
+
 $checkBtn = New-Object System.Windows.Forms.Button
 $checkBtn.Text = "Check Now"
 $checkBtn.Size = New-Object System.Drawing.Size(110, 32)
-$checkBtn.Location = New-Object System.Drawing.Point(278, 178)
+$checkBtn.Location = New-Object System.Drawing.Point(412, 178)
 $topPanel.Controls.Add($checkBtn)
 
 $saveBtn = New-Object System.Windows.Forms.Button
 $saveBtn.Text = "Save Settings"
 $saveBtn.Size = New-Object System.Drawing.Size(114, 32)
-$saveBtn.Location = New-Object System.Drawing.Point(394, 178)
+$saveBtn.Location = New-Object System.Drawing.Point(528, 178)
 $topPanel.Controls.Add($saveBtn)
 
 $openTdsPakBtn = New-Object System.Windows.Forms.Button
 $openTdsPakBtn.Text = "Open TDS PAK"
 $openTdsPakBtn.Size = New-Object System.Drawing.Size(126, 32)
-$openTdsPakBtn.Location = New-Object System.Drawing.Point(514, 178)
+$openTdsPakBtn.Location = New-Object System.Drawing.Point(648, 178)
 $topPanel.Controls.Add($openTdsPakBtn)
 
 $openHealthBtn = New-Object System.Windows.Forms.Button
 $openHealthBtn.Text = "Open Health URL"
 $openHealthBtn.Size = New-Object System.Drawing.Size(130, 32)
-$openHealthBtn.Location = New-Object System.Drawing.Point(646, 178)
+$openHealthBtn.Location = New-Object System.Drawing.Point(776, 178)
 $topPanel.Controls.Add($openHealthBtn)
 
 $script:StatusLabel = New-Object System.Windows.Forms.Label
 $script:StatusLabel.AutoSize = $true
-$script:StatusLabel.Location = New-Object System.Drawing.Point(790, 184)
+$script:StatusLabel.Location = New-Object System.Drawing.Point(918, 184)
 $script:StatusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $script:StatusLabel.ForeColor = $script:Theme.TextStrong
 $script:StatusLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
@@ -682,6 +970,7 @@ Set-InputControlStyle -Control $script:AutoStartCheckBox
 
 Set-ActionButtonStyle -Button $startBtn -Background $script:Theme.Accent -Foreground ([System.Drawing.Color]::White)
 Set-ActionButtonStyle -Button $stopBtn -Background $script:Theme.Danger -Foreground ([System.Drawing.Color]::White)
+Set-ActionButtonStyle -Button $forceStopAllBtn -Background $script:Theme.Danger -Foreground ([System.Drawing.Color]::White)
 Set-SecondaryButtonStyle -Button $checkBtn
 Set-SecondaryButtonStyle -Button $saveBtn
 Set-SecondaryButtonStyle -Button $openTdsPakBtn
@@ -695,6 +984,7 @@ $toolTip.IsBalloon = $true
 $toolTip.ToolTipTitle = "TDS PAK Backend Manager"
 $toolTip.SetToolTip($startBtn, "Starts tds-street-backend.py with the settings shown above.")
 $toolTip.SetToolTip($stopBtn, "Stops the backend process started by this manager.")
+$toolTip.SetToolTip($forceStopAllBtn, "Force-stops all detected TDS street backend instances, including orphaned old installs.")
 $toolTip.SetToolTip($checkBtn, "Runs an immediate health check against /api/health.")
 $toolTip.SetToolTip($script:DbPathTextBox, "Path to the SQLite street index used by the backend.")
 
@@ -724,6 +1014,10 @@ $stopBtn.Add_Click({
   Stop-ManagedBackend
 })
 
+$forceStopAllBtn.Add_Click({
+  Force-StopAllBackendInstances
+})
+
 $checkBtn.Add_Click({
   Update-BackendStatusUi -forceLog:$true
 })
@@ -731,10 +1025,8 @@ $checkBtn.Add_Click({
 $openTdsPakBtn.Add_Click({
   $cfg = Get-CurrentConfigFromUi
   Save-ManagerConfig -config $cfg
-  $url = [string]$cfg.tds_pak_url
-  if (-not $url) {
-    $url = "http://127.0.0.1:5500/tds-pak.html"
-  }
+  $url = Resolve-TdsPakUrl -inputUrl ([string]$cfg.tds_pak_url)
+  $script:TdsPakUrlTextBox.Text = $url
   try {
     Start-Process $url | Out-Null
   } catch {
@@ -749,9 +1041,15 @@ $openTdsPakBtn.Add_Click({
 
 $openHealthBtn.Add_Click({
   $backendHost = [string]$script:HostTextBox.Text
+  if (-not $backendHost) { $backendHost = "127.0.0.1" }
   $port = 0
   [void][int]::TryParse([string]$script:PortTextBox.Text, [ref]$port)
   if ($port -le 0) { $port = 8787 }
+  if ($port -eq 5500) {
+    Write-ManagerLog "Open Health URL detected dev-server port 5500; using backend port 8787 instead."
+    $port = 8787
+    try { $script:PortTextBox.Text = "8787" } catch {}
+  }
   $url = "http://$backendHost`:$port/api/health"
   try {
     Start-Process $url | Out-Null

@@ -82,6 +82,14 @@
       <span class="multiday-toggle-icon" aria-hidden="true"></span>
       <span class="multiday-toggle-label">Multi-Day</span>
     </button>
+    <button id="routeSequencerBtn" class="primary-btn route-sequencer-btn" type="button" title="Auto Sequence Route Stops">
+      <span class="route-sequencer-icon" aria-hidden="true"></span>
+      <span>Sequence</span>
+    </button>
+    <button id="facilitiesBtn" class="primary-btn facilities-btn" type="button" title="Manage sequencing facilities">
+      <span class="facilities-icon" aria-hidden="true"></span>
+      <span>Facilities</span>
+    </button>
     <button id="importWizardBtn" class="primary-btn import-wizard-btn" type="button">
       <span class="import-wizard-icon" aria-hidden="true"></span>
       <span>Import Wizard</span>
@@ -102,14 +110,38 @@
       <span class="select-attributes-icon" aria-hidden="true"></span>
       <span>Select By Attributes</span>
     </button>
+    <button id="setSegmentIdSideBtn" class="primary-btn set-segment-id-side-btn" type="button" title="Set Segment ID and Side">
+      <span>Set Segment ID and Side</span>
+    </button>
+    <button id="updateFieldBtn" class="primary-btn update-field-btn" type="button" title="Update values in a target field">
+      <span>Update Field</span>
+    </button>
+    <div id="headerActionsOverflow" class="header-actions-overflow" hidden>
+      <button
+        id="headerActionsMenuBtn"
+        class="primary-btn header-actions-menu-btn"
+        type="button"
+        aria-expanded="false"
+        aria-haspopup="true"
+        title="Open grouped header tools"
+      >
+        <span class="header-actions-menu-icon" aria-hidden="true"></span>
+        <span>More Tools</span>
+      </button>
+      <div id="headerActionsMenuDropdown" class="header-actions-menu-dropdown" role="menu" aria-label="More header tools"></div>
+    </div>
     <div id="desktopSelectionHeader" class="desktop-selection-header"></div>
   </div>
 
   <div class="mobile-header-buttons">
     <button id="hardRefreshBtn" class="primary-btn" title="Reload app data and clear cached view">Refresh App</button>
+    <button id="routeSequencerBtnMobile" class="primary-btn" title="Open Auto Sequence">Sequence</button>
+    <button id="facilitiesBtnMobile" class="primary-btn" title="Manage sequencing facilities">Facilities</button>
     <button id="importWizardBtnMobile" class="primary-btn" title="Open Import Wizard">Import</button>
     <button id="streetAttributesBtnMobile" class="primary-btn" title="Open Street Attributes">Streets</button>
     <button id="attributeTableBtnMobile" class="primary-btn" title="Open Attribute Table">Table</button>
+    <button id="setSegmentIdSideBtnMobile" class="primary-btn" title="Set Segment ID and Side">Seg ID</button>
+    <button id="updateFieldBtnMobile" class="primary-btn" title="Update field values">Update</button>
     <button id="mobileMenuBtn">☰ Menu</button>
     <button id="locateMeBtn" class="primary-btn">📍</button>
   </div>
@@ -181,6 +213,24 @@
 
   <div id="routeDayContent" class="collapsible-content collapsed">
     <div id="routeDayLayers"></div>
+  </div>
+</div>
+
+<div class="filter-group sequence-layer-group">
+  <div class="filter-header collapsible-header" id="sequenceLayerToggleHeader">
+    <div class="days-title">
+      <span class="arrow">&#9654;</span>
+      <strong>Sequence Layer</strong>
+    </div>
+  </div>
+  <div id="sequenceLayerContent" class="collapsible-content collapsed">
+    <label class="service-day-label-master sequence-layer-master">
+      <input type="checkbox" id="sequenceLayerEnabled" />
+      Show Sequence Layer
+    </label>
+    <div id="sequenceLayerStatus" class="service-day-label-empty sequence-layer-status">
+      Run Sequence to generate route arrows.
+    </div>
   </div>
 </div>
 
@@ -400,6 +450,14 @@
   </div>
   <div class="attribute-toolbar">
     <input id="attributeSearchInput" type="text" placeholder="Filter records by any field..." />
+    <select id="attributeSortFieldSelect" aria-label="Sort field">
+      <option value="">Sort field...</option>
+    </select>
+    <button id="attributeSortAscBtn" class="primary-btn" type="button">Least->Greatest</button>
+    <button id="attributeSortDescBtn" class="primary-btn" type="button">Greatest->Least</button>
+    <button id="attributeClearSortBtn" class="primary-btn" type="button">Clear Sort</button>
+    <button id="attributeAddFieldBtn" class="primary-btn" type="button">Add Field</button>
+    <button id="attributeFieldCalcBtn" class="primary-btn" type="button">Field Calculator</button>
     <label class="attribute-selected-only">
       <input id="attributeSelectedOnly" type="checkbox" />
       Selected only
@@ -875,6 +933,409 @@
     </div>
   </div>
 </div>
+<div id="facilitiesModal" class="modal">
+  <div class="modal-content facilities-modal-content">
+    <div class="facilities-head">
+      <h3>Facilities</h3>
+      <p>Add reusable facilities by latitude/longitude for sequencing. Use each facility as either Start/End or Dump.</p>
+    </div>
+
+    <div class="facilities-grid">
+      <section class="facilities-card">
+        <h4>Facility Details</h4>
+        <label class="facilities-field">
+          <span>Facility Name</span>
+          <input id="facilityNameInput" type="text" placeholder="Example: Austin Transfer Station" />
+        </label>
+        <label class="facilities-field">
+          <span>Role</span>
+          <select id="facilityRoleSelect">
+            <option value="start_end">Start / End Facility</option>
+            <option value="dump">Dump Location (Intermediate)</option>
+          </select>
+        </label>
+        <label class="facilities-field">
+          <span>Dump Time (MM:SS)</span>
+          <input id="facilityTimeInput" type="text" value="00:00" placeholder="Example: 05:30" />
+        </label>
+      </section>
+
+      <section class="facilities-card">
+        <h4>Location (Texas Lat/Lon)</h4>
+        <p>Enter coordinates directly or use map center.</p>
+        <div class="facilities-latlon">
+          <label class="facilities-field">
+            <span>Latitude</span>
+            <input id="facilityLatInput" type="number" step="any" placeholder="30.2672" />
+          </label>
+          <label class="facilities-field">
+            <span>Longitude</span>
+            <input id="facilityLonInput" type="number" step="any" placeholder="-97.7431" />
+          </label>
+        </div>
+        <div class="facilities-inline-actions">
+          <button id="facilityUseMapCenterBtn" class="mini-btn" type="button">Use Map Center</button>
+          <button id="facilitySaveBtn" class="mini-btn" type="button">Add / Update Facility</button>
+          <button id="facilityClearBtn" class="mini-btn" type="button">Clear Form</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="facilities-card facilities-list-card">
+      <h4>Saved Facilities</h4>
+      <label class="facilities-field">
+        <span>Facility List</span>
+        <select id="facilityListSelect" size="8"></select>
+      </label>
+      <div class="facilities-inline-actions">
+        <button id="facilityLoadSelectedBtn" class="mini-btn" type="button">Load Selected</button>
+        <button id="facilityRemoveBtn" class="mini-btn" type="button">Remove Selected</button>
+      </div>
+    </section>
+
+    <div id="facilitiesStatus" class="facilities-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="facilitiesCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<div id="routeSequencerModal" class="modal">
+  <div class="modal-content route-sequencer-modal-content">
+    <div class="route-sequencer-head">
+      <h3>Route Sequencer</h3>
+      <p>Build stop order by drive time, enforce truck capacity, and insert dump visits when loads reach threshold.</p>
+    </div>
+
+    <div class="route-sequencer-grid">
+      <label class="route-sequencer-field">
+        <span>Demand Field (Tons)</span>
+        <select id="routeSequencerDemandField"></select>
+      </label>
+      <label class="route-sequencer-field">
+        <span>Service Time Field (Min or MM:SS)</span>
+        <select id="routeSequencerServiceTimeField"></select>
+      </label>
+      <label class="route-sequencer-field">
+        <span>Truck Capacity (Tons)</span>
+        <input id="routeSequencerCapacityInput" type="number" step="0.1" min="0.1" value="13.5" />
+      </label>
+      <label class="route-sequencer-field">
+        <span>Fallback Speed (mph)</span>
+        <input id="routeSequencerDefaultSpeedInput" type="number" step="1" min="5" max="85" value="35" />
+      </label>
+      <label class="route-sequencer-field">
+        <span>Sequence Increment</span>
+        <input id="routeSequencerSequenceIncrementInput" type="number" step="1" min="1" value="1" />
+      </label>
+    </div>
+
+    <section class="route-sequencer-card route-sequencer-output-card">
+      <h4>Output Field Mapping</h4>
+      <p>Choose which columns receive sequencer outputs on each run.</p>
+      <div class="route-sequencer-grid route-sequencer-output-grid">
+        <label class="route-sequencer-field">
+          <span>Sequence Output</span>
+          <select id="routeSequencerSequenceOutputField"></select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Trip Output</span>
+          <select id="routeSequencerTripOutputField"></select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Cumulative Load Output</span>
+          <select id="routeSequencerCumulativeOutputField"></select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Drive Minutes Output</span>
+          <select id="routeSequencerDriveOutputField"></select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Service Minutes Output</span>
+          <select id="routeSequencerServiceOutputField"></select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Total Minutes Output</span>
+          <select id="routeSequencerTotalOutputField"></select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Dump Visits Output</span>
+          <select id="routeSequencerDumpVisitsOutputField"></select>
+        </label>
+      </div>
+    </section>
+
+    <div id="routeSequencerFormatHint" class="route-sequencer-format-hint">
+      Demand must be numeric tons (example: 1.25). Service time supports numeric minutes (4.5) or MM:SS / HH:MM:SS (05:30). Driver breaks are optional comma-separated MM:SS values (example: 15:00, 30:00). Sequencing runs per Route+Day as single routes. Time at Start/End uses MM:SS. Evaluate Sequence uses existing sequence order and still applies full capacity/dump/facility metrics.
+    </div>
+
+    <section class="route-sequencer-card route-sequencer-scope-card">
+      <h4>Route + Day Scope</h4>
+      <p>Select one or multiple Route+Day units to evaluate or resequence.</p>
+      <div class="route-sequencer-scope-actions">
+        <button id="routeSequencerScopeAllBtn" class="mini-btn" type="button">All</button>
+        <button id="routeSequencerScopeNoneBtn" class="mini-btn" type="button">None</button>
+        <button id="routeSequencerScopeVisibleBtn" class="mini-btn" type="button">Visible</button>
+      </div>
+      <label class="route-sequencer-field">
+        <span>Selected Route + Day Units</span>
+        <select id="routeSequencerScopeList" multiple size="8"></select>
+      </label>
+    </section>
+
+    <div class="route-sequencer-grid">
+      <label class="route-sequencer-field">
+        <span>Dump Locations Source</span>
+        <select id="routeSequencerDumpSource">
+          <option value="both">Texas Landfills + Custom Dumps</option>
+          <option value="landfills">Texas Landfills Only</option>
+          <option value="custom">Custom Dumps Only</option>
+          <option value="none">No Dump Locations</option>
+        </select>
+      </label>
+      <label class="route-sequencer-field">
+        <span>Start Facility</span>
+        <select id="routeSequencerStartDepotSelect"></select>
+      </label>
+      <label class="route-sequencer-field">
+        <span>End Facility</span>
+        <select id="routeSequencerEndDepotSelect"></select>
+      </label>
+      <label class="route-sequencer-field">
+        <span>Time at Start (MM:SS)</span>
+        <input id="routeSequencerTimeAtStartInput" type="text" value="00:00" placeholder="Example: 10:00" />
+      </label>
+      <label class="route-sequencer-field">
+        <span>Time at End (MM:SS)</span>
+        <input id="routeSequencerTimeAtEndInput" type="text" value="00:00" placeholder="Example: 15:00" />
+      </label>
+      <label class="route-sequencer-field">
+        <span>Driver Breaks (MM:SS, comma-separated)</span>
+        <input id="routeSequencerBreaksInput" type="text" value="" placeholder="Example: 60:00 or 15:00, 30:00" />
+      </label>
+      <label class="route-sequencer-field route-sequencer-field-check">
+        <input id="routeSequencerDumpBeforeEnd" type="checkbox" checked />
+        <span>Force final dump before end depot</span>
+      </label>
+    </div>
+
+    <div class="route-sequencer-grid route-sequencer-manager-grid">
+      <section class="route-sequencer-card">
+        <h4>Depot Manager</h4>
+        <p>Add depots now so they can be reused on this machine later.</p>
+        <label class="route-sequencer-field">
+          <span>Depot Name</span>
+          <input id="routeSequencerDepotNameInput" type="text" placeholder="Example: Yard Depot" />
+        </label>
+        <div class="route-sequencer-inline-actions">
+          <button id="routeSequencerAddDepotBtn" class="mini-btn" type="button">Add From Map Center</button>
+          <button id="routeSequencerRemoveDepotBtn" class="mini-btn" type="button">Remove Selected Depot</button>
+        </div>
+      </section>
+
+      <section class="route-sequencer-card">
+        <h4>Custom Dump Locations</h4>
+        <p>Use custom dump locations and/or the Texas landfill layer as intermediate facilities.</p>
+        <label class="route-sequencer-field">
+          <span>Custom Dump Name</span>
+          <input id="routeSequencerDumpNameInput" type="text" placeholder="Example: South Transfer Station" />
+        </label>
+        <label class="route-sequencer-field">
+          <span>Saved Custom Dumps</span>
+          <select id="routeSequencerCustomDumpSelect"></select>
+        </label>
+        <div class="route-sequencer-inline-actions">
+          <button id="routeSequencerAddDumpBtn" class="mini-btn" type="button">Add From Map Center</button>
+          <button id="routeSequencerRemoveDumpBtn" class="mini-btn" type="button">Remove Selected Dump</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="route-sequencer-card route-sequencer-speed-card">
+      <h4>Street Speed Defaults by Speed Class (mph)</h4>
+      <p>RouteSmart-style setup: set `speed_cat` driving and service speeds. Service speed is used for stop-to-stop movement while servicing; driving speed is used for deadhead travel such as dump/depot legs.</p>
+      <label class="route-sequencer-field route-sequencer-speed-class-field">
+        <span>Street Speed Class Field</span>
+        <input id="routeSequencerSpeedClassField" type="text" value="speed_cat" placeholder="speed_cat" />
+      </label>
+      <div class="route-sequencer-speed-cat-grid">
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 1</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat1" type="number" min="5" max="85" step="1" value="65" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat1" type="number" min="5" max="85" step="1" value="50" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 2</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat2" type="number" min="5" max="85" step="1" value="65" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat2" type="number" min="5" max="85" step="1" value="50" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 3</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat3" type="number" min="5" max="85" step="1" value="50" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat3" type="number" min="5" max="85" step="1" value="40" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 4</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat4" type="number" min="5" max="85" step="1" value="40" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat4" type="number" min="5" max="85" step="1" value="30" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 5</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat5" type="number" min="5" max="85" step="1" value="30" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat5" type="number" min="5" max="85" step="1" value="20" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 6</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat6" type="number" min="5" max="85" step="1" value="20" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat6" type="number" min="5" max="85" step="1" value="10" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 7</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat7" type="number" min="5" max="85" step="1" value="10" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat7" type="number" min="5" max="85" step="1" value="5" /></label>
+        </article>
+        <article class="route-sequencer-speed-cat-card">
+          <div class="route-sequencer-speed-cat-title">Class 8</div>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat8" type="number" min="5" max="85" step="1" value="5" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat8" type="number" min="5" max="85" step="1" value="5" /></label>
+        </article>
+      </div>
+    </section>
+
+    <div class="route-sequencer-actions">
+      <button id="routeSequencerEvaluateBtn" class="primary-btn" type="button">Evaluate Sequence</button>
+      <button id="routeSequencerRunBtn" class="primary-btn" type="button">Run Auto Sequence</button>
+    </div>
+    <div id="routeSequencerStatus" class="route-sequencer-status">Ready.</div>
+    <div id="routeSequencerResults" class="route-sequencer-results" aria-live="polite"></div>
+
+    <div class="modal-actions">
+      <button id="routeSequencerCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<div id="setSegmentIdSideModal" class="modal">
+  <div class="modal-content set-segment-id-side-modal-content">
+    <div class="set-segment-id-side-head">
+      <h3>Set Segment ID and Side</h3>
+      <p>Attach records to loaded street segments by street name and/or proximity, then set segment side.</p>
+    </div>
+
+    <label class="set-segment-id-side-field">
+      <span>Layer</span>
+      <select id="setSegmentIdSideLayer">
+        <option value="serviceLocation">Service Location</option>
+      </select>
+    </label>
+
+    <div class="set-segment-id-side-grid">
+      <section class="set-segment-id-side-card">
+        <h4>Input</h4>
+        <label class="set-segment-id-side-radio"><input type="radio" name="setSegmentInputScope" id="setSegmentInputAllRecords" value="all" checked /> <span id="setSegmentInputAllLabel">All records (0)</span></label>
+        <label class="set-segment-id-side-radio"><input type="radio" name="setSegmentInputScope" id="setSegmentInputSelectedRecords" value="selected" /> <span id="setSegmentInputSelectedLabel">Selected records (0)</span></label>
+        <label class="set-segment-id-side-check"><input type="checkbox" id="setSegmentSkipMatchedRecords" checked /> <span>Skip records already matched</span></label>
+      </section>
+
+      <section class="set-segment-id-side-card">
+        <h4>Address Data</h4>
+        <label class="set-segment-id-side-check"><input type="checkbox" id="setSegmentParseAddresses" /> <span>Parse addresses</span></label>
+        <label class="set-segment-id-side-check"><input type="checkbox" id="setSegmentMatchStreetName" checked /> <span>Match by street name</span></label>
+        <label class="set-segment-id-side-check"><input type="checkbox" id="setSegmentUseProximity" checked /> <span>Use proximity</span></label>
+        <label class="set-segment-id-side-check muted"><input type="checkbox" id="setSegmentIncludeStreetAliases" /> <span>Include street alias data</span></label>
+      </section>
+
+      <section class="set-segment-id-side-card">
+        <h4>Street Data</h4>
+        <label class="set-segment-id-side-field">
+          <span>Search tolerance (feet)</span>
+          <input id="setSegmentSearchToleranceFeet" type="number" min="10" step="10" value="9999" />
+        </label>
+        <label class="set-segment-id-side-check"><input type="checkbox" id="setSegmentSelectedStreetsOnly" /> <span id="setSegmentSelectedStreetsOnlyLabel">Consider selected streets only (0)</span></label>
+      </section>
+    </div>
+
+    <section class="set-segment-id-side-profile-card">
+      <h4>Saved Match Profiles</h4>
+      <p>Save current Segment ID + Side matches and reapply them to future files with the same records.</p>
+      <div class="set-segment-id-side-profile-grid">
+        <label class="set-segment-id-side-field">
+          <span>Saved Profile</span>
+          <select id="setSegmentSavedProfileList"></select>
+        </label>
+        <label class="set-segment-id-side-field">
+          <span>Profile Name</span>
+          <input id="setSegmentSavedProfileName" type="text" maxlength="80" placeholder="Example: A405 Wednesday Matched Stops" />
+        </label>
+      </div>
+      <label class="set-segment-id-side-check">
+        <input type="checkbox" id="setSegmentApplyOnlyUnmatched" checked />
+        <span>Apply only to records without Segment ID</span>
+      </label>
+      <div class="set-segment-id-side-profile-actions">
+        <button id="setSegmentSaveProfileBtn" class="primary-btn" type="button">Save Current Matches</button>
+        <button id="setSegmentApplyProfileBtn" class="primary-btn" type="button">Apply Saved Matches</button>
+        <button id="setSegmentDeleteProfileBtn" class="primary-btn" type="button">Delete Profile</button>
+      </div>
+      <div id="setSegmentReadySummary" class="set-segment-id-side-ready-summary">
+        Match status will appear after records are loaded.
+      </div>
+    </section>
+
+    <div class="set-segment-id-side-actions">
+      <button id="setSegmentIdSideRunBtn" class="primary-btn" type="button">Set Segment ID + Side</button>
+    </div>
+    <div id="setSegmentIdSideStatus" class="set-segment-id-side-status">Ready.</div>
+
+    <div class="modal-actions">
+      <button id="setSegmentIdSideCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<div id="updateFieldModal" class="modal">
+  <div class="modal-content update-field-modal-content">
+    <div class="update-field-head">
+      <h3>Update Field</h3>
+      <p>Update one field for all or selected records using another field, a typed value, or clear.</p>
+    </div>
+
+    <div class="update-field-grid">
+      <label class="update-field-input">
+        <span>Field</span>
+        <select id="updateFieldTargetField"></select>
+      </label>
+    </div>
+
+    <section class="update-field-card">
+      <h4>Records</h4>
+      <label class="update-field-radio"><input type="radio" name="updateFieldScope" id="updateFieldScopeAll" value="all" checked /> <span id="updateFieldAllLabel">All (0 records)</span></label>
+      <label class="update-field-radio"><input type="radio" name="updateFieldScope" id="updateFieldScopeSelected" value="selected" /> <span id="updateFieldSelectedLabel">Selected (0 records)</span></label>
+    </section>
+
+    <section class="update-field-card">
+      <h4>With</h4>
+      <label class="update-field-radio"><input type="radio" name="updateFieldMode" id="updateFieldModeField" value="field" checked /> <span>Field</span></label>
+      <label class="update-field-radio"><input type="radio" name="updateFieldMode" id="updateFieldModeValue" value="value" /> <span>Value</span></label>
+      <label class="update-field-radio"><input type="radio" name="updateFieldMode" id="updateFieldModeClear" value="clear" /> <span>Clear</span></label>
+
+      <label class="update-field-input">
+        <span>Source Field</span>
+        <select id="updateFieldSourceField"></select>
+      </label>
+      <label class="update-field-input">
+        <span>Typed Value</span>
+        <input id="updateFieldValueInput" type="text" placeholder="Example: 4.5" />
+      </label>
+    </section>
+
+    <div id="updateFieldFormatHint" class="update-field-format-hint">
+      Sequencer format tip: Demand should be numeric tons, and Service Time should be numeric minutes per stop.
+    </div>
+    <div id="updateFieldStatus" class="update-field-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="updateFieldApplyBtn" type="button">Apply</button>
+      <button id="updateFieldCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
 <div id="selectByAttributesModal" class="modal">
   <div class="modal-content select-attributes-modal-content">
     <h3>Select By Attributes</h3>
@@ -969,6 +1430,68 @@
     </div>
   </div>
 </div>
+<div id="fieldCalculatorModal" class="modal">
+  <div class="modal-content field-calculator-modal-content">
+    <h3>Field Calculator</h3>
+    <p>Set values for a target field using an expression. Reference fields with square brackets, for example <code>[Bin_size] * [Qty] * 0.05</code>.</p>
+
+    <div class="field-calculator-head-grid">
+      <label class="field-calculator-input">
+        <span>Target Field</span>
+        <select id="fieldCalculatorTargetField" aria-label="Field calculator target field"></select>
+      </label>
+      <label class="field-calculator-input">
+        <span>Expression Type</span>
+        <select id="fieldCalculatorType" aria-label="Field calculator expression type">
+          <option value="number">Number</option>
+          <option value="text">Text</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="field-calculator-main">
+      <section class="field-calculator-card">
+        <div class="field-calculator-card-title">Fields</div>
+        <div id="fieldCalculatorFieldList" class="field-calculator-field-list"></div>
+      </section>
+      <section class="field-calculator-card">
+        <div class="field-calculator-card-title">Functions & Operators</div>
+        <div id="fieldCalculatorTokenBar" class="field-calculator-token-bar">
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Abs(">Abs( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Atn(">Atn( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Cos(">Cos( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Exp(">Exp( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Fix(">Fix( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Int(">Int( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Log(">Log( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Sin(">Sin( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Sqr(">Sqr( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="Tan(">Tan( )</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="+">+</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="-">-</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="*">*</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="/">/</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="%">%</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="^">^</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="(">(</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token=")">)</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="PI">PI</button>
+          <button class="mini-btn field-calculator-token-btn" type="button" data-token="E">E</button>
+        </div>
+      </section>
+    </div>
+
+    <label for="fieldCalculatorExpression">Expression</label>
+    <textarea id="fieldCalculatorExpression" class="field-calculator-expression" rows="7" placeholder="[Bin_size] * [Qty] * 0.05"></textarea>
+    <div id="fieldCalculatorPreview" class="field-calculator-preview">Ready.</div>
+    <div id="fieldCalculatorStatus" class="field-calculator-status">Ready.</div>
+    <div class="modal-actions">
+      <button id="fieldCalculatorClearBtn" type="button">Clear</button>
+      <button id="fieldCalculatorApplyBtn" type="button">Apply to All Records</button>
+      <button id="fieldCalculatorCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
 <div id="streetSegmentsPromptModal" class="modal">
   <div class="modal-content">
     <h3>Street Segments</h3>
@@ -1007,7 +1530,7 @@
   </div>
 </div>
 <script src="https://unpkg.com/shpjs@6.2.0/dist/shp.min.js" defer></script>
-<script src="app-tds-pak.js?v=20260310-3" defer></script>
+<script src="app-tds-pak.js?v=20260311-23" defer></script>
 <!-- MOBILE Selected Stops Button -->
 <button id="mobileSelectionBtn">Selected: 0</button>
 

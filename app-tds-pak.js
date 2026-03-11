@@ -28,6 +28,10 @@ window._currentFilePath = null;
 window._summaryRows = [];
 window._summaryHeaders = [];
 window._attributeHeaders = [];
+const WORKBOOK_AUTO_SAVE_DEBOUNCE_MS = 1200;
+let workbookAutoSaveTimer = null;
+let workbookAutoSaveInFlight = null;
+let workbookAutoSavePendingReasons = [];
 
 window.streetLabelsEnabled = false;
 const attributeRowToId = new WeakMap();
@@ -42,6 +46,18 @@ const attributeState = {
   pageSize: 300,
   selectedRowIds: new Set(),
   lastVisibleRows: []
+};
+const STREET_ATTRIBUTE_TABLE_HEADERS = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+const STREET_ATTRIBUTE_TABLE_LABELS = {
+  id: "Way ID",
+  name: "Road Name",
+  func_class: "Func Class",
+  highway: "Class",
+  ref: "Ref",
+  maxspeed: "Max Speed",
+  lanes: "Lanes",
+  surface: "Surface",
+  oneway: "One Way"
 };
 const APP_STORAGE_NS = (() => {
   const path = (window.location.pathname || "").toLowerCase();
@@ -117,8 +133,8 @@ function setupHeaderToolsMenu() {
 }
 
 //======
-// 🔐 Delete protection password I know this is not secure, I just wanted to make it harder for ppl to accidentally delete files. You can change or remove this as needed.
-const DELETE_PASSWORD = "Austin1";  // ← change to whatever you want
+// ðŸ” Delete protection password I know this is not secure, I just wanted to make it harder for ppl to accidentally delete files. You can change or remove this as needed.
+const DELETE_PASSWORD = "Austin1";  // â† change to whatever you want
 
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -158,7 +174,7 @@ if (sunToggle) {
 setupHeaderToolsMenu();
 
   });
-/* ⭐ Ensures mobile buttons move AFTER full page load */
+/* â­ Ensures mobile buttons move AFTER full page load */
 window.addEventListener("load", placeLocateButton);
 
 // ===== USER GEOLOCATION =====
@@ -387,7 +403,122 @@ function placeRefreshButton() {
   }
 }
 
+function initHeaderActionOverflowMenu() {
+  const row = document.querySelector(".header-import-selection-row");
+  const wrapper = document.getElementById("headerActionsOverflow");
+  const menuBtn = document.getElementById("headerActionsMenuBtn");
+  const dropdown = document.getElementById("headerActionsMenuDropdown");
+  if (!row || !wrapper || !menuBtn || !dropdown) return;
+  if (menuBtn.dataset.bound === "1") return;
+  menuBtn.dataset.bound = "1";
+
+  const groups = [
+    {
+      label: "Selection & Query",
+      items: [
+        { id: "selectByAttributesBtn", label: "Select By Attributes" },
+        { id: "setSegmentIdSideBtn", label: "Set Segment ID + Side" },
+        { id: "updateFieldBtn", label: "Update Field" }
+      ]
+    },
+    {
+      label: "Street Tools",
+      items: [
+        { id: "streetAttributesBtn", label: "Street Attributes" }
+      ]
+    }
+  ];
+
+  const sourceButtons = [];
+  const closeMenu = () => {
+    dropdown.classList.remove("open");
+    menuBtn.setAttribute("aria-expanded", "false");
+  };
+
+  const buildMenu = () => {
+    dropdown.innerHTML = "";
+    sourceButtons.length = 0;
+    let entryCount = 0;
+
+    groups.forEach(group => {
+      const sectionItems = [];
+      group.items.forEach(item => {
+        const sourceBtn = document.getElementById(item.id);
+        if (!sourceBtn) return;
+        sourceButtons.push(sourceBtn);
+        sourceBtn.classList.add("header-overflow-source");
+        sectionItems.push({ sourceBtn, label: item.label });
+      });
+
+      if (!sectionItems.length) return;
+      entryCount += sectionItems.length;
+      const section = document.createElement("div");
+      section.className = "header-actions-menu-section";
+      const heading = document.createElement("div");
+      heading.className = "header-actions-menu-heading";
+      heading.textContent = group.label;
+      section.appendChild(heading);
+
+      sectionItems.forEach(({ sourceBtn, label }) => {
+        const actionBtn = document.createElement("button");
+        actionBtn.type = "button";
+        actionBtn.className = "header-actions-menu-item";
+        actionBtn.textContent = label;
+        actionBtn.addEventListener("click", () => {
+          closeMenu();
+          sourceBtn.click();
+        });
+        section.appendChild(actionBtn);
+      });
+
+      dropdown.appendChild(section);
+    });
+
+    if (!entryCount) {
+      wrapper.hidden = true;
+      row.classList.remove("header-overflow-enabled");
+      sourceButtons.forEach(btn => btn.classList.remove("header-overflow-source"));
+      return;
+    }
+
+    wrapper.hidden = false;
+  };
+
+  const syncDesktopState = () => {
+    const desktop = window.innerWidth > 900;
+    closeMenu();
+    if (!desktop || wrapper.hidden) {
+      row.classList.remove("header-overflow-enabled");
+      sourceButtons.forEach(btn => btn.classList.remove("header-overflow-source"));
+      return;
+    }
+    row.classList.add("header-overflow-enabled");
+    sourceButtons.forEach(btn => btn.classList.add("header-overflow-source"));
+  };
+
+  buildMenu();
+  syncDesktopState();
+
+  menuBtn.addEventListener("click", event => {
+    event.stopPropagation();
+    const opening = !dropdown.classList.contains("open");
+    if (opening) {
+      dropdown.classList.add("open");
+      menuBtn.setAttribute("aria-expanded", "true");
+    } else {
+      closeMenu();
+    }
+  });
+  dropdown.addEventListener("click", event => event.stopPropagation());
+  document.addEventListener("click", closeMenu);
+  window.addEventListener("keydown", event => {
+    if (event.key === "Escape") closeMenu();
+  });
+  window.addEventListener("resize", syncDesktopState);
+}
+
 placeRefreshButton();
+initHeaderActionOverflowMenu();
 window.addEventListener("resize", placeRefreshButton);
 
 //======
@@ -752,10 +883,16 @@ function initWheelZoomInputControls() {
 initWheelZoomInputControls();
 const ROUTE_DAY_PANE = "routeDayPane";
 const STREET_NETWORK_PANE = "streetNetworkPane";
+const SEQUENCE_PANE = "sequencePane";
 const routeDayPane = map.createPane(ROUTE_DAY_PANE);
 if (routeDayPane) routeDayPane.style.zIndex = "380";
 const streetNetworkPane = map.createPane(STREET_NETWORK_PANE);
 if (streetNetworkPane) streetNetworkPane.style.zIndex = "370";
+const sequencePane = map.createPane(SEQUENCE_PANE);
+if (sequencePane) {
+  sequencePane.style.zIndex = "379";
+  sequencePane.style.pointerEvents = "none";
+}
 // Shared Canvas renderer for high-performance drawing
 const canvasRenderer = L.canvas({ padding: 0.5, pane: ROUTE_DAY_PANE });
 // Keep all street casings under all street centerlines to prevent visual cut-outs.
@@ -833,6 +970,7 @@ let multiDayManagerUiRenderer = null;
 let multiDaySidebarUiRenderer = null;
 const streetAttributeLayerGroup = L.layerGroup();
 const texasLandfillsLayerGroup = L.layerGroup();
+const routeSequencerFacilitiesLayerGroup = L.layerGroup().addTo(map);
 const streetLoadPolygonLayerGroup = new L.FeatureGroup();
 map.addLayer(streetLoadPolygonLayerGroup);
 let streetPolygonLoadPending = false;
@@ -965,7 +1103,7 @@ const LOCAL_STREET_JSON_PARSE_WARN_MB = 420;
 const LOCAL_STREET_JSON_STREAM_THRESHOLD_MB = 260;
 const LOCAL_STREET_STREAM_YIELD_FEATURE_STEP = 300;
 const LOCAL_STREET_OFFLINE_CONVERTER_PACKAGE = "tds-streets-offline-converter-package.zip?v=20260306-8";
-const LOCAL_STREET_AUTO_SETUP_PACKAGE = "tds-streets-auto-setup-package.zip?v=20260310-4";
+const LOCAL_STREET_AUTO_SETUP_PACKAGE = "tds-streets-auto-setup-package.zip?v=20260311-3";
 const LOCAL_STREET_BACKEND_URL_KEY = "localStreetBackendUrl";
 const STREET_NETWORK_LAYER_VISIBLE_KEY = "streetNetworkLayerVisible";
 const LOCAL_STREET_BACKEND_URL_DEFAULT = "http://127.0.0.1:8787";
@@ -3496,8 +3634,17 @@ function initLocalStreetSourceControls() {
     await checkLocalStreetBackendAvailability(true);
     updateStreetSetupGuide();
     if (localStreetBackendState.available && localStreetBackendState.hasIndex) {
-      setStreetWizardStatus("Backend is ready.");
-      if (showAlert) alert("Backend is ready.");
+      const backendUrl = String(localStreetBackendState.baseUrl || LOCAL_STREET_BACKEND_URL_DEFAULT);
+      const sourceText = String(localStreetBackendState.sourceName || "").trim();
+      setStreetWizardStatus(`Backend is ready at ${backendUrl}.`);
+      if (showAlert) {
+        alert(
+          "Backend is ready.\n\n" +
+          `URL: ${backendUrl}\n` +
+          (sourceText ? `Source: ${sourceText}\n` : "") +
+          "If this is not your local machine backend, click Set Backend URL and switch to http://127.0.0.1:8787."
+        );
+      }
       return true;
     }
     if (localStreetBackendState.available && !localStreetBackendState.hasIndex) {
@@ -4713,6 +4860,7 @@ function setAttributeTableMode(mode) {
     ? streetAttributeSelectedIds.size
     : attributeState.selectedRowIds.size;
   syncSelectedStopsHeaderCount(selectedCount);
+  syncAttributeSortControls();
   if (typeof window.__refreshSelectionToolsUi === "function") {
     window.__refreshSelectionToolsUi();
   }
@@ -4884,21 +5032,12 @@ function renderStreetAttributeTable() {
     if (prevBtn) prevBtn.disabled = true;
     if (nextBtn) nextBtn.disabled = true;
     if (status) status.textContent = `${streetAttributeSelectedIds.size} selected`;
+    syncAttributeSortControls();
     return;
   }
 
-  const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
-  const labels = {
-    id: "Way ID",
-    name: "Road Name",
-    func_class: "Func Class",
-    highway: "Class",
-    ref: "Ref",
-    maxspeed: "Max Speed",
-    lanes: "Lanes",
-    surface: "Surface",
-    oneway: "One Way"
-  };
+  const headers = STREET_ATTRIBUTE_TABLE_HEADERS;
+  const labels = STREET_ATTRIBUTE_TABLE_LABELS;
   const rows = getFilteredStreetAttributeRows();
   attributeState.lastVisibleRows = rows.map(r => ({ row: r, rowId: Number(r.id) }));
   const totalPages = Math.max(1, Math.ceil(rows.length / attributeState.pageSize));
@@ -4912,7 +5051,7 @@ function renderStreetAttributeTable() {
   if (nextBtn) nextBtn.disabled = attributeState.page >= totalPages;
   if (status) {
     const scopeLabel = attributeState.selectedOnly ? "selected scope" : "loaded scope";
-    status.textContent = `${streetAttributeSelectedIds.size} selected • ${rows.length} visible (${scopeLabel})`;
+    status.textContent = `${streetAttributeSelectedIds.size} selected â€¢ ${rows.length} visible (${scopeLabel})`;
   }
 
   if (!rows.length) {
@@ -4921,11 +5060,12 @@ function renderStreetAttributeTable() {
       ? "No selected street segments. Use selection tools or click street lines on the map."
       : "No street segments match the current filter.";
     empty.style.display = "block";
+    syncAttributeSortControls();
     return;
   }
   empty.style.display = "none";
 
-  const sortIndicator = key => (attributeState.sortKey === key ? (attributeState.sortDir > 0 ? " ▲" : " ▼") : "");
+  const sortIndicator = key => (attributeState.sortKey === key ? (attributeState.sortDir > 0 ? " â–²" : " â–¼") : "");
   let html = "<thead><tr><th>Sel</th><th>#</th>";
   headers.forEach(h => {
     html += `<th><button type="button" data-sort="${h}">${labels[h]}${sortIndicator(h)}</button></th>`;
@@ -4957,6 +5097,7 @@ function renderStreetAttributeTable() {
         attributeState.sortDir = 1;
       }
       attributeState.page = 1;
+      syncAttributeSortControls();
       renderAttributeTable();
     });
   });
@@ -5571,6 +5712,7 @@ function replaceStreetSelection(nextSelectedIds) {
     if (!streetAttributeById.has(wayId)) return;
     streetAttributeSelectedIds.add(wayId);
   });
+  syncAttributeSortControls();
 }
 
 const MAP_SELECTION_DRAW_MODE_KEY = "mapSelectionDrawMode";
@@ -6087,7 +6229,7 @@ map.on(L.Draw.Event.CREATED, e => {
   drawnLayer.clearLayers();
   drawnLayer.addLayer(e.layer);
   updateSelectionCount();
-  updateUndoButtonState();   // 🔥 ADD THIS
+  updateUndoButtonState();   // ðŸ”¥ ADD THIS
 });
 
 map.on(L.Draw.Event.DRAWSTOP, () => {
@@ -6146,8 +6288,16 @@ const routeDayGroups = {};   // stores map markers grouped by route/day
 const LAYER_MANAGER_ORDER_STORAGE_KEY = "layerManagerOrderTop";
 const LAYER_MANAGER_SELECTABLE_STORAGE_KEY = "layerManagerSelectable";
 const LAYER_MANAGER_STREET_KEY = "street-network";
+const ROUTE_SEQUENCE_LAYER_VISIBLE_KEY = "routeSequenceLayerVisible";
 let layerManagerOrderTop = [];
 let layerManagerSelectableState = {};
+const sequenceLayerByRouteDay = new Map();
+const sequenceLayerState = {
+  routeDayCount: 0,
+  segmentCount: 0,
+  arrowCount: 0,
+  lastRunAt: 0
+};
 // ===== DELIVERED STOPS LAYER =====
 
 function layerManagerDaySortRank(value) {
@@ -6398,12 +6548,16 @@ function applyLayerManagerPaneOrder(orderTop = ensureLayerManagerOrder()) {
   const streetOnTop = orderTop[0] === LAYER_MANAGER_STREET_KEY;
   const routeZ = streetOnTop ? 370 : 380;
   const streetZ = streetOnTop ? 380 : 370;
+  const sequenceZ = routeZ - 1;
 
   const routePaneEl = map.getPane(ROUTE_DAY_PANE);
   if (routePaneEl) routePaneEl.style.zIndex = String(routeZ);
 
   const streetPaneEl = map.getPane(STREET_NETWORK_PANE);
   if (streetPaneEl) streetPaneEl.style.zIndex = String(streetZ);
+
+  const sequencePaneEl = map.getPane(SEQUENCE_PANE);
+  if (sequencePaneEl) sequencePaneEl.style.zIndex = String(sequenceZ);
 }
 
 function applyLayerManagerOrder() {
@@ -6431,6 +6585,7 @@ function applyLayerManagerOrder() {
   // Keep temporary selection/polygon tools above data layers.
   try { drawnLayer?.bringToFront?.(); } catch (_) {}
   try { streetLoadPolygonLayerGroup?.bringToFront?.(); } catch (_) {}
+  syncSequenceLayerVisibilityOnMap();
 }
 
 function setRouteDayLayerVisibilityFromManager(key, visible) {
@@ -6483,6 +6638,273 @@ function getLayerLatLng(layer) {
     return L.latLng(layer._base.lat, layer._base.lon);
   }
   return null;
+}
+
+function normalizeRouteSequencerSequenceIncrement(value, fallback = 1) {
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed) || parsed < 1) return Math.max(1, Math.round(Number(fallback) || 1));
+  return Math.min(100000, parsed);
+}
+
+function toRouteSequencerSequenceValue(sequenceOrder, sequenceIncrement) {
+  const order = Math.max(1, Math.round(Number(sequenceOrder) || 1));
+  const increment = normalizeRouteSequencerSequenceIncrement(sequenceIncrement, 1);
+  return order * increment;
+}
+
+function getSequenceLayerLineColor(routeDayKey) {
+  const symbol = symbolMap[routeDayKey] || getSymbol(routeDayKey);
+  return String(symbol?.color || "#32d0ff");
+}
+
+function computeSequenceBearingDegrees(fromLatLng, toLatLng) {
+  if (!fromLatLng || !toLatLng) return 0;
+  const lat1 = (Number(fromLatLng.lat) * Math.PI) / 180;
+  const lat2 = (Number(toLatLng.lat) * Math.PI) / 180;
+  const dLon = ((Number(toLatLng.lng) - Number(fromLatLng.lng)) * Math.PI) / 180;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = (Math.cos(lat1) * Math.sin(lat2))
+    - (Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon));
+  const bearing = (Math.atan2(y, x) * 180) / Math.PI;
+  return (bearing + 360) % 360;
+}
+
+function buildSequenceArrowIcon(angleDeg, colorValue) {
+  const color = String(colorValue || "#32d0ff");
+  const safeAngle = Number.isFinite(Number(angleDeg)) ? Number(angleDeg) : 0;
+  return L.divIcon({
+    className: "sequence-arrow-marker",
+    html: `<span class="sequence-arrow-head" style="--sequence-arrow-color:${color};transform:rotate(${safeAngle.toFixed(1)}deg);"></span>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7]
+  });
+}
+
+function clearSequenceLayerData(options = {}) {
+  sequenceLayerByRouteDay.forEach(layerGroup => {
+    try { map.removeLayer(layerGroup); } catch (_) {}
+  });
+  sequenceLayerByRouteDay.clear();
+  sequenceLayerState.routeDayCount = 0;
+  sequenceLayerState.segmentCount = 0;
+  sequenceLayerState.arrowCount = 0;
+  sequenceLayerState.lastRunAt = 0;
+  if (!options || options.silent !== true) {
+    updateSequenceLayerStatus();
+  }
+}
+
+function syncSequenceLayerVisibilityOnMap() {
+  const toggleNode = document.getElementById("sequenceLayerEnabled");
+  const enabled = !!toggleNode?.checked;
+
+  sequenceLayerByRouteDay.forEach((layerGroup, routeDayKey) => {
+    const hasRouteDayGroup = Object.prototype.hasOwnProperty.call(routeDayGroups, routeDayKey);
+    const routeVisible = hasRouteDayGroup && isRouteDayLayerVisibleOnMap(routeDayKey);
+    const shouldShow = enabled && routeVisible;
+    if (shouldShow) {
+      if (!map.hasLayer(layerGroup)) layerGroup.addTo(map);
+    } else if (map.hasLayer(layerGroup)) {
+      map.removeLayer(layerGroup);
+    }
+  });
+
+  updateSequenceLayerStatus();
+}
+
+function updateSequenceLayerStatus(message = "") {
+  const statusNode = document.getElementById("sequenceLayerStatus");
+  if (!statusNode) return;
+  if (message) {
+    statusNode.textContent = String(message);
+    return;
+  }
+
+  const enabled = !!document.getElementById("sequenceLayerEnabled")?.checked;
+  const routeCount = Number(sequenceLayerState.routeDayCount) || 0;
+  const segmentCount = Number(sequenceLayerState.segmentCount) || 0;
+  const arrowCount = Number(sequenceLayerState.arrowCount) || 0;
+
+  if (!routeCount || !segmentCount) {
+    statusNode.textContent = enabled
+      ? "Run Sequence to generate route arrows."
+      : "Layer is off.";
+    return;
+  }
+
+  if (!enabled) {
+    statusNode.textContent = `Layer is off. ${routeCount.toLocaleString()} route/day sequence(s) are ready.`;
+    return;
+  }
+
+  statusNode.textContent = `Showing ${routeCount.toLocaleString()} route/day sequence(s), ${segmentCount.toLocaleString()} segment(s), ${arrowCount.toLocaleString()} arrow(s).`;
+}
+
+function rebuildSequenceLayerFromPlans(plans) {
+  clearSequenceLayerData({ silent: true });
+
+  const entries = Array.isArray(plans) ? plans : [];
+  if (!entries.length) {
+    updateSequenceLayerStatus("No sequence plans to draw.");
+    return;
+  }
+
+  const maxArrowCount = 7000;
+  let segmentCount = 0;
+  let arrowCount = 0;
+
+  entries.forEach(plan => {
+    const routeDayKey = String(plan?.routeDayKey || "");
+    if (!routeDayKey || !Object.prototype.hasOwnProperty.call(routeDayGroups, routeDayKey)) return;
+    const visits = (Array.isArray(plan?.stopVisits) ? plan.stopVisits : [])
+      .slice()
+      .sort((a, b) => Number(a?.sequence || 0) - Number(b?.sequence || 0));
+    if (visits.length < 2) return;
+
+    const sourceLayers = Array.isArray(routeDayGroups[routeDayKey]?.layers)
+      ? routeDayGroups[routeDayKey].layers
+      : [];
+    if (!sourceLayers.length) return;
+
+    const latLngByRowId = new Map();
+    sourceLayers.forEach(layer => {
+      const rowId = Number(layer?._rowId);
+      if (!Number.isFinite(rowId)) return;
+      const ll = getLayerLatLng(layer);
+      if (!ll) return;
+      latLngByRowId.set(rowId, ll);
+    });
+    if (!latLngByRowId.size) return;
+
+    const eventPoints = (Array.isArray(plan?.events) ? plan.events : [])
+      .filter(event => Number.isFinite(Number(event?.lat)) && Number.isFinite(Number(event?.lon)))
+      .map((event, index) => ({
+        lat: Number(event.lat),
+        lng: Number(event.lon),
+        label: String(event?.name || event?.type || `Step ${index + 1}`),
+        type: String(event?.type || ""),
+        sequence: index + 1
+      }));
+
+    let pathPoints = eventPoints;
+    if (pathPoints.length < 2) {
+      const visits = (Array.isArray(plan?.stopVisits) ? plan.stopVisits : [])
+        .slice()
+        .sort((a, b) => Number(a?.sequence || 0) - Number(b?.sequence || 0))
+        .map(visit => {
+          const rowId = Number(visit?.rowId);
+          const ll = latLngByRowId.get(rowId);
+          if (!ll) return null;
+          return {
+            lat: Number(ll.lat),
+            lng: Number(ll.lng),
+            label: `Stop ${Number(visit?.sequence) || ""}`.trim(),
+            type: "stop",
+            sequence: Number(visit?.sequence) || 0
+          };
+        })
+        .filter(Boolean);
+      pathPoints = visits;
+    }
+    if (pathPoints.length < 2) return;
+
+    const lineColor = getSequenceLayerLineColor(routeDayKey);
+    const layerGroup = L.layerGroup();
+
+    for (let i = 0; i < pathPoints.length - 1; i += 1) {
+      const fromPoint = pathPoints[i];
+      const toPoint = pathPoints[i + 1];
+      const fromLatLng = { lat: Number(fromPoint.lat), lng: Number(fromPoint.lng) };
+      const toLatLng = { lat: Number(toPoint.lat), lng: Number(toPoint.lng) };
+      if (!Number.isFinite(fromLatLng.lat) || !Number.isFinite(fromLatLng.lng) || !Number.isFinite(toLatLng.lat) || !Number.isFinite(toLatLng.lng)) {
+        continue;
+      }
+      const samePoint = Math.abs(fromLatLng.lat - toLatLng.lat) < 1e-9 && Math.abs(fromLatLng.lng - toLatLng.lng) < 1e-9;
+      if (samePoint) continue;
+
+      const line = L.polyline([fromLatLng, toLatLng], {
+        pane: SEQUENCE_PANE,
+        color: lineColor,
+        weight: 2.5,
+        opacity: 0.93,
+        dashArray: "9 5",
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false
+      });
+      line._sequenceRouteDayKey = routeDayKey;
+      layerGroup.addLayer(line);
+      segmentCount += 1;
+
+      if (arrowCount >= maxArrowCount) continue;
+      const midLat = (fromLatLng.lat + toLatLng.lat) / 2;
+      const midLng = (fromLatLng.lng + toLatLng.lng) / 2;
+      const bearing = computeSequenceBearingDegrees(fromLatLng, toLatLng);
+      const arrowMarker = L.marker([midLat, midLng], {
+        pane: SEQUENCE_PANE,
+        icon: buildSequenceArrowIcon(bearing, lineColor),
+        interactive: false,
+        keyboard: false
+      });
+      arrowMarker._sequenceRouteDayKey = routeDayKey;
+      layerGroup.addLayer(arrowMarker);
+      arrowCount += 1;
+    }
+
+    if (layerGroup.getLayers().length) {
+      sequenceLayerByRouteDay.set(routeDayKey, layerGroup);
+    }
+  });
+
+  sequenceLayerState.routeDayCount = sequenceLayerByRouteDay.size;
+  sequenceLayerState.segmentCount = segmentCount;
+  sequenceLayerState.arrowCount = arrowCount;
+  sequenceLayerState.lastRunAt = Date.now();
+
+  syncSequenceLayerVisibilityOnMap();
+}
+
+function setSequenceLayerEnabled(enabled, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const persist = opts.persist !== false;
+  const nextEnabled = !!enabled;
+  const toggleNode = document.getElementById("sequenceLayerEnabled");
+  if (toggleNode && toggleNode.checked !== nextEnabled) {
+    toggleNode.checked = nextEnabled;
+  }
+  if (persist) {
+    storageSet(ROUTE_SEQUENCE_LAYER_VISIBLE_KEY, nextEnabled ? "on" : "off");
+  }
+  syncSequenceLayerVisibilityOnMap();
+}
+
+function initSequenceLayerControls() {
+  const toggleHeader = document.getElementById("sequenceLayerToggleHeader");
+  const content = document.getElementById("sequenceLayerContent");
+  const masterToggle = document.getElementById("sequenceLayerEnabled");
+  const statusNode = document.getElementById("sequenceLayerStatus");
+  if (!toggleHeader || !content || !masterToggle || !statusNode) return;
+  if (toggleHeader.dataset.sequenceLayerBound === "1") return;
+  toggleHeader.dataset.sequenceLayerBound = "1";
+
+  content.classList.add("collapsed");
+  toggleHeader.classList.remove("open");
+
+  toggleHeader.addEventListener("click", event => {
+    if (event.target === masterToggle) return;
+    const collapsed = content.classList.toggle("collapsed");
+    toggleHeader.classList.toggle("open", !collapsed);
+  });
+
+  masterToggle.addEventListener("change", () => {
+    setSequenceLayerEnabled(masterToggle.checked);
+  });
+
+  const stored = storageGet(ROUTE_SEQUENCE_LAYER_VISIBLE_KEY);
+  const shouldShow = stored == null ? true : stored === "on";
+  masterToggle.checked = shouldShow;
+  setSequenceLayerEnabled(shouldShow, { persist: false });
+  updateSequenceLayerStatus();
 }
 
 function multiDaySortRank(dayToken) {
@@ -6575,11 +6997,56 @@ function buildRecordPopupContent(layer) {
   const serviceLine = serviceDetail
     ? `<div><strong>Service Frequency:</strong> ${escapeMultiDayLabelText(serviceDetail)}</div>`
     : "";
+  const row = layer?._rowRef || {};
+  const outputFields = getRouteSequencerActiveOutputFields();
+  const seqValue = parseRouteSequencerNumeric(row?.[outputFields.sequence], NaN);
+  const tripValue = parseRouteSequencerNumeric(row?.[outputFields.trip], NaN);
+  const loadValue = parseRouteSequencerNumeric(row?.[outputFields.cumulativeLoad], NaN);
+  const sequenceLine = Number.isFinite(seqValue) && seqValue > 0
+    ? `<div><strong>Sequence:</strong> ${escapeMultiDayLabelText(String(Math.round(seqValue)))}</div>`
+    : "";
+  const tripLine = Number.isFinite(tripValue) && tripValue > 0
+    ? `<div><strong>Trip:</strong> ${escapeMultiDayLabelText(String(Math.round(tripValue)))}</div>`
+    : "";
+  const loadLine = Number.isFinite(loadValue) && loadValue >= 0
+    ? `<div><strong>Cumulative Load:</strong> ${escapeMultiDayLabelText(loadValue.toFixed(2))} tons</div>`
+    : "";
+  const segmentIdValue = row?.SEGMENT_ID ?? row?.Segment_ID ?? row?.segment_id ?? "";
+  const segmentSideValue = row?.SEGMENT_SIDE ?? row?.Segment_Side ?? row?.segment_side ?? "";
+  const matchStatusFieldValue = row?.Segment_Match_Status ?? row?.segment_match_status ?? row?.SEGMENT_MATCH_STATUS ?? "";
+  const readyStatusFieldValue = row?.Sequence_Ready ?? row?.sequence_ready ?? row?.SEQUENCE_READY ?? "";
+  const segmentMethodValue = row?.Segment_Match_Method ?? row?.segment_match_method ?? row?.SEGMENT_MATCH_METHOD ?? "";
+  const hasSegmentMatch = String(segmentIdValue || "").trim() !== "";
+  const matchStatusValue = String(matchStatusFieldValue || (hasSegmentMatch ? "Matched" : "Unmatched")).trim();
+  const readyStatusValue = String(readyStatusFieldValue || (hasSegmentMatch ? "Ready" : "Not Ready")).trim();
+  const segmentIdLine = String(segmentIdValue || "").trim()
+    ? `<div><strong>Segment ID:</strong> ${escapeMultiDayLabelText(String(segmentIdValue))}</div>`
+    : "";
+  const segmentSideLine = String(segmentSideValue || "").trim()
+    ? `<div><strong>Segment Side:</strong> ${escapeMultiDayLabelText(String(segmentSideValue))}</div>`
+    : "";
+  const segmentMatchStatusLine = matchStatusValue
+    ? `<div><strong>Segment Match:</strong> ${escapeMultiDayLabelText(matchStatusValue)}</div>`
+    : "";
+  const sequenceReadyLine = readyStatusValue
+    ? `<div><strong>Sequence Ready:</strong> ${escapeMultiDayLabelText(readyStatusValue)}</div>`
+    : "";
+  const segmentMethodLine = String(segmentMethodValue || "").trim()
+    ? `<div><strong>Match Method:</strong> ${escapeMultiDayLabelText(String(segmentMethodValue))}</div>`
+    : "";
 
   return `
     <div style="font-size:14px; line-height:1.4;">
       <div><strong>Route:</strong> ${escapeMultiDayLabelText(routeToken)}</div>
       <div><strong>Day:</strong> ${escapeMultiDayLabelText(dayLabel)}</div>
+      ${sequenceLine}
+      ${tripLine}
+      ${loadLine}
+      ${segmentIdLine}
+      ${segmentSideLine}
+      ${segmentMatchStatusLine}
+      ${sequenceReadyLine}
+      ${segmentMethodLine}
       ${serviceLine}
     </div>
   `;
@@ -7070,7 +7537,7 @@ let symbolIndex = 0;
 let globalBounds = L.latLngBounds(); // used to zoom map to all points
 
 
-// Convert day number → day name
+// Convert day number â†’ day name
 function dayName(n) {
   return ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"][n-1];
 }
@@ -7296,7 +7763,7 @@ function updateStats() {
 
     const [r,d] = key.split("|");
     const li = document.createElement("li");
-    li.textContent = `Route ${r} – ${dayName(d)}: ${visible}`;
+    li.textContent = `Route ${r} â€“ ${dayName(d)}: ${visible}`;
     list.appendChild(li);
   });
 }
@@ -7467,10 +7934,17 @@ function buildRouteDayLayerControls() {
 
 // ================= COLUMN MAPPING (UPLOAD) =================
 const COLUMN_MAPPING_FIELDS = [
+  { key: "UNIQUEID", label: "Unique ID", required: false },
   { key: "LATITUDE", label: "Latitude", required: true },
   { key: "LONGITUDE", label: "Longitude", required: true },
-  { key: "NEWROUTE", label: "Route Code", required: false },
-  { key: "NEWDAY", label: "Day", required: false },
+  { key: "ROUTE", label: "Route", required: false },
+  { key: "DAY", label: "Day", required: false },
+  { key: "SEQNO", label: "Sequence Number", required: false },
+  { key: "FREQ", label: "Service Frequency", required: false },
+  { key: "NEWROUTE", label: "New Route", required: false },
+  { key: "NEWDAY", label: "New Day", required: false },
+  { key: "NEWSEQ", label: "New Sequence", required: false },
+  { key: "NEWFREQ", label: "New Frequency", required: false },
   { key: "del_status", label: "Delivery Status", required: false },
   { key: "CSADR#", label: "Street Number", required: false },
   { key: "CSSDIR", label: "Street Direction", required: false },
@@ -7478,14 +7952,26 @@ const COLUMN_MAPPING_FIELDS = [
   { key: "CSSFUX", label: "Street Suffix", required: false },
   { key: "SIZE", label: "Container Size", required: false },
   { key: "QTY", label: "Quantity", required: false },
-  { key: "BINNO", label: "Bin Number", required: false }
+  { key: "BINNO", label: "Bin Number", required: false },
+  { key: "DEMAND", label: "Demand (Tons)", required: false },
+  { key: "Service_Time", label: "Service Time (MM:SS)", required: false },
+  { key: "DURATION_A", label: "Service Time (Minutes)", required: false },
+  { key: "EARLIEST_A", label: "Earliest Arrival", required: false },
+  { key: "LATEST_ARR", label: "Latest Arrival", required: false }
 ];
 
 const COLUMN_MAPPING_ALIASES = {
+  UNIQUEID: ["uniqueid", "unique_id", "id", "recordid", "stopid", "customerid"],
   LATITUDE: ["latitude", "lat", "y", "ycoord", "ycoordinate"],
   LONGITUDE: ["longitude", "lon", "lng", "long", "x", "xcoord", "xcoordinate"],
   NEWROUTE: ["newroute", "route", "routecode", "routeid", "rte"],
   NEWDAY: ["newday", "day", "weekday", "serviceday"],
+  NEWSEQ: ["newseq", "newsequence", "newstopsequence", "neworder"],
+  NEWFREQ: ["newfreq", "newfrequency", "newservicefrequency"],
+  ROUTE: ["route", "routecode", "routeid", "rte"],
+  DAY: ["day", "weekday", "serviceday", "routeday"],
+  SEQNO: ["seqno", "sequence", "seq", "stopsequence", "stoporder", "order"],
+  FREQ: ["freq", "frequency", "servicefreq", "servicefrequency"],
   del_status: ["delstatus", "deliverystatus", "status", "delivered", "stopstatus"],
   "CSADR#": ["csadr", "addressnumber", "streetnumber", "housenumber"],
   CSSDIR: ["cssdir", "streetdir", "direction", "predir"],
@@ -7493,7 +7979,12 @@ const COLUMN_MAPPING_ALIASES = {
   CSSFUX: ["cssfux", "streetsuffix", "suffix", "sfx"],
   SIZE: ["size", "containersize", "binsize"],
   QTY: ["qty", "quantity", "count"],
-  BINNO: ["binno", "bin", "binnumber", "containerid"]
+  BINNO: ["binno", "bin", "binnumber", "containerid"],
+  DEMAND: ["demand", "tons", "tonnage", "load", "volume", "totaldemand"],
+  Service_Time: ["servicetime", "service_time", "serviceminutes", "servicemins", "stopservicetime", "servicemmss"],
+  DURATION_A: ["durationa", "duration", "servicetime", "service_time", "servicemin", "serviceminutes", "minutesperstop", "durationminutes"],
+  EARLIEST_A: ["earliesta", "earliestarr", "earliestarrival", "windowstart", "timewindowstart"],
+  LATEST_ARR: ["latestarr", "latestarrival", "latesta", "latest_a", "windowend", "timewindowend"]
 };
 
 function normalizeColumnName(value) {
@@ -7501,6 +7992,203 @@ function normalizeColumnName(value) {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
+}
+
+function getMappedRowRoute(row) {
+  const preferred = String(row?.ROUTE ?? "").trim();
+  if (preferred) return preferred;
+  return String(row?.NEWROUTE ?? "").trim();
+}
+
+function getMappedRowDayRaw(row) {
+  const preferred = String(row?.DAY ?? "").trim();
+  if (preferred) return preferred;
+  return String(row?.NEWDAY ?? "").trim();
+}
+
+const RECORD_FIELD_MIRROR_GROUPS = Object.freeze([
+  { primary: "ROUTE", mirror: "NEWROUTE" },
+  { primary: "DAY", mirror: "NEWDAY" },
+  { primary: "SEQNO", mirror: "NEWSEQ" },
+  { primary: "FREQ", mirror: "NEWFREQ" }
+]);
+
+const EXIST_BACKUP_SOURCE_FIELDS = Object.freeze([
+  "UNIQUEID",
+  "DAY",
+  "ROUTE",
+  "SEQNO",
+  "FREQ",
+  "SIZE",
+  "QTY",
+  "BINNO",
+  "NEWDAY",
+  "NEWROUTE",
+  "NEWSEQ",
+  "NEWFREQ",
+  "LONGITUDE",
+  "LATITUDE",
+  "DEMAND",
+  "Service_Time",
+  "DURATION_A",
+  "EARLIEST_A",
+  "LATEST_ARR"
+]);
+
+function isBlankRecordFieldValue(value) {
+  return value === null || value === undefined || value === "";
+}
+
+function isRouteDayFieldName(fieldName) {
+  const token = normalizeRouteSequencerFieldToken(fieldName);
+  return token === "route" || token === "day";
+}
+
+function hydrateCanonicalRecordFieldsFromLegacy(row) {
+  if (!row || typeof row !== "object") return;
+  RECORD_FIELD_MIRROR_GROUPS.forEach(group => {
+    const primaryValue = row[group.primary];
+    const mirrorValue = row[group.mirror];
+    if (isBlankRecordFieldValue(primaryValue) && !isBlankRecordFieldValue(mirrorValue)) {
+      row[group.primary] = mirrorValue;
+    }
+  });
+}
+
+function ensureCanonicalRecordFields(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  list.forEach(row => {
+    hydrateCanonicalRecordFieldsFromLegacy(row);
+  });
+}
+
+function ensureExistBackupColumns(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return false;
+
+  const activeFields = EXIST_BACKUP_SOURCE_FIELDS.filter(field =>
+    list.some(row => row && typeof row === "object" && row[field] !== undefined)
+  );
+  if (!activeFields.length) return false;
+
+  let changed = false;
+  list.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    activeFields.forEach(field => {
+      const backupField = `Exist_${field}`;
+      if (Object.prototype.hasOwnProperty.call(row, backupField)) return;
+      row[backupField] = row[field];
+      changed = true;
+    });
+  });
+  return changed;
+}
+
+function ensureServiceTimeField(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return false;
+  let changed = false;
+  list.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    if (Object.prototype.hasOwnProperty.call(row, "Service_Time")) return;
+    const fallback = row?.DURATION_A;
+    row.Service_Time = fallback == null ? "" : fallback;
+    changed = true;
+  });
+  return changed;
+}
+
+function refreshRouteDayGroupsFromCurrentRows() {
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  if (!rows.length || !attributeMarkerByRowId?.size) return false;
+
+  const previousRouteChecks = {};
+  document.querySelectorAll("#routeCheckboxes input").forEach(input => {
+    previousRouteChecks[String(input.value || "")] = !!input.checked;
+  });
+
+  const previousDayChecks = {};
+  document.querySelectorAll("#dayCheckboxes input").forEach(input => {
+    const dayToken = normalizeDayToken(input.value) || String(input.value || "").trim();
+    if (dayToken) previousDayChecks[dayToken] = !!input.checked;
+  });
+
+  const nextGroups = {};
+  const routeSet = new Set();
+  const nextBounds = L.latLngBounds();
+
+  attributeMarkerByRowId.forEach((marker, rowId) => {
+    if (!marker) return;
+    const row = rows[Number(rowId)];
+    if (!row || typeof row !== "object") return;
+
+    const route = getMappedRowRoute(row) || "Unassigned";
+    const day = getMappedRowDayRaw(row) || "No Day";
+    const key = `${route}|${day}`;
+
+    marker._routeToken = route;
+    marker._dayToken = day;
+    marker._multiDayLatToken = row?.LATITUDE;
+    marker._multiDayLonToken = row?.LONGITUDE;
+
+    const symbol = getSymbol(key);
+    if (marker._base && typeof marker._base === "object") {
+      marker._base.symbol = symbol;
+    }
+    marker.setStyle?.({
+      color: symbol.color,
+      fillColor: symbol.color
+    });
+    syncRecordPopupContent(marker);
+
+    if (!nextGroups[key]) nextGroups[key] = { layers: [] };
+    nextGroups[key].layers.push(marker);
+    routeSet.add(route);
+
+    const ll = getLayerLatLng(marker);
+    if (ll) nextBounds.extend(ll);
+  });
+
+  Object.keys(routeDayGroups).forEach(key => delete routeDayGroups[key]);
+  Object.entries(nextGroups).forEach(([key, group]) => {
+    routeDayGroups[key] = group;
+  });
+  globalBounds = nextBounds;
+  clearSequenceLayerData({ silent: true });
+  syncSequenceLayerVisibilityOnMap();
+
+  Object.keys(layerVisibilityState).forEach(key => {
+    if (!Object.prototype.hasOwnProperty.call(routeDayGroups, key)) {
+      delete layerVisibilityState[key];
+    }
+  });
+  Object.keys(routeDayGroups).forEach(key => {
+    if (!Object.prototype.hasOwnProperty.call(layerVisibilityState, key)) {
+      layerVisibilityState[key] = true;
+    }
+  });
+
+  const sortedRoutes = [...routeSet].sort((a, b) =>
+    String(a || "").localeCompare(String(b || ""), undefined, { numeric: true, sensitivity: "base" })
+  );
+  buildRouteCheckboxes(sortedRoutes);
+  document.querySelectorAll("#routeCheckboxes input").forEach(input => {
+    const route = String(input.value || "");
+    if (Object.prototype.hasOwnProperty.call(previousRouteChecks, route)) {
+      input.checked = !!previousRouteChecks[route];
+    }
+  });
+  document.querySelectorAll("#dayCheckboxes input").forEach(input => {
+    const token = normalizeDayToken(input.value) || String(input.value || "").trim();
+    if (token && Object.prototype.hasOwnProperty.call(previousDayChecks, token)) {
+      input.checked = !!previousDayChecks[token];
+    }
+  });
+
+  buildRouteDayLayerControls();
+  rebuildMultiDayServiceProfilesFromMapLayers();
+  applyFilters();
+  return true;
 }
 
 function getColumnMappingStorageKey(headers) {
@@ -7703,7 +8391,7 @@ function openColumnMappingPrompt(headers, initialMapping, fileName, sampleByHead
         const value = picked ? sampleByHeader[picked] : "";
         sample.textContent = picked
           ? `Sample: ${String(value || "(blank)").slice(0, 80)}`
-          : "Sample: —";
+          : "Sample: â€”";
       };
 
       select.value = initialMapping[field.key] || "";
@@ -7804,6 +8492,913 @@ function getAttributeHeaders(rows) {
   return [...seen];
 }
 
+function syncCurrentWorkbookSheetFromRows() {
+  if (!window._currentWorkbook || !Array.isArray(window._currentRows)) return false;
+  const firstSheetName = Array.isArray(window._currentWorkbook.SheetNames)
+    ? window._currentWorkbook.SheetNames[0]
+    : "";
+  if (!firstSheetName) return false;
+  const nextSheet = XLSX.utils.json_to_sheet(window._currentRows, { defval: "" });
+  window._currentWorkbook.Sheets[firstSheetName] = nextSheet;
+  return true;
+}
+
+function hasWorkbookCloudSaveContext() {
+  const filePath = String(window._currentFilePath || "").trim();
+  return !!filePath && !!window._currentWorkbook && Array.isArray(window._currentRows);
+}
+
+async function flushQueuedWorkbookCloudSave() {
+  if (!workbookAutoSavePendingReasons.length) return false;
+  if (!hasWorkbookCloudSaveContext()) {
+    workbookAutoSavePendingReasons = [];
+    return false;
+  }
+  if (workbookAutoSaveInFlight) return workbookAutoSaveInFlight;
+
+  const reasons = [...workbookAutoSavePendingReasons];
+  workbookAutoSavePendingReasons = [];
+  const reasonLabel = reasons.join(", ");
+
+  workbookAutoSaveInFlight = (async () => {
+    try {
+      const saved = await saveWorkbookToCloud();
+      if (!saved) {
+        console.warn(
+          `[Workbook Auto Save] Save failed for "${window._currentFilePath}"${reasonLabel ? ` (${reasonLabel})` : ""}.`
+        );
+        return false;
+      }
+      console.info(
+        `[Workbook Auto Save] Saved "${window._currentFilePath}"${reasonLabel ? ` (${reasonLabel})` : ""}.`
+      );
+      return true;
+    } catch (error) {
+      console.error(
+        `[Workbook Auto Save] Error saving "${window._currentFilePath}"${reasonLabel ? ` (${reasonLabel})` : ""}:`,
+        error
+      );
+      return false;
+    } finally {
+      workbookAutoSaveInFlight = null;
+      if (workbookAutoSavePendingReasons.length) {
+        if (workbookAutoSaveTimer) clearTimeout(workbookAutoSaveTimer);
+        workbookAutoSaveTimer = setTimeout(() => {
+          workbookAutoSaveTimer = null;
+          flushQueuedWorkbookCloudSave();
+        }, 300);
+      }
+    }
+  })();
+
+  return workbookAutoSaveInFlight;
+}
+
+function queueWorkbookCloudSave(reason = "update") {
+  if (!hasWorkbookCloudSaveContext()) return;
+  const reasonText = String(reason || "").trim();
+  if (reasonText) workbookAutoSavePendingReasons.push(reasonText);
+  if (workbookAutoSaveTimer) clearTimeout(workbookAutoSaveTimer);
+  workbookAutoSaveTimer = setTimeout(() => {
+    workbookAutoSaveTimer = null;
+    flushQueuedWorkbookCloudSave();
+  }, WORKBOOK_AUTO_SAVE_DEBOUNCE_MS);
+}
+
+function getActiveAttributeSortOptions() {
+  if (attributeTableMode === "streets") {
+    return STREET_ATTRIBUTE_TABLE_HEADERS.map(key => ({
+      key,
+      label: STREET_ATTRIBUTE_TABLE_LABELS[key] || key
+    }));
+  }
+  const headers = Array.isArray(window._attributeHeaders) ? window._attributeHeaders : [];
+  return headers
+    .filter(header => String(header || "").trim())
+    .map(key => ({ key, label: String(key) }));
+}
+
+function syncAttributeSortControls() {
+  const sortFieldSelect = document.getElementById("attributeSortFieldSelect");
+  const sortAscBtn = document.getElementById("attributeSortAscBtn");
+  const sortDescBtn = document.getElementById("attributeSortDescBtn");
+  const clearSortBtn = document.getElementById("attributeClearSortBtn");
+  const addFieldBtn = document.getElementById("attributeAddFieldBtn");
+  const fieldCalcBtn = document.getElementById("attributeFieldCalcBtn");
+  if (!sortFieldSelect) return;
+
+  const options = getActiveAttributeSortOptions();
+  const optionKeySet = new Set(options.map(option => option.key));
+  if (attributeState.sortKey && !optionKeySet.has(attributeState.sortKey)) {
+    attributeState.sortKey = null;
+    attributeState.sortDir = 1;
+  }
+
+  sortFieldSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Sort field...";
+  sortFieldSelect.appendChild(placeholder);
+  options.forEach(option => {
+    const node = document.createElement("option");
+    node.value = option.key;
+    node.textContent = option.label;
+    sortFieldSelect.appendChild(node);
+  });
+  sortFieldSelect.value = attributeState.sortKey || "";
+
+  const hasOptions = options.length > 0;
+  sortFieldSelect.disabled = !hasOptions;
+  if (sortAscBtn) sortAscBtn.disabled = !hasOptions;
+  if (sortDescBtn) sortDescBtn.disabled = !hasOptions;
+  if (clearSortBtn) clearSortBtn.disabled = !hasOptions || !attributeState.sortKey;
+  if (addFieldBtn) addFieldBtn.style.display = attributeTableMode === "records" ? "" : "none";
+  if (fieldCalcBtn) fieldCalcBtn.style.display = attributeTableMode === "records" ? "" : "none";
+}
+
+function applyAttributeSortFromToolbar(direction) {
+  const sortFieldSelect = document.getElementById("attributeSortFieldSelect");
+  const key = String(sortFieldSelect?.value || attributeState.sortKey || "").trim();
+  if (!key) {
+    alert("Choose a field to sort.");
+    return;
+  }
+  attributeState.sortKey = key;
+  attributeState.sortDir = direction >= 0 ? 1 : -1;
+  attributeState.page = 1;
+  renderAttributeTable();
+}
+
+function promptAndAddAttributeField() {
+  if (attributeTableMode !== "records") {
+    alert("Switch to Record Attributes to add a new field.");
+    return;
+  }
+
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  if (!rows.length) {
+    alert("Upload a route file before adding fields.");
+    return;
+  }
+
+  const rawName = window.prompt("New field name:", "");
+  if (rawName === null) return;
+  const fieldName = String(rawName || "").trim();
+  if (!fieldName) {
+    alert("Field name is required.");
+    return;
+  }
+
+  const existingHeaders = Array.isArray(window._attributeHeaders) ? window._attributeHeaders : getAttributeHeaders(rows);
+  const duplicate = existingHeaders.find(header => String(header || "").trim().toLowerCase() === fieldName.toLowerCase());
+  if (duplicate) {
+    alert(`Field "${duplicate}" already exists.`);
+    return;
+  }
+
+  const defaultInput = window.prompt(`Default value for "${fieldName}" (optional):`, "");
+  if (defaultInput === null) return;
+  const defaultValue = String(defaultInput || "");
+
+  rows.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    row[fieldName] = defaultValue;
+  });
+
+  window._attributeHeaders = getAttributeHeaders(rows);
+  syncCurrentWorkbookSheetFromRows();
+  queueWorkbookCloudSave("Add Field");
+  const selectAttributesSource = document.getElementById("selectAttributesSource");
+  if (selectAttributesSource && String(selectAttributesSource.value || "").toLowerCase() === "records") {
+    selectAttributesSource.dispatchEvent(new Event("change"));
+  }
+  syncAttributeSortControls();
+  renderAttributeTable();
+}
+
+const FIELD_CALCULATOR_FN_ALIAS_MAP = {
+  abs: "abs",
+  atn: "atan",
+  atan: "atan",
+  cos: "cos",
+  exp: "exp",
+  fix: "fix",
+  int: "int",
+  log: "log",
+  sin: "sin",
+  sqr: "sqrt",
+  sqrt: "sqrt",
+  tan: "tan",
+  round: "round",
+  min: "min",
+  max: "max",
+  pow: "pow",
+  pi: "pi",
+  e: "e"
+};
+
+const FIELD_CALCULATOR_RUNTIME = {
+  abs: value => Math.abs(Number(value) || 0),
+  atan: value => Math.atan(Number(value) || 0),
+  cos: value => Math.cos(Number(value) || 0),
+  exp: value => Math.exp(Number(value) || 0),
+  fix: value => Math.trunc(Number(value) || 0),
+  int: value => Math.trunc(Number(value) || 0),
+  log: value => Math.log(Number(value) || 0),
+  sin: value => Math.sin(Number(value) || 0),
+  sqrt: value => Math.sqrt(Number(value) || 0),
+  tan: value => Math.tan(Number(value) || 0),
+  round: (value, decimals = 0) => {
+    const val = Number(value) || 0;
+    const places = Math.max(0, Math.trunc(Number(decimals) || 0));
+    if (!places) return Math.round(val);
+    const factor = 10 ** places;
+    return Math.round(val * factor) / factor;
+  },
+  min: (...values) => {
+    const nums = values.map(v => Number(v)).filter(Number.isFinite);
+    return nums.length ? Math.min(...nums) : 0;
+  },
+  max: (...values) => {
+    const nums = values.map(v => Number(v)).filter(Number.isFinite);
+    return nums.length ? Math.max(...nums) : 0;
+  },
+  pow: (base, exponent) => Math.pow(Number(base) || 0, Number(exponent) || 0),
+  pi: Math.PI,
+  e: Math.E
+};
+
+function escapeFieldCalculatorRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveFieldCalculatorFieldName(fieldToken, headers) {
+  const token = String(fieldToken || "").trim().toLowerCase();
+  if (!token) return "";
+  const options = Array.isArray(headers) ? headers : [];
+  const direct = options.find(header => String(header || "").trim().toLowerCase() === token);
+  if (direct) return direct;
+  return "";
+}
+
+function coerceFieldCalculatorInputValue(value) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  const text = String(value).trim();
+  if (!text) return 0;
+  const numeric = Number(text.replace(/,/g, ""));
+  if (Number.isFinite(numeric)) return numeric;
+  return text;
+}
+
+function compileFieldCalculatorExpression(expressionText, headers) {
+  const source = String(expressionText || "").replace(/\r?\n/g, " ").trim();
+  if (!source) {
+    throw new Error("Expression is required.");
+  }
+
+  const fieldRefs = [];
+  let fieldTokenIndex = 0;
+  const rewrittenWithFields = source.replace(/\[([^\]]+)\]/g, (_, rawFieldName) => {
+    const tokenText = String(rawFieldName || "").trim();
+    const resolvedField = resolveFieldCalculatorFieldName(tokenText, headers);
+    if (!resolvedField) {
+      throw new Error(`Field "${tokenText}" was not found.`);
+    }
+    const token = `f${fieldTokenIndex}`;
+    fieldTokenIndex += 1;
+    fieldRefs.push({ token, fieldName: resolvedField });
+    return token;
+  });
+
+  let normalized = rewrittenWithFields
+    .replace(/[Ã—]/g, "*")
+    .replace(/[Ã·]/g, "/")
+    .replace(/\^/g, "**")
+    .trim();
+
+  if (!normalized) {
+    throw new Error("Expression is empty.");
+  }
+
+  if (/[\[\]{};"'`\\]/.test(normalized)) {
+    throw new Error("Expression contains unsupported characters.");
+  }
+
+  const illegalCharMatch = normalized.match(/[^0-9A-Za-z_+\-*/%().,<>=!?:&|\s]/);
+  if (illegalCharMatch) {
+    throw new Error(`Unsupported character "${illegalCharMatch[0]}" in expression.`);
+  }
+
+  const identifiers = normalized.match(/\b[A-Za-z_][A-Za-z0-9_]*\b/g) || [];
+  const unknownIdentifier = identifiers.find(identifier => {
+    if (/^f\d+$/.test(identifier)) return false;
+    return !FIELD_CALCULATOR_FN_ALIAS_MAP[String(identifier || "").toLowerCase()];
+  });
+
+  if (unknownIdentifier) {
+    throw new Error(`Unknown token "${unknownIdentifier}". Use [FieldName] for fields.`);
+  }
+
+  let jsExpression = normalized;
+  Object.entries(FIELD_CALCULATOR_FN_ALIAS_MAP).forEach(([alias, mapped]) => {
+    const regex = new RegExp(`\\b${escapeFieldCalculatorRegex(alias)}\\b`, "gi");
+    jsExpression = jsExpression.replace(regex, `__fns.${mapped}`);
+  });
+
+  const uniqueFieldTokens = [...new Set(fieldRefs.map(ref => ref.token))];
+  const destructure = uniqueFieldTokens.length ? `const { ${uniqueFieldTokens.join(", ")} } = __vars;` : "";
+  let evaluator;
+  try {
+    evaluator = new Function("__vars", "__fns", `"use strict"; ${destructure} return (${jsExpression});`);
+  } catch (err) {
+    throw new Error(`Expression is not valid: ${String(err?.message || err)}`);
+  }
+
+  return {
+    evaluator,
+    fieldRefs
+  };
+}
+
+function applyFieldCalculatorToRows(targetField, expressionText, outputType = "number") {
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  if (!rows.length) {
+    throw new Error("No record rows are loaded.");
+  }
+
+  const headers = Array.isArray(window._attributeHeaders) ? window._attributeHeaders : getAttributeHeaders(rows);
+  const resolvedTarget = resolveFieldCalculatorFieldName(targetField, headers) || String(targetField || "").trim();
+  if (!resolvedTarget) {
+    throw new Error("Choose a target field.");
+  }
+
+  const compiled = compileFieldCalculatorExpression(expressionText, headers);
+  const computedValues = new Array(rows.length);
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i] || {};
+    const vars = {};
+    compiled.fieldRefs.forEach(ref => {
+      vars[ref.token] = coerceFieldCalculatorInputValue(row?.[ref.fieldName]);
+    });
+
+    let rawResult;
+    try {
+      rawResult = compiled.evaluator(vars, FIELD_CALCULATOR_RUNTIME);
+    } catch (err) {
+      throw new Error(`Row ${i + 1}: ${String(err?.message || err)}`);
+    }
+
+    if (String(outputType || "number").toLowerCase() === "text") {
+      computedValues[i] = rawResult === null || rawResult === undefined ? "" : String(rawResult);
+      continue;
+    }
+
+    const numeric = Number(rawResult);
+    if (!Number.isFinite(numeric)) {
+      throw new Error(`Row ${i + 1}: result "${String(rawResult)}" is not a valid number.`);
+    }
+    computedValues[i] = numeric;
+  }
+
+  const routeDayTouched = isRouteDayFieldName(resolvedTarget);
+  rows.forEach((row, index) => {
+    if (!row || typeof row !== "object") return;
+    row[resolvedTarget] = computedValues[index];
+  });
+  ensureExistBackupColumns(rows);
+  if (routeDayTouched) refreshRouteDayGroupsFromCurrentRows();
+
+  window._attributeHeaders = getAttributeHeaders(rows);
+  syncCurrentWorkbookSheetFromRows();
+  queueWorkbookCloudSave("Field Calculator");
+  if (typeof refreshAllRecordPopupContent === "function") refreshAllRecordPopupContent();
+  const selectAttributesSource = document.getElementById("selectAttributesSource");
+  if (selectAttributesSource && String(selectAttributesSource.value || "").toLowerCase() === "records") {
+    selectAttributesSource.dispatchEvent(new Event("change"));
+  }
+  syncAttributeSortControls();
+  renderAttributeTable();
+
+  return {
+    count: rows.length,
+    targetField: resolvedTarget
+  };
+}
+
+function initFieldCalculatorControls() {
+  const openBtn = document.getElementById("attributeFieldCalcBtn");
+  const modal = document.getElementById("fieldCalculatorModal");
+  const closeBtn = document.getElementById("fieldCalculatorCloseBtn");
+  const clearBtn = document.getElementById("fieldCalculatorClearBtn");
+  const applyBtn = document.getElementById("fieldCalculatorApplyBtn");
+  const targetFieldSelect = document.getElementById("fieldCalculatorTargetField");
+  const typeSelect = document.getElementById("fieldCalculatorType");
+  const expressionInput = document.getElementById("fieldCalculatorExpression");
+  const previewNode = document.getElementById("fieldCalculatorPreview");
+  const statusNode = document.getElementById("fieldCalculatorStatus");
+  const fieldsNode = document.getElementById("fieldCalculatorFieldList");
+  const tokenButtons = [...document.querySelectorAll("#fieldCalculatorTokenBar .field-calculator-token-btn")];
+
+  if (
+    !openBtn || !modal || !closeBtn || !clearBtn || !applyBtn ||
+    !targetFieldSelect || !typeSelect || !expressionInput || !previewNode || !statusNode || !fieldsNode
+  ) {
+    return;
+  }
+  if (openBtn.dataset.fieldCalculatorBound === "1") return;
+  openBtn.dataset.fieldCalculatorBound = "1";
+
+  const setStatus = (message, type = "") => {
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (type === "error") statusNode.classList.add("error");
+    if (type === "success") statusNode.classList.add("success");
+  };
+
+  const getHeaders = () => {
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+    if (!rows.length) return [];
+    return Array.isArray(window._attributeHeaders) && window._attributeHeaders.length
+      ? window._attributeHeaders
+      : getAttributeHeaders(rows);
+  };
+
+  const updatePreview = () => {
+    const field = String(targetFieldSelect.value || "").trim() || "(target field)";
+    const expr = String(expressionInput.value || "").trim() || "(enter expression)";
+    previewNode.textContent = `${field} = ${expr}`;
+  };
+
+  const insertExpressionToken = token => {
+    const text = String(token || "");
+    if (!text) return;
+    const input = expressionInput;
+    const start = Number(input.selectionStart || 0);
+    const end = Number(input.selectionEnd || start);
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    input.value = `${before}${text}${after}`;
+    const nextPos = start + text.length;
+    input.setSelectionRange(nextPos, nextPos);
+    input.focus();
+    updatePreview();
+  };
+
+  const refreshTargetFields = (preferredField = "") => {
+    const headers = getHeaders();
+    targetFieldSelect.innerHTML = "";
+    headers.forEach(field => {
+      const option = document.createElement("option");
+      option.value = field;
+      option.textContent = field;
+      targetFieldSelect.appendChild(option);
+    });
+    if (preferredField && headers.includes(preferredField)) {
+      targetFieldSelect.value = preferredField;
+    } else if (!targetFieldSelect.value && headers.length) {
+      targetFieldSelect.value = headers[0];
+    }
+  };
+
+  const renderFieldButtons = () => {
+    const headers = getHeaders();
+    fieldsNode.innerHTML = "";
+    if (!headers.length) {
+      fieldsNode.innerHTML = '<div class="select-attributes-unique-empty">No fields available.</div>';
+      return;
+    }
+    headers.forEach(field => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "field-calculator-field-btn";
+      btn.textContent = `[${field}]`;
+      btn.addEventListener("click", () => insertExpressionToken(`[${field}]`));
+      fieldsNode.appendChild(btn);
+    });
+  };
+
+  const openModal = () => {
+    if (attributeTableMode !== "records") {
+      setAttributeTableMode("records");
+      openAttributePanel();
+    }
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+    if (!rows.length) {
+      alert("Upload a route file before using Field Calculator.");
+      return;
+    }
+    refreshTargetFields(targetFieldSelect.value);
+    renderFieldButtons();
+    updatePreview();
+    setStatus("Ready.");
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  openBtn.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  clearBtn.addEventListener("click", () => {
+    expressionInput.value = "";
+    updatePreview();
+    setStatus("Expression cleared.");
+    expressionInput.focus();
+  });
+  applyBtn.addEventListener("click", () => {
+    const targetField = String(targetFieldSelect.value || "").trim();
+    const expression = String(expressionInput.value || "");
+    const outputType = String(typeSelect.value || "number");
+
+    try {
+      const result = applyFieldCalculatorToRows(targetField, expression, outputType);
+      setStatus(`Updated ${result.count.toLocaleString()} records in "${result.targetField}".`, "success");
+      updatePreview();
+    } catch (err) {
+      setStatus(String(err?.message || err), "error");
+    }
+  });
+
+  expressionInput.addEventListener("input", updatePreview);
+  targetFieldSelect.addEventListener("change", updatePreview);
+  typeSelect.addEventListener("change", updatePreview);
+  tokenButtons.forEach(btn => {
+    btn.addEventListener("click", () => {
+      const token = String(btn.getAttribute("data-token") || "");
+      if (!token) return;
+      insertExpressionToken(token);
+    });
+  });
+
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+  window.addEventListener("keydown", event => {
+    if (modal.style.display !== "flex") return;
+    if (event.key === "Escape") closeModal();
+  });
+}
+
+function getUpdateFieldFormatHints(targetFieldName) {
+  const token = normalizeRouteSequencerFieldToken(targetFieldName);
+  if (!token) {
+    return [
+      "Tip: Choose a target field, then update all or selected records from another field, a typed value, or clear."
+    ];
+  }
+
+  const hints = [];
+  if (/(demand|tons|tonnage|load|volume|qty|quantity)/.test(token)) {
+    hints.push("Demand fields should be numeric tons (example: 0.5, 3, 12.75).");
+  }
+  if (token === "servicetime") {
+    hints.push("Service_Time supports MM:SS or HH:MM:SS (example: 05:30) and numeric minutes (example: 5.5).");
+  } else if (/(servicetime|servicemin|service|minperstop|minutesperstop|timeonsite|onsitemin|service)/.test(token)) {
+    hints.push("Service Time should be numeric minutes per stop (example: 2, 7.5, 12).");
+  }
+  if (/(sequence|trip|cumtons|drivemin|servicemin|totalmin|dumpvisits)/.test(token)) {
+    hints.push("Sequencer output fields should stay numeric so sorting and route popups work correctly.");
+  }
+  if (/(route|day)/.test(token)) {
+    hints.push("DAY and ROUTE are the active planning fields used by map layers and solvers.");
+  }
+  if (/(seqno|sequence)/.test(token)) {
+    hints.push("Auto Sequence writes stop order to SEQNO.");
+  }
+  if (/(newroute|newday|newseq|newfreq)/.test(token)) {
+    hints.push("NEW* fields are preserved for final publishing and only change when you edit them directly.");
+  }
+  if (/(latitude|lat)/.test(token)) {
+    hints.push("Latitude should be decimal degrees between -90 and 90.");
+  }
+  if (/(longitude|lon|lng)/.test(token)) {
+    hints.push("Longitude should be decimal degrees between -180 and 180.");
+  }
+  if (!hints.length) {
+    hints.push("Tip: Keep field values consistent (all numeric or all text) for reliable sorting, filtering, and charting.");
+  }
+  return hints;
+}
+
+function looksLikeNumericValue(value) {
+  if (value == null || value === "") return false;
+  if (typeof value === "number") return Number.isFinite(value);
+  const text = String(value).trim();
+  if (!text) return false;
+  const parsed = Number(text.replace(/,/g, ""));
+  return Number.isFinite(parsed);
+}
+
+function shouldTreatUpdateFieldAsNumeric(fieldName, rows) {
+  const token = normalizeRouteSequencerFieldToken(fieldName);
+  if (/(demand|tons|tonnage|load|volume|qty|quantity|sequence|trip|min|time|lat|lon|lng|speed|distance|count|score)/.test(token)) {
+    return true;
+  }
+  const list = Array.isArray(rows) ? rows : [];
+  let numericCount = 0;
+  let nonEmptyCount = 0;
+  for (let i = 0; i < list.length && nonEmptyCount < 40; i += 1) {
+    const row = list[i];
+    if (!row || typeof row !== "object") continue;
+    const value = row[fieldName];
+    if (value == null || value === "") continue;
+    nonEmptyCount += 1;
+    if (looksLikeNumericValue(value)) numericCount += 1;
+  }
+  return nonEmptyCount > 0 && (numericCount / nonEmptyCount) >= 0.7;
+}
+
+function isUpdateFieldClockMinutesCompatible(fieldName) {
+  const token = normalizeRouteSequencerFieldToken(fieldName);
+  if (!token) return false;
+  return (
+    token === "servicetime" ||
+    token === "durationa" ||
+    token === "duration" ||
+    token === "servicemin" ||
+    token === "serviceminutes" ||
+    token === "timeonsite"
+  );
+}
+
+function initUpdateFieldControls() {
+  const openBtn = document.getElementById("updateFieldBtn");
+  const openBtnMobile = document.getElementById("updateFieldBtnMobile");
+  const modal = document.getElementById("updateFieldModal");
+  const closeBtn = document.getElementById("updateFieldCloseBtn");
+  const applyBtn = document.getElementById("updateFieldApplyBtn");
+  const targetFieldSelect = document.getElementById("updateFieldTargetField");
+  const sourceFieldSelect = document.getElementById("updateFieldSourceField");
+  const valueInput = document.getElementById("updateFieldValueInput");
+  const scopeAllRadio = document.getElementById("updateFieldScopeAll");
+  const scopeSelectedRadio = document.getElementById("updateFieldScopeSelected");
+  const allLabel = document.getElementById("updateFieldAllLabel");
+  const selectedLabel = document.getElementById("updateFieldSelectedLabel");
+  const modeFieldRadio = document.getElementById("updateFieldModeField");
+  const modeValueRadio = document.getElementById("updateFieldModeValue");
+  const modeClearRadio = document.getElementById("updateFieldModeClear");
+  const formatHintNode = document.getElementById("updateFieldFormatHint");
+  const statusNode = document.getElementById("updateFieldStatus");
+
+  if (
+    !openBtn || !modal || !closeBtn || !applyBtn || !targetFieldSelect || !sourceFieldSelect ||
+    !valueInput || !scopeAllRadio || !scopeSelectedRadio || !allLabel || !selectedLabel ||
+    !modeFieldRadio || !modeValueRadio || !modeClearRadio || !formatHintNode || !statusNode
+  ) {
+    return;
+  }
+
+  if (openBtn.dataset.updateFieldBound === "1") return;
+  openBtn.dataset.updateFieldBound = "1";
+
+  const setStatus = (message, kind = "") => {
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (kind === "error") statusNode.classList.add("error");
+    if (kind === "success") statusNode.classList.add("success");
+  };
+
+  const getRows = () => (Array.isArray(window._currentRows) ? window._currentRows : []);
+  const getHeaders = rows => {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return [];
+    return Array.isArray(window._attributeHeaders) && window._attributeHeaders.length
+      ? window._attributeHeaders
+      : getAttributeHeaders(list);
+  };
+
+  const populateSelect = (node, headers, preferred = "") => {
+    const options = Array.isArray(headers) ? headers : [];
+    const previous = String(preferred || node.value || "");
+    node.innerHTML = "";
+    options.forEach(field => {
+      const option = document.createElement("option");
+      option.value = String(field);
+      option.textContent = String(field);
+      node.appendChild(option);
+    });
+    if ([...node.options].some(option => option.value === previous)) {
+      node.value = previous;
+    } else if (node.options.length) {
+      node.value = node.options[0].value;
+    } else {
+      node.value = "";
+    }
+  };
+
+  const getSelectedMode = () => {
+    if (modeValueRadio.checked) return "value";
+    if (modeClearRadio.checked) return "clear";
+    return "field";
+  };
+
+  const updateModeUi = () => {
+    const mode = getSelectedMode();
+    sourceFieldSelect.disabled = mode !== "field";
+    valueInput.disabled = mode !== "value";
+    if (mode === "field") {
+      valueInput.placeholder = "Disabled while 'Field' mode is selected";
+    } else {
+      valueInput.placeholder = "Example: 4.5";
+    }
+  };
+
+  const updateScopeLabels = rows => {
+    const list = Array.isArray(rows) ? rows : getRows();
+    const allCount = list.length;
+    const selectedCount = attributeState.selectedRowIds.size;
+    allLabel.textContent = `All (${allCount.toLocaleString()} records)`;
+    selectedLabel.textContent = `Selected (${selectedCount.toLocaleString()} records)`;
+    scopeSelectedRadio.disabled = selectedCount < 1;
+    if (scopeSelectedRadio.disabled) scopeAllRadio.checked = true;
+  };
+
+  const updateFormatHint = () => {
+    const targetField = String(targetFieldSelect.value || "");
+    formatHintNode.textContent = getUpdateFieldFormatHints(targetField).join(" ");
+  };
+
+  const refreshFieldSelectors = () => {
+    const rows = getRows();
+    const headers = getHeaders(rows);
+    const prevTarget = String(targetFieldSelect.value || "");
+    const prevSource = String(sourceFieldSelect.value || "");
+    populateSelect(targetFieldSelect, headers, prevTarget);
+    populateSelect(sourceFieldSelect, headers, prevSource);
+    if (!sourceFieldSelect.value && headers.length > 1) {
+      const fallback = headers.find(field => String(field) !== String(targetFieldSelect.value || ""));
+      if (fallback) sourceFieldSelect.value = String(fallback);
+    }
+    applyBtn.disabled = !headers.length || !rows.length;
+    updateScopeLabels(rows);
+    updateFormatHint();
+  };
+
+  const openModal = () => {
+    const rows = getRows();
+    if (!rows.length) {
+      alert("Upload a route file before using Update Field.");
+      return;
+    }
+    if (attributeTableMode !== "records") {
+      setAttributeTableMode("records");
+      openAttributePanel();
+    }
+    refreshFieldSelectors();
+    updateModeUi();
+    setStatus("Ready.");
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  const resolveScopeRowIds = rows => {
+    if (!scopeSelectedRadio.checked) {
+      return rows.map((_, index) => index);
+    }
+    return [...attributeState.selectedRowIds]
+      .map(id => Number(id))
+      .filter(id => Number.isFinite(id) && id >= 0 && id < rows.length);
+  };
+
+  const applyUpdate = () => {
+    const rows = getRows();
+    if (!rows.length) {
+      setStatus("No records are loaded.", "error");
+      return;
+    }
+
+    const targetField = String(targetFieldSelect.value || "").trim();
+    if (!targetField) {
+      setStatus("Choose a target field.", "error");
+      return;
+    }
+
+    const rowIds = resolveScopeRowIds(rows);
+    if (!rowIds.length) {
+      setStatus("No records match the selected scope.", "error");
+      return;
+    }
+
+    const mode = getSelectedMode();
+    const sourceField = String(sourceFieldSelect.value || "").trim();
+    const typedRawValue = valueInput.value;
+
+    if (mode === "field" && !sourceField) {
+      setStatus("Choose a source field.", "error");
+      return;
+    }
+    if (mode === "value" && !String(typedRawValue || "").trim()) {
+      setStatus("Enter a typed value or choose Clear.", "error");
+      return;
+    }
+
+    let typedValue = String(typedRawValue || "");
+    if (mode === "value" && shouldTreatUpdateFieldAsNumeric(targetField, rows)) {
+      const trimmed = typedValue.trim();
+      if (!trimmed) typedValue = "";
+      else {
+        const allowClockMinutes = isUpdateFieldClockMinutesCompatible(targetField);
+        if (allowClockMinutes && trimmed.includes(":")) {
+          const parsedMinutes = parseRouteSequencerMinutesValue(trimmed, NaN);
+          if (!Number.isFinite(parsedMinutes)) {
+            setStatus(
+              `"${typedRawValue}" is not a valid time value for "${targetField}". Use MM:SS or HH:MM:SS.`,
+              "error"
+            );
+            return;
+          }
+          typedValue = formatRouteSequencerMinutesClock(parsedMinutes);
+        } else {
+          const parsed = Number(trimmed.replace(/,/g, ""));
+          if (!Number.isFinite(parsed)) {
+            setStatus(`"${typedRawValue}" is not a valid numeric value for "${targetField}".`, "error");
+            return;
+          }
+          typedValue = parsed;
+        }
+      }
+    }
+
+    let changedCount = 0;
+    const routeDayTouched = isRouteDayFieldName(targetField);
+    rowIds.forEach(rowId => {
+      const row = rows[rowId];
+      if (!row || typeof row !== "object") return;
+      if (mode === "field") {
+        row[targetField] = row[sourceField];
+      } else if (mode === "value") {
+        row[targetField] = typedValue;
+      } else {
+        row[targetField] = "";
+      }
+      changedCount += 1;
+    });
+    ensureExistBackupColumns(rows);
+    if (routeDayTouched) refreshRouteDayGroupsFromCurrentRows();
+
+    window._attributeHeaders = getAttributeHeaders(rows);
+    syncCurrentWorkbookSheetFromRows();
+    queueWorkbookCloudSave("Update Field");
+    refreshAllRecordPopupContent();
+    applyAttributeSelectionStyles();
+    syncAttributeSortControls();
+    renderAttributeTable();
+    refreshAttributeStatus();
+
+    const selectAttributesSource = document.getElementById("selectAttributesSource");
+    if (selectAttributesSource && String(selectAttributesSource.value || "").toLowerCase() === "records") {
+      selectAttributesSource.dispatchEvent(new Event("change"));
+    }
+
+    const modeLabel = mode === "field" ? `field "${sourceField}"` : mode === "value" ? "typed value" : "clear";
+    setStatus(
+      `Updated ${changedCount.toLocaleString()} record(s) in "${targetField}" using ${modeLabel}.`,
+      "success"
+    );
+    updateScopeLabels(rows);
+    updateFormatHint();
+  };
+
+  openBtn.addEventListener("click", openModal);
+  if (openBtnMobile) openBtnMobile.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  applyBtn.addEventListener("click", applyUpdate);
+
+  [scopeAllRadio, scopeSelectedRadio, modeFieldRadio, modeValueRadio, modeClearRadio].forEach(node => {
+    node.addEventListener("change", () => {
+      updateModeUi();
+      updateScopeLabels(getRows());
+      updateFormatHint();
+    });
+  });
+  targetFieldSelect.addEventListener("change", updateFormatHint);
+  sourceFieldSelect.addEventListener("change", () => {
+    if (getSelectedMode() === "field") setStatus("Ready.");
+  });
+  valueInput.addEventListener("input", () => {
+    if (getSelectedMode() === "value") setStatus("Ready.");
+  });
+
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+  window.addEventListener("keydown", event => {
+    if (modal.style.display !== "flex") return;
+    if (event.key === "Escape") closeModal();
+  });
+}
+
 function getAttributeRowId(row) {
   return attributeRowToId.get(row);
 }
@@ -7819,7 +9414,7 @@ function refreshAttributeStatus() {
     ? streetAttributeSelectedIds.size
     : attributeState.selectedRowIds.size;
   const visibleCount = attributeState.lastVisibleRows.length;
-  status.textContent = `${selectedCount} selected • ${visibleCount} visible`;
+  status.textContent = `${selectedCount} selected â€¢ ${visibleCount} visible`;
 }
 
 function syncSelectedStopsHeaderCount(count) {
@@ -9449,7 +11044,7 @@ function buildAttributeTablePrintDocumentHtml() {
   if (attributeTableMode === "streets") {
     const rows = getFilteredStreetAttributeRows();
     if (!rows.length) return null;
-    const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+    const headers = STREET_ATTRIBUTE_TABLE_HEADERS;
     const maxRows = 4200;
     const slice = rows.slice(0, maxRows);
     const tableRows = slice.map((row, idx) => `
@@ -11330,6 +12925,5006 @@ function initMultiDayManagerControls() {
   refreshMultiDayManagerUi();
 }
 
+const ROUTE_SEQUENCER_DEPOTS_KEY = "routeSequencerDepots";
+const ROUTE_SEQUENCER_CUSTOM_DUMPS_KEY = "routeSequencerCustomDumps";
+const ROUTE_SEQUENCER_FACILITIES_KEY = "routeSequencerFacilities";
+const ROUTE_SEQUENCER_FACILITY_ROLE_START_END = "start_end";
+const ROUTE_SEQUENCER_FACILITY_ROLE_DUMP = "dump";
+const ROUTE_SEQUENCER_FACILITY_ROLE_START_END_ONLY = ROUTE_SEQUENCER_FACILITY_ROLE_START_END; // Legacy alias
+const ROUTE_SEQUENCER_FACILITY_ROLE_START_END_AND_INTERMEDIATE = "start_end_and_intermediate"; // Legacy value
+const ROUTE_SEQUENCER_SETTINGS_KEY = "routeSequencerSettings";
+const ROUTE_SEQUENCER_NODE_CELL_DEG = 0.02;
+const ROUTE_SEQUENCER_MAX_NODE_SEARCH_RADIUS = 6;
+const ROUTE_SEQUENCER_MAX_SNAP_MILES = 1.0;
+const ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS = 13.5;
+const ROUTE_SEQUENCER_DEFAULT_SPEED_MPH = 35;
+const ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH = 30;
+const ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD = "speed_cat";
+const ROUTE_SEQUENCER_SPEED_CAT_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
+const ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP = Object.freeze({
+  1: 65,
+  2: 65,
+  3: 50,
+  4: 40,
+  5: 30,
+  6: 20,
+  7: 10,
+  8: 5
+});
+const ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP = Object.freeze({
+  1: 50,
+  2: 50,
+  3: 40,
+  4: 30,
+  5: 20,
+  6: 10,
+  7: 5,
+  8: 5
+});
+const ROUTE_SEQUENCER_DEFAULT_CLASS_SPEEDS = {
+  ...ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+}; // Legacy alias.
+const ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS = Object.freeze({
+  sequence: "SEQNO",
+  trip: "TRIP",
+  cumulativeLoad: "CUM_TONS",
+  driveMinutes: "DRIVE_MIN",
+  serviceMinutes: "SERVICE_MIN",
+  totalMinutes: "TOTAL_MIN",
+  dumpVisits: "DUMP_VISITS"
+});
+let routeSequencerActiveOutputFields = { ...ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS };
+
+function getRouteSequencerFacilityRoleLabel(roleValue) {
+  return normalizeRouteSequencerFacilityRole(roleValue) === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP
+    ? "Dump Location"
+    : "Start/End";
+}
+
+function isProtectedNewPlanningFieldName(fieldName) {
+  const token = normalizeRouteSequencerFieldToken(fieldName);
+  return token === "newroute" || token === "newday" || token === "newseq" || token === "newfreq";
+}
+
+function normalizeRouteSequencerOutputFieldName(value, fallback = "") {
+  const text = String(value ?? "").trim();
+  if (text && isProtectedNewPlanningFieldName(text)) {
+    return String(fallback || "").trim();
+  }
+  return text || String(fallback || "").trim();
+}
+
+function normalizeRouteSequencerOutputFields(rawFields) {
+  const raw = rawFields && typeof rawFields === "object" ? rawFields : {};
+  return {
+    sequence: normalizeRouteSequencerOutputFieldName(raw.sequence, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.sequence),
+    trip: normalizeRouteSequencerOutputFieldName(raw.trip, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.trip),
+    cumulativeLoad: normalizeRouteSequencerOutputFieldName(raw.cumulativeLoad, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.cumulativeLoad),
+    driveMinutes: normalizeRouteSequencerOutputFieldName(raw.driveMinutes, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.driveMinutes),
+    serviceMinutes: normalizeRouteSequencerOutputFieldName(raw.serviceMinutes, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.serviceMinutes),
+    totalMinutes: normalizeRouteSequencerOutputFieldName(raw.totalMinutes, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.totalMinutes),
+    dumpVisits: normalizeRouteSequencerOutputFieldName(raw.dumpVisits, ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS.dumpVisits)
+  };
+}
+
+function setRouteSequencerActiveOutputFields(outputFields) {
+  routeSequencerActiveOutputFields = normalizeRouteSequencerOutputFields(outputFields);
+  return routeSequencerActiveOutputFields;
+}
+
+function getRouteSequencerActiveOutputFields() {
+  return normalizeRouteSequencerOutputFields(routeSequencerActiveOutputFields);
+}
+
+function buildRouteSequencerFormatHintText(demandField, serviceField, outputFields, sequenceIncrement = 1) {
+  const demandLabel = String(demandField || "").trim() || "Demand";
+  const serviceLabel = String(serviceField || "").trim() || "Service Time";
+  const mapped = normalizeRouteSequencerOutputFields(outputFields);
+  const increment = normalizeRouteSequencerSequenceIncrement(sequenceIncrement, 1);
+  const outputList = [
+    mapped.sequence,
+    mapped.trip,
+    mapped.cumulativeLoad,
+    mapped.driveMinutes,
+    mapped.serviceMinutes,
+    mapped.totalMinutes,
+    mapped.dumpVisits
+  ].join(", ");
+  return `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75). ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying capacity, dump, depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
+}
+
+function normalizeRouteSequencerText(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeRouteSequencerName(value, fallback = "Location") {
+  const text = normalizeRouteSequencerText(value).slice(0, 120);
+  return text || fallback;
+}
+
+function normalizeRouteSequencerPointEntry(raw, fallbackName = "Location") {
+  if (!raw || typeof raw !== "object") return null;
+  const lat = Number(raw.lat);
+  const lon = Number(raw.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const id = normalizeRouteSequencerText(raw.id) || `seq_loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    id,
+    name: normalizeRouteSequencerName(raw.name, fallbackName),
+    lat,
+    lon
+  };
+}
+
+function loadRouteSequencerPointList(storageKeyName, fallbackName) {
+  const raw = storageGet(storageKeyName);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(item => normalizeRouteSequencerPointEntry(item, fallbackName))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function saveRouteSequencerPointList(storageKeyName, list, fallbackName) {
+  const cleaned = (Array.isArray(list) ? list : [])
+    .map(item => normalizeRouteSequencerPointEntry(item, fallbackName))
+    .filter(Boolean);
+  storageSet(storageKeyName, JSON.stringify(cleaned));
+  return cleaned;
+}
+
+function createRouteSequencerFacilityMarkerIcon(roleValue) {
+  const role = normalizeRouteSequencerFacilityRole(roleValue);
+  const isDump = role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP;
+  const pinFill = isDump ? "#84542d" : "#2d5f9b";
+  const coreFill = isDump ? "#6a7f3a" : "#4fa3ff";
+  const accentFill = isDump ? "#d8e2ba" : "#d8ecff";
+  const html = `
+    <span class="route-sequencer-facility-marker-wrap ${isDump ? "dump" : "start-end"}" aria-hidden="true">
+      <svg class="route-sequencer-facility-marker-svg" viewBox="0 0 36 46">
+        <path class="route-sequencer-facility-marker-pin" d="M18 1.9c-7.7 0-13.9 6.2-13.9 13.9 0 10.7 10.6 19 12.8 28.5.3 1.2 1.9 1.2 2.2 0 2.2-9.5 12.8-17.8 12.8-28.5C31.9 8.1 25.7 1.9 18 1.9z" fill="${pinFill}" />
+        <circle cx="18" cy="15.1" r="9.2" fill="${coreFill}" />
+        ${isDump
+          ? `<rect x="12.1" y="10.7" width="11.8" height="8.6" rx="1.2" fill="${accentFill}" />
+             <rect x="13.8" y="9.3" width="8.3" height="1.5" rx="0.7" fill="${accentFill}" />
+             <rect x="15" y="11.8" width="1.3" height="5.6" rx="0.5" fill="${coreFill}" />
+             <rect x="17.4" y="11.8" width="1.3" height="5.6" rx="0.5" fill="${coreFill}" />
+             <rect x="19.8" y="11.8" width="1.3" height="5.6" rx="0.5" fill="${coreFill}" />`
+          : `<path d="M18 9.4l5.1 4.2v6h-3.1v-4h-4v4H13v-6z" fill="${accentFill}" />
+             <rect x="17.2" y="15.8" width="1.7" height="3.8" rx="0.5" fill="${coreFill}" />`
+        }
+      </svg>
+    </span>
+  `;
+  return L.divIcon({
+    className: "route-sequencer-facility-marker-icon",
+    html,
+    iconSize: [32, 42],
+    iconAnchor: [16, 40],
+    popupAnchor: [0, -34]
+  });
+}
+
+function buildRouteSequencerFacilityPopupContent(facility) {
+  const role = normalizeRouteSequencerFacilityRole(facility?.role);
+  const roleLabel = role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP ? "Dump Location" : "Start/End Facility";
+  const lat = Number(facility?.lat);
+  const lon = Number(facility?.lon);
+  const dumpTime = role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP
+    ? formatRouteSequencerMinutesClock(facility?.facilityMinutes)
+    : "";
+  const rows = [
+    `<div><strong>${escapeRouteSequencerHtml(facility?.name || "Facility")}</strong></div>`,
+    `<div><strong>Role:</strong> ${escapeRouteSequencerHtml(roleLabel)}</div>`,
+    `<div><strong>Latitude:</strong> ${Number.isFinite(lat) ? lat.toFixed(6) : "-"}</div>`,
+    `<div><strong>Longitude:</strong> ${Number.isFinite(lon) ? lon.toFixed(6) : "-"}</div>`
+  ];
+  if (role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP) {
+    rows.push(`<div><strong>Dump Time:</strong> ${escapeRouteSequencerHtml(dumpTime)}</div>`);
+  } else {
+    rows.push("<div><strong>Note:</strong> Uses solver Time at Start/End settings.</div>");
+  }
+  return `<div style="font-size:12px; line-height:1.35;">${rows.join("")}</div>`;
+}
+
+function syncRouteSequencerFacilitiesLayer() {
+  routeSequencerFacilitiesLayerGroup.clearLayers();
+  const facilities = getRouteSequencerFacilities();
+  facilities.forEach(facility => {
+    const lat = Number(facility?.lat);
+    const lon = Number(facility?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const marker = L.marker([lat, lon], {
+      icon: createRouteSequencerFacilityMarkerIcon(facility?.role),
+      keyboard: true,
+      title: String(facility?.name || "Facility")
+    });
+    marker.bindPopup(buildRouteSequencerFacilityPopupContent(facility));
+    routeSequencerFacilitiesLayerGroup.addLayer(marker);
+  });
+  if (!map.hasLayer(routeSequencerFacilitiesLayerGroup)) {
+    routeSequencerFacilitiesLayerGroup.addTo(map);
+  }
+  try {
+    routeSequencerFacilitiesLayerGroup.eachLayer(layer => layer.bringToFront?.());
+  } catch {
+    // Ignore marker z-order issues.
+  }
+}
+
+function setRouteSequencerFacilities(list) {
+  const cleaned = (Array.isArray(list) ? list : [])
+    .map(item => normalizeRouteSequencerFacilityEntry(item, "Facility"))
+    .filter(Boolean);
+  storageSet(ROUTE_SEQUENCER_FACILITIES_KEY, JSON.stringify(cleaned));
+  syncRouteSequencerFacilitiesLayer();
+  return cleaned;
+}
+
+function loadRouteSequencerFacilities() {
+  const raw = storageGet(ROUTE_SEQUENCER_FACILITIES_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map(item => normalizeRouteSequencerFacilityEntry(item, "Facility"))
+          .filter(Boolean);
+      }
+    } catch {
+      // Ignore malformed storage.
+    }
+  }
+
+  // Backward-compatibility migration from old depot/custom-dump lists.
+  const legacyDepots = loadRouteSequencerPointList(ROUTE_SEQUENCER_DEPOTS_KEY, "Depot");
+  const legacyDumps = loadRouteSequencerPointList(ROUTE_SEQUENCER_CUSTOM_DUMPS_KEY, "Dump");
+  if (!legacyDepots.length && !legacyDumps.length) return [];
+
+  const byId = new Map();
+  const nextUniqueId = prefix => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  legacyDepots.forEach(item => {
+    const normalized = normalizeRouteSequencerFacilityEntry({
+      ...item,
+      role: ROUTE_SEQUENCER_FACILITY_ROLE_START_END,
+      facilityMinutes: 0
+    }, "Depot");
+    if (normalized) byId.set(String(normalized.id), normalized);
+  });
+  legacyDumps.forEach(item => {
+    const normalized = normalizeRouteSequencerFacilityEntry({
+      ...item,
+      id: byId.has(String(item?.id || "")) ? nextUniqueId("dump") : item?.id,
+      role: ROUTE_SEQUENCER_FACILITY_ROLE_DUMP,
+      facilityMinutes: item?.facilityMinutes ?? 0
+    }, "Dump");
+    if (normalized) byId.set(String(normalized.id), normalized);
+  });
+
+  const migrated = [...byId.values()];
+  if (migrated.length) setRouteSequencerFacilities(migrated);
+  return migrated;
+}
+
+function getRouteSequencerFacilities() {
+  return loadRouteSequencerFacilities();
+}
+
+function getRouteSequencerDepots() {
+  return getRouteSequencerFacilities()
+    .filter(item => normalizeRouteSequencerFacilityRole(item?.role) === ROUTE_SEQUENCER_FACILITY_ROLE_START_END)
+    .map(item => ({
+    id: String(item.id),
+    name: String(item.name),
+    lat: Number(item.lat),
+    lon: Number(item.lon),
+    facilityMinutes: 0,
+    role: ROUTE_SEQUENCER_FACILITY_ROLE_START_END,
+    allowIntermediate: false
+  }));
+}
+
+function setRouteSequencerDepots(list) {
+  const existing = getRouteSequencerFacilities();
+  const existingById = new Map(existing.map(item => [String(item.id), item]));
+  const existingDumps = existing.filter(
+    item => normalizeRouteSequencerFacilityRole(item?.role) === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP
+  );
+  const depots = (Array.isArray(list) ? list : [])
+    .map(item => normalizeRouteSequencerPointEntry(item, "Depot"))
+    .filter(Boolean)
+    .map(item => {
+      const existing = existingById.get(String(item.id));
+      return normalizeRouteSequencerFacilityEntry({
+        ...item,
+        role: ROUTE_SEQUENCER_FACILITY_ROLE_START_END,
+        facilityMinutes: 0,
+        id: existing?.id || item.id
+      }, "Depot");
+    })
+    .filter(Boolean);
+  return setRouteSequencerFacilities([...existingDumps, ...depots]);
+}
+
+function getRouteSequencerCustomDumps() {
+  return getRouteSequencerFacilities()
+    .filter(item => normalizeRouteSequencerFacilityRole(item?.role) === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP)
+    .map(item => ({
+      id: String(item.id),
+      name: String(item.name),
+      lat: Number(item.lat),
+      lon: Number(item.lon),
+      facilityMinutes: Number(item.facilityMinutes) || 0
+    }));
+}
+
+function setRouteSequencerCustomDumps(list) {
+  const existing = getRouteSequencerFacilities();
+  const depots = existing.filter(
+    item => normalizeRouteSequencerFacilityRole(item?.role) === ROUTE_SEQUENCER_FACILITY_ROLE_START_END
+  );
+  const existingDumpById = new Map(
+    existing
+      .filter(item => normalizeRouteSequencerFacilityRole(item?.role) === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP)
+      .map(item => [String(item.id), item])
+  );
+  const incoming = (
+    (Array.isArray(list) ? list : [])
+      .map(item => normalizeRouteSequencerPointEntry(item, "Dump"))
+      .filter(Boolean)
+      .map(item => {
+        const existingDump = existingDumpById.get(String(item.id));
+        return normalizeRouteSequencerFacilityEntry({
+          ...item,
+          role: ROUTE_SEQUENCER_FACILITY_ROLE_DUMP,
+          facilityMinutes: item?.facilityMinutes ?? existingDump?.facilityMinutes ?? 0
+        }, "Dump");
+      })
+      .filter(Boolean)
+  );
+  return setRouteSequencerFacilities([...depots, ...incoming]);
+}
+
+function normalizeRouteSequencerFieldToken(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function getRouteSequencerFieldNames() {
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const fieldSet = new Set();
+  rows.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    Object.keys(row).forEach(key => {
+      const text = String(key || "").trim();
+      if (text) fieldSet.add(text);
+    });
+  });
+  return [...fieldSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+}
+
+function guessRouteSequencerFieldByAliases(fieldNames, aliases = []) {
+  const options = Array.isArray(fieldNames) ? fieldNames : [];
+  if (!options.length) return "";
+  const normalizedAliases = (Array.isArray(aliases) ? aliases : [])
+    .map(alias => normalizeRouteSequencerFieldToken(alias))
+    .filter(Boolean);
+  if (!normalizedAliases.length) return "";
+
+  const normalizedFieldEntries = options.map(name => ({
+    name,
+    token: normalizeRouteSequencerFieldToken(name)
+  }));
+
+  for (const alias of normalizedAliases) {
+    const direct = normalizedFieldEntries.find(item => item.token === alias);
+    if (direct) return direct.name;
+  }
+  for (const alias of normalizedAliases) {
+    const include = normalizedFieldEntries.find(item => item.token.includes(alias) || alias.includes(item.token));
+    if (include) return include.name;
+  }
+  return "";
+}
+
+function parseRouteSequencerNumeric(value, fallback = 0) {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const text = String(value).trim();
+  if (!text) return fallback;
+  const cleaned = text.replace(/,/g, "");
+  const direct = Number(cleaned);
+  if (Number.isFinite(direct)) return direct;
+  const match = cleaned.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return fallback;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseRouteSequencerMinutesValue(value, fallback = 0) {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+
+  const text = String(value).trim();
+  if (!text) return fallback;
+  if (text.includes(":")) {
+    const parts = text.split(":").map(part => Number(String(part).trim()));
+    if (parts.every(Number.isFinite)) {
+      if (parts.length === 2) {
+        const [minutes, seconds] = parts;
+        if (minutes >= 0 && seconds >= 0) return Math.max(0, minutes + (seconds / 60));
+      } else if (parts.length === 3) {
+        const [hours, minutes, seconds] = parts;
+        if (hours >= 0 && minutes >= 0 && seconds >= 0) {
+          return Math.max(0, (hours * 60) + minutes + (seconds / 60));
+        }
+      }
+    }
+  }
+
+  const numeric = parseRouteSequencerNumeric(text, fallback);
+  return Number.isFinite(numeric) ? Math.max(0, numeric) : fallback;
+}
+
+function formatRouteSequencerMinutesClock(minutesValue) {
+  const minutes = Math.max(0, Number(minutesValue) || 0);
+  const totalSeconds = Math.round(minutes * 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutesRemainder = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutesRemainder).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutesRemainder}:${String(seconds).padStart(2, "0")}`;
+}
+
+function parseRouteSequencerBreakMinutesList(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => parseRouteSequencerMinutesValue(item, NaN))
+      .filter(minutes => Number.isFinite(minutes) && minutes > 0);
+  }
+
+  const text = String(value ?? "").trim();
+  if (!text) return [];
+
+  return text
+    .split(/[\n,;|]+/g)
+    .map(token => token.trim())
+    .filter(Boolean)
+    .map(token => parseRouteSequencerMinutesValue(token, NaN))
+    .filter(minutes => Number.isFinite(minutes) && minutes > 0);
+}
+
+function formatRouteSequencerBreakMinutesList(value) {
+  const list = parseRouteSequencerBreakMinutesList(value);
+  if (!list.length) return "";
+  return list.map(minutes => formatRouteSequencerMinutesClock(minutes)).join(", ");
+}
+
+function normalizeRouteSequencerFacilityRole(value) {
+  const token = normalizeRouteSequencerFieldToken(value);
+  if (
+    token === normalizeRouteSequencerFieldToken(ROUTE_SEQUENCER_FACILITY_ROLE_START_END) ||
+    token === normalizeRouteSequencerFieldToken(ROUTE_SEQUENCER_FACILITY_ROLE_START_END_ONLY) ||
+    token === "startend" ||
+    token === "startendonly" ||
+    token === "depotonly"
+  ) {
+    return ROUTE_SEQUENCER_FACILITY_ROLE_START_END;
+  }
+  if (
+    token === normalizeRouteSequencerFieldToken(ROUTE_SEQUENCER_FACILITY_ROLE_DUMP) ||
+    token === normalizeRouteSequencerFieldToken(ROUTE_SEQUENCER_FACILITY_ROLE_START_END_AND_INTERMEDIATE) ||
+    token === "startendandintermediate" ||
+    token === "intermediate" ||
+    token === "customdump" ||
+    token === "dumponly"
+  ) {
+    return ROUTE_SEQUENCER_FACILITY_ROLE_DUMP;
+  }
+  return ROUTE_SEQUENCER_FACILITY_ROLE_START_END;
+}
+
+function normalizeRouteSequencerFacilityEntry(raw, fallbackName = "Facility") {
+  if (!raw || typeof raw !== "object") return null;
+  const lat = Number(raw.lat);
+  const lon = Number(raw.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const id = normalizeRouteSequencerText(raw.id) || `facility_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const role = normalizeRouteSequencerFacilityRole(
+    raw.role != null
+      ? raw.role
+      : (raw.allowIntermediate ? ROUTE_SEQUENCER_FACILITY_ROLE_DUMP : ROUTE_SEQUENCER_FACILITY_ROLE_START_END)
+  );
+  const parsedFacilityMinutes = parseRouteSequencerMinutesValue(
+    raw.facilityMinutes != null ? raw.facilityMinutes : raw.serviceMinutes,
+    0
+  );
+  const facilityMinutes = role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP
+    ? parsedFacilityMinutes
+    : 0;
+  return {
+    id,
+    name: normalizeRouteSequencerName(raw.name, fallbackName),
+    lat,
+    lon,
+    role,
+    allowIntermediate: role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP,
+    facilityMinutes
+  };
+}
+
+function clampRouteSequencerNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, num));
+}
+
+function haversineMiles(lat1, lon1, lat2, lon2) {
+  const toRad = deg => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const earthMiles = 3958.7613;
+  return earthMiles * c;
+}
+
+function normalizeRouteSequencerOneway(value) {
+  const token = String(value ?? "").trim().toLowerCase();
+  if (!token) return "both";
+  if (token === "-1" || token === "reverse" || token === "backward") return "reverse";
+  if (token === "yes" || token === "1" || token === "true" || token === "y" || token === "t" || token === "forward") return "forward";
+  if (token === "no" || token === "0" || token === "false" || token === "n" || token === "f") return "both";
+  return "both";
+}
+
+function parsePostedSpeedFromTag(maxspeedValue) {
+  const text = String(maxspeedValue ?? "").trim().toLowerCase();
+  if (!text) return NaN;
+  if (text === "none" || text === "signals" || text === "walk") return NaN;
+
+  const numbers = text.match(/-?\d+(?:\.\d+)?/g);
+  if (!numbers || !numbers.length) return NaN;
+  const first = Number(numbers[0]);
+  if (!Number.isFinite(first) || first <= 0) return NaN;
+  if (text.includes("km")) return first * 0.621371;
+  return first;
+}
+
+function normalizeRouteSequencerSpeedClassField(value) {
+  const text = String(value ?? "").trim();
+  return text || ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD;
+}
+
+function normalizeRouteSequencerSpeedCatMap(rawMap, defaultMap) {
+  const defaults = defaultMap && typeof defaultMap === "object"
+    ? defaultMap
+    : ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP;
+  const out = {};
+  ROUTE_SEQUENCER_SPEED_CAT_IDS.forEach(id => {
+    const fallback = clampRouteSequencerNumber(defaults?.[id], 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH);
+    out[id] = clampRouteSequencerNumber(rawMap?.[id], 5, 85, fallback);
+  });
+  return out;
+}
+
+function getRouteSequencerRowFieldValue(row, fieldName) {
+  if (!row || typeof row !== "object") return "";
+  const wantedKey = String(fieldName ?? "").trim();
+  if (!wantedKey) return "";
+  if (Object.prototype.hasOwnProperty.call(row, wantedKey)) return row[wantedKey];
+
+  const token = normalizeRouteSequencerFieldToken(wantedKey);
+  if (!token) return "";
+  const matchedKey = Object.keys(row).find(key => normalizeRouteSequencerFieldToken(key) === token);
+  if (!matchedKey) return "";
+  return row[matchedKey];
+}
+
+function resolveRouteSequencerSpeedClassIdFromRow(row, speedClassField = ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD) {
+  const fieldName = normalizeRouteSequencerSpeedClassField(speedClassField);
+  const candidates = [
+    getRouteSequencerRowFieldValue(row, fieldName),
+    row?.speed_cat,
+    row?.SPEED_CAT,
+    row?.speedcat,
+    row?.func_class,
+    row?.FUNC_CLASS
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate == null || candidate === "") continue;
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      const numericId = Math.round(candidate);
+      if (numericId >= 1 && numericId <= 99) {
+        return Math.max(1, Math.min(8, numericId));
+      }
+    }
+    const text = String(candidate).trim();
+    if (!text) continue;
+    const match = text.match(/\d+/);
+    if (!match) continue;
+    const parsed = Number(match[0]);
+    if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 99) {
+      return Math.max(1, Math.min(8, Math.round(parsed)));
+    }
+  }
+  return null;
+}
+
+function normalizeRouteSequencerTravelMode(value) {
+  const token = String(value ?? "").trim().toLowerCase();
+  return token === "service" ? "service" : "driving";
+}
+
+function resolveStreetSpeedsForSequencer(row, speedConfig, fallbackSpeedMph) {
+  const hasConfigShape = speedConfig && typeof speedConfig === "object" && (
+    Object.prototype.hasOwnProperty.call(speedConfig, "speedClassField")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "drivingSpeedCatMap")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "serviceSpeedCatMap")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "classSpeedMap")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "fallbackServiceSpeedMph")
+  );
+  const config = hasConfigShape
+    ? speedConfig
+    : { classSpeedMap: speedConfig };
+  const speedClassField = normalizeRouteSequencerSpeedClassField(
+    config.speedClassField || ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD
+  );
+  const drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+    config.drivingSpeedCatMap || config.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+    ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+  );
+  const serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+    config.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+    ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+  );
+  const fallbackDrivingMph = clampRouteSequencerNumber(
+    fallbackSpeedMph,
+    5,
+    85,
+    ROUTE_SEQUENCER_DEFAULT_SPEED_MPH
+  );
+  const fallbackServiceMph = clampRouteSequencerNumber(
+    config.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(fallbackDrivingMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+  );
+
+  const posted = parsePostedSpeedFromTag(row?.maxspeed);
+  let drivingMph = Number.isFinite(posted) && posted > 0
+    ? clampRouteSequencerNumber(posted, 5, 85, fallbackDrivingMph)
+    : NaN;
+
+  const speedClassId = resolveRouteSequencerSpeedClassIdFromRow(row, speedClassField);
+  if (!Number.isFinite(drivingMph) && Number.isFinite(speedClassId)) {
+    drivingMph = clampRouteSequencerNumber(drivingSpeedCatMap?.[speedClassId], 5, 85, fallbackDrivingMph);
+  }
+  if (!Number.isFinite(drivingMph)) {
+    drivingMph = fallbackDrivingMph;
+  }
+
+  let serviceMph = Number.isFinite(speedClassId)
+    ? clampRouteSequencerNumber(serviceSpeedCatMap?.[speedClassId], 5, 85, fallbackServiceMph)
+    : NaN;
+  if (!Number.isFinite(serviceMph)) {
+    serviceMph = fallbackServiceMph;
+  }
+  serviceMph = Math.min(drivingMph, Math.max(5, serviceMph));
+
+  return {
+    speedClassField,
+    speedClassId,
+    drivingMph,
+    serviceMph
+  };
+}
+
+class RouteSequencerMinHeap {
+  constructor() {
+    this.items = [];
+  }
+
+  get size() {
+    return this.items.length;
+  }
+
+  push(item) {
+    this.items.push(item);
+    this._bubbleUp(this.items.length - 1);
+  }
+
+  pop() {
+    if (!this.items.length) return null;
+    const first = this.items[0];
+    const end = this.items.pop();
+    if (this.items.length && end) {
+      this.items[0] = end;
+      this._sinkDown(0);
+    }
+    return first;
+  }
+
+  _bubbleUp(index) {
+    let idx = index;
+    const element = this.items[idx];
+    while (idx > 0) {
+      const parentIdx = Math.floor((idx - 1) / 2);
+      const parent = this.items[parentIdx];
+      if ((parent?.cost ?? Infinity) <= (element?.cost ?? Infinity)) break;
+      this.items[parentIdx] = element;
+      this.items[idx] = parent;
+      idx = parentIdx;
+    }
+  }
+
+  _sinkDown(index) {
+    let idx = index;
+    const length = this.items.length;
+    const element = this.items[idx];
+
+    while (true) {
+      const leftIdx = (2 * idx) + 1;
+      const rightIdx = leftIdx + 1;
+      let swapIdx = null;
+
+      if (leftIdx < length) {
+        const left = this.items[leftIdx];
+        if ((left?.cost ?? Infinity) < (element?.cost ?? Infinity)) swapIdx = leftIdx;
+      }
+
+      if (rightIdx < length) {
+        const right = this.items[rightIdx];
+        const current = swapIdx === null ? element : this.items[swapIdx];
+        if ((right?.cost ?? Infinity) < (current?.cost ?? Infinity)) swapIdx = rightIdx;
+      }
+
+      if (swapIdx === null) break;
+      this.items[idx] = this.items[swapIdx];
+      this.items[swapIdx] = element;
+      idx = swapIdx;
+    }
+  }
+}
+
+function routeSequencerGraphNodeKey(lat, lon) {
+  return `${Number(lat).toFixed(6)},${Number(lon).toFixed(6)}`;
+}
+
+function routeSequencerCellKey(lat, lon, cellSizeDeg = ROUTE_SEQUENCER_NODE_CELL_DEG) {
+  const latIdx = Math.floor(Number(lat) / cellSizeDeg);
+  const lonIdx = Math.floor(Number(lon) / cellSizeDeg);
+  return `${latIdx}:${lonIdx}`;
+}
+
+function buildRouteSequencerStreetGraph(speedConfig, fallbackSpeedMph) {
+  const hasConfigShape = speedConfig && typeof speedConfig === "object" && (
+    Object.prototype.hasOwnProperty.call(speedConfig, "speedClassField")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "drivingSpeedCatMap")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "serviceSpeedCatMap")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "classSpeedMap")
+    || Object.prototype.hasOwnProperty.call(speedConfig, "fallbackServiceSpeedMph")
+  );
+  const config = hasConfigShape
+    ? speedConfig
+    : { classSpeedMap: speedConfig };
+  const speedClassField = normalizeRouteSequencerSpeedClassField(
+    config.speedClassField || ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD
+  );
+  const drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+    config.drivingSpeedCatMap || config.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+    ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+  );
+  const serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+    config.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+    ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+  );
+  const fallbackDrivingMph = clampRouteSequencerNumber(
+    fallbackSpeedMph,
+    5,
+    85,
+    ROUTE_SEQUENCER_DEFAULT_SPEED_MPH
+  );
+  const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+    config.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(fallbackDrivingMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+  );
+  const nodes = new Map();
+  let edgeCount = 0;
+
+  const getOrCreateNode = (lat, lon) => {
+    const key = routeSequencerGraphNodeKey(lat, lon);
+    let node = nodes.get(key);
+    if (!node) {
+      node = { key, lat: Number(lat), lon: Number(lon), edges: [] };
+      nodes.set(key, node);
+    }
+    return node;
+  };
+
+  const addDirectedEdge = (fromNode, toNode, drivingMinutes, serviceMinutes, miles) => {
+    if (!fromNode || !toNode) return;
+    if (!Number.isFinite(drivingMinutes) || drivingMinutes <= 0) return;
+    if (!Number.isFinite(serviceMinutes) || serviceMinutes <= 0) return;
+    fromNode.edges.push({
+      to: toNode.key,
+      minutes: drivingMinutes,
+      serviceMinutes,
+      miles: Number.isFinite(miles) ? miles : 0
+    });
+    edgeCount += 1;
+  };
+
+  streetAttributeById.forEach(entry => {
+    const row = entry?.row || {};
+    const latLon = flattenStreetLayerLatLngs(entry?.layer?.getLatLngs?.(), []);
+    if (!Array.isArray(latLon) || latLon.length < 2) return;
+
+    const speeds = resolveStreetSpeedsForSequencer(
+      row,
+      {
+        speedClassField,
+        drivingSpeedCatMap,
+        serviceSpeedCatMap,
+        fallbackServiceSpeedMph
+      },
+      fallbackDrivingMph
+    );
+    const onewayMode = normalizeRouteSequencerOneway(row?.oneway);
+
+    for (let i = 1; i < latLon.length; i += 1) {
+      const prev = latLon[i - 1];
+      const next = latLon[i];
+      const distMiles = haversineMiles(prev.lat, prev.lon, next.lat, next.lon);
+      if (!Number.isFinite(distMiles) || distMiles <= 0) continue;
+      const drivingMinutes = (distMiles / speeds.drivingMph) * 60;
+      const serviceMinutes = (distMiles / speeds.serviceMph) * 60;
+      if (!Number.isFinite(drivingMinutes) || drivingMinutes <= 0) continue;
+      if (!Number.isFinite(serviceMinutes) || serviceMinutes <= 0) continue;
+
+      const fromNode = getOrCreateNode(prev.lat, prev.lon);
+      const toNode = getOrCreateNode(next.lat, next.lon);
+
+      if (onewayMode !== "reverse") {
+        addDirectedEdge(fromNode, toNode, drivingMinutes, serviceMinutes, distMiles);
+      }
+      if (onewayMode !== "forward") {
+        addDirectedEdge(toNode, fromNode, drivingMinutes, serviceMinutes, distMiles);
+      }
+    }
+  });
+
+  const cellIndex = new Map();
+  nodes.forEach(node => {
+    const key = routeSequencerCellKey(node.lat, node.lon, ROUTE_SEQUENCER_NODE_CELL_DEG);
+    const bucket = cellIndex.get(key) || [];
+    bucket.push(node.key);
+    cellIndex.set(key, bucket);
+  });
+
+  return {
+    nodes,
+    cellIndex,
+    nodeCount: nodes.size,
+    edgeCount,
+    speedClassField,
+    drivingSpeedCatMap,
+    serviceSpeedCatMap,
+    fallbackSpeedMph: fallbackDrivingMph,
+    fallbackServiceSpeedMph
+  };
+}
+
+function findNearestRouteSequencerGraphNode(graph, lat, lon) {
+  if (!graph || !(graph.nodes instanceof Map) || !graph.nodes.size) return null;
+  const latNum = Number(lat);
+  const lonNum = Number(lon);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return null;
+
+  const baseLatIdx = Math.floor(latNum / ROUTE_SEQUENCER_NODE_CELL_DEG);
+  const baseLonIdx = Math.floor(lonNum / ROUTE_SEQUENCER_NODE_CELL_DEG);
+  let best = null;
+
+  const evaluateNodeKey = nodeKey => {
+    const node = graph.nodes.get(nodeKey);
+    if (!node) return;
+    const miles = haversineMiles(latNum, lonNum, node.lat, node.lon);
+    if (!Number.isFinite(miles)) return;
+    if (!best || miles < best.distanceMiles) {
+      best = {
+        nodeKey: node.key,
+        lat: node.lat,
+        lon: node.lon,
+        distanceMiles: miles
+      };
+    }
+  };
+
+  for (let radius = 0; radius <= ROUTE_SEQUENCER_MAX_NODE_SEARCH_RADIUS; radius += 1) {
+    let foundCandidate = false;
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (radius > 0 && Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue;
+        const key = `${baseLatIdx + dy}:${baseLonIdx + dx}`;
+        const bucket = graph.cellIndex.get(key);
+        if (!bucket || !bucket.length) continue;
+        foundCandidate = true;
+        bucket.forEach(evaluateNodeKey);
+      }
+    }
+    if (foundCandidate && best) break;
+  }
+
+  if (!best) return null;
+  if (best.distanceMiles > ROUTE_SEQUENCER_MAX_SNAP_MILES) return null;
+  return best;
+}
+
+function estimateRouteSequencerTravelMinutes(fromPoint, toPoint, fallbackSpeedMph, options = {}) {
+  if (!fromPoint || !toPoint) return 0;
+  const distMiles = haversineMiles(fromPoint.lat, fromPoint.lon, toPoint.lat, toPoint.lon);
+  if (!Number.isFinite(distMiles) || distMiles <= 0) return 0;
+  const travelMode = normalizeRouteSequencerTravelMode(options?.travelMode);
+  const fallbackDrivingMph = clampRouteSequencerNumber(
+    fallbackSpeedMph,
+    5,
+    85,
+    ROUTE_SEQUENCER_DEFAULT_SPEED_MPH
+  );
+  const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+    options?.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(fallbackDrivingMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+  );
+  const speed = travelMode === "service"
+    ? fallbackServiceSpeedMph
+    : fallbackDrivingMph;
+  return (distMiles / speed) * 60;
+}
+
+function estimateRouteSequencerTravelMiles(fromPoint, toPoint) {
+  if (!fromPoint || !toPoint) return 0;
+  const distMiles = haversineMiles(fromPoint.lat, fromPoint.lon, toPoint.lat, toPoint.lon);
+  if (!Number.isFinite(distMiles) || distMiles <= 0) return 0;
+  return distMiles;
+}
+
+function dijkstraRouteSequencerDistances(graph, startNodeKey, targetNodeKeys, options = {}) {
+  if (!graph || !graph.nodes?.size) return new Map();
+  const start = String(startNodeKey || "");
+  if (!start || !graph.nodes.has(start)) return new Map();
+  const travelMode = normalizeRouteSequencerTravelMode(options?.travelMode);
+
+  const targets = new Set(
+    [...(targetNodeKeys || [])]
+      .map(key => String(key || ""))
+      .filter(key => key && graph.nodes.has(key))
+  );
+  if (!targets.size) return new Map();
+
+  const result = new Map();
+  if (targets.has(start)) {
+    result.set(start, { minutes: 0, miles: 0 });
+    targets.delete(start);
+    if (!targets.size) return result;
+  }
+
+  const dist = new Map([[start, { minutes: 0, miles: 0 }]]);
+  const heap = new RouteSequencerMinHeap();
+  heap.push({ key: start, cost: 0 });
+
+  while (heap.size && targets.size) {
+    const current = heap.pop();
+    if (!current) break;
+    const currentKey = String(current.key || "");
+    const currentCost = Number(current.cost);
+    const knownCost = dist.get(currentKey);
+    if (!Number.isFinite(currentCost) || !knownCost || !Number.isFinite(knownCost.minutes)) continue;
+    if (currentCost > (knownCost.minutes + 1e-9)) continue;
+
+    if (targets.has(currentKey)) {
+      result.set(currentKey, { minutes: knownCost.minutes, miles: knownCost.miles });
+      targets.delete(currentKey);
+      if (!targets.size) break;
+    }
+
+    const node = graph.nodes.get(currentKey);
+    if (!node || !Array.isArray(node.edges) || !node.edges.length) continue;
+    node.edges.forEach(edge => {
+      const toKey = String(edge?.to || "");
+      if (!toKey || !graph.nodes.has(toKey)) return;
+      let stepMinutes = Number(
+        travelMode === "service"
+          ? edge?.serviceMinutes
+          : edge?.minutes
+      );
+      if (!Number.isFinite(stepMinutes) && travelMode === "service") {
+        stepMinutes = Number(edge?.minutes);
+      }
+      if (!Number.isFinite(stepMinutes) || stepMinutes <= 0) return;
+      const stepMiles = Math.max(0, Number(edge?.miles) || 0);
+      const nextMinutes = knownCost.minutes + stepMinutes;
+      const nextMiles = knownCost.miles + stepMiles;
+      const prevBest = dist.get(toKey);
+      const shouldUpdate = !prevBest
+        || !Number.isFinite(prevBest.minutes)
+        || nextMinutes < (prevBest.minutes - 1e-9)
+        || (
+          Math.abs(nextMinutes - prevBest.minutes) <= 1e-9
+          && nextMiles < ((Number.isFinite(prevBest.miles) ? prevBest.miles : Infinity) - 1e-9)
+        );
+      if (!shouldUpdate) return;
+      dist.set(toKey, { minutes: nextMinutes, miles: nextMiles });
+      heap.push({ key: toKey, cost: nextMinutes });
+    });
+  }
+
+  return result;
+}
+
+function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fallbackSpeedMph, travelOptions = {}) {
+  const candidateList = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
+  if (!candidateList.length) return null;
+  const travelMode = normalizeRouteSequencerTravelMode(travelOptions?.travelMode);
+  const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+    travelOptions?.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(
+      clampRouteSequencerNumber(fallbackSpeedMph, 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH),
+      ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH
+    )
+  );
+
+  if (!currentPoint) {
+    return { point: candidateList[0], minutes: 0, miles: 0, usedNetwork: false, travelMode };
+  }
+
+  let networkDistances = null;
+  if (graph && currentPoint.nodeKey) {
+    const targetKeys = new Set(
+      candidateList
+        .map(item => String(item?.nodeKey || ""))
+        .filter(Boolean)
+    );
+    if (targetKeys.size) {
+      networkDistances = dijkstraRouteSequencerDistances(
+        graph,
+        currentPoint.nodeKey,
+        targetKeys,
+        { travelMode }
+      );
+    }
+  }
+
+  let best = null;
+  candidateList.forEach(candidate => {
+    let minutes = NaN;
+    let miles = NaN;
+    let usedNetwork = false;
+    if (networkDistances && candidate.nodeKey && networkDistances.has(candidate.nodeKey)) {
+      const networkRoute = networkDistances.get(candidate.nodeKey) || {};
+      minutes = Number(networkRoute.minutes);
+      miles = Number(networkRoute.miles);
+      usedNetwork = Number.isFinite(minutes) && Number.isFinite(miles);
+    }
+    if (!Number.isFinite(minutes) || !Number.isFinite(miles)) {
+      minutes = estimateRouteSequencerTravelMinutes(
+        currentPoint,
+        candidate,
+        fallbackSpeedMph,
+        { travelMode, fallbackServiceSpeedMph }
+      );
+      miles = estimateRouteSequencerTravelMiles(currentPoint, candidate);
+      usedNetwork = false;
+    }
+    if (!Number.isFinite(minutes) || !Number.isFinite(miles)) return;
+
+    if (!best || minutes < best.minutes - 1e-9 || (Math.abs(minutes - best.minutes) <= 1e-9 && miles < best.miles - 1e-9)) {
+      best = { point: candidate, minutes, miles, usedNetwork, travelMode };
+      return;
+    }
+    if (Math.abs(minutes - best.minutes) <= 1e-9 && Math.abs(miles - best.miles) <= 1e-9) {
+      const candidateOrder = Number(candidate?.order ?? Number.MAX_SAFE_INTEGER);
+      const bestOrder = Number(best?.point?.order ?? Number.MAX_SAFE_INTEGER);
+      if (candidateOrder < bestOrder) {
+        best = { point: candidate, minutes, miles, usedNetwork, travelMode };
+      }
+    }
+  });
+
+  return best;
+}
+
+function routeSequencerSplitRouteDayKey(key) {
+  const text = String(key || "");
+  const idx = text.lastIndexOf("|");
+  if (idx === -1) return { route: text || "Unassigned", day: "" };
+  return {
+    route: text.slice(0, idx) || "Unassigned",
+    day: text.slice(idx + 1) || ""
+  };
+}
+
+function buildRouteSequencerStopLabel(row) {
+  if (typeof buildRecordAddressLabel === "function") {
+    try {
+      const label = String(buildRecordAddressLabel(row) || "").trim();
+      if (label) return label;
+    } catch {
+      // Fall through to local fallback.
+    }
+  }
+
+  const legacyAddress = [
+    row?.["CSADR#"] || "",
+    row?.["CSSDIR"] || "",
+    row?.["CSSTRT"] || "",
+    row?.["CSSFUX"] || ""
+  ]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (legacyAddress) return legacyAddress;
+
+  const fallbackFields = [
+    "Address",
+    "ADDRESS",
+    "Street",
+    "STREET",
+    "Name",
+    "NAME",
+    "UNIQUEID",
+    "BINNO"
+  ];
+  for (const key of fallbackFields) {
+    const value = String(row?.[key] ?? "").trim();
+    if (value) return value;
+  }
+  return "Unnamed stop";
+}
+
+function buildRouteSequencerStopPoints(routeDayKey, group, demandField, serviceTimeField, graph) {
+  const layers = Array.isArray(group?.layers) ? group.layers : [];
+  const out = [];
+  layers.forEach(layer => {
+    const rowId = Number(layer?._rowId);
+    if (!Number.isFinite(rowId)) return;
+    const row = layer?._rowRef;
+    if (!row || typeof row !== "object") return;
+    const lat = Number(layer?._base?.lat);
+    const lon = Number(layer?._base?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const demand = Math.max(0, parseRouteSequencerNumeric(demandField ? row?.[demandField] : 0, 0));
+    const serviceMinutes = Math.max(0, parseRouteSequencerMinutesValue(serviceTimeField ? row?.[serviceTimeField] : 0, 0));
+    const snap = graph ? findNearestRouteSequencerGraphNode(graph, lat, lon) : null;
+
+    out.push({
+      type: "stop",
+      id: `stop_${rowId}`,
+      rowId,
+      routeDayKey,
+      route: String(layer?._routeToken ?? ""),
+      day: String(layer?._dayToken ?? ""),
+      name: buildRouteSequencerStopLabel(row),
+      lat,
+      lon,
+      nodeKey: snap?.nodeKey || "",
+      snapMiles: snap?.distanceMiles || NaN,
+      demand,
+      serviceMinutes,
+      order: rowId
+    });
+  });
+
+  out.sort((a, b) => Number(a.order) - Number(b.order));
+  return out;
+}
+
+function buildRouteSequencerStopPointsFromExistingSequence(routeDayKey, group, demandField, serviceTimeField, sequenceField, graph) {
+  const layers = Array.isArray(group?.layers) ? group.layers : [];
+  const out = [];
+  let validSequenceCount = 0;
+  let missingSequenceCount = 0;
+
+  layers.forEach(layer => {
+    const rowId = Number(layer?._rowId);
+    if (!Number.isFinite(rowId)) return;
+    const row = layer?._rowRef;
+    if (!row || typeof row !== "object") return;
+    const lat = Number(layer?._base?.lat);
+    const lon = Number(layer?._base?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const demand = Math.max(0, parseRouteSequencerNumeric(demandField ? row?.[demandField] : 0, 0));
+    const serviceMinutes = Math.max(0, parseRouteSequencerMinutesValue(serviceTimeField ? row?.[serviceTimeField] : 0, 0));
+    const sequenceValue = parseRouteSequencerNumeric(sequenceField ? row?.[sequenceField] : "", NaN);
+    const hasSequence = Number.isFinite(sequenceValue) && sequenceValue > 0;
+    if (hasSequence) validSequenceCount += 1;
+    else missingSequenceCount += 1;
+
+    const snap = graph ? findNearestRouteSequencerGraphNode(graph, lat, lon) : null;
+
+    out.push({
+      type: "stop",
+      id: `stop_${rowId}`,
+      rowId,
+      routeDayKey,
+      route: String(layer?._routeToken ?? ""),
+      day: String(layer?._dayToken ?? ""),
+      name: buildRouteSequencerStopLabel(row),
+      lat,
+      lon,
+      nodeKey: snap?.nodeKey || "",
+      snapMiles: snap?.distanceMiles || NaN,
+      demand,
+      serviceMinutes,
+      sequenceOrder: hasSequence ? Number(sequenceValue) : NaN,
+      hasSequence,
+      order: rowId
+    });
+  });
+
+  out.sort((a, b) => {
+    const aSeq = Number(a?.sequenceOrder);
+    const bSeq = Number(b?.sequenceOrder);
+    const aHas = Number.isFinite(aSeq) && aSeq > 0;
+    const bHas = Number.isFinite(bSeq) && bSeq > 0;
+    if (aHas && bHas && aSeq !== bSeq) return aSeq - bSeq;
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    return Number(a?.order) - Number(b?.order);
+  });
+
+  return { stops: out, validSequenceCount, missingSequenceCount };
+}
+
+function collectRouteSequencerLandfillDumpPoints(graph) {
+  const out = [];
+  texasLandfillsLayerGroup.eachLayer(layer => {
+    const ll = getLayerLatLng(layer);
+    if (!ll) return;
+    const title = normalizeRouteSequencerName(layer?.options?.title || "Texas Landfill", "Texas Landfill");
+    const snap = graph ? findNearestRouteSequencerGraphNode(graph, ll.lat, ll.lng) : null;
+    out.push({
+      type: "dump",
+      id: `landfill_${ll.lat.toFixed(6)}_${ll.lng.toFixed(6)}`,
+      source: "landfills",
+      name: title,
+      lat: ll.lat,
+      lon: ll.lng,
+      facilityMinutes: 0,
+      nodeKey: snap?.nodeKey || "",
+      snapMiles: snap?.distanceMiles || NaN
+    });
+  });
+  return out;
+}
+
+function collectRouteSequencerCustomDumpPoints(graph) {
+  return getRouteSequencerCustomDumps().map(item => {
+    const snap = graph ? findNearestRouteSequencerGraphNode(graph, item.lat, item.lon) : null;
+    return {
+      type: "dump",
+      id: String(item.id),
+      source: "custom",
+      name: normalizeRouteSequencerName(item.name, "Custom Dump"),
+      lat: Number(item.lat),
+      lon: Number(item.lon),
+      facilityMinutes: parseRouteSequencerMinutesValue(item?.facilityMinutes, 0),
+      nodeKey: snap?.nodeKey || "",
+      snapMiles: snap?.distanceMiles || NaN
+    };
+  });
+}
+
+function getRouteSequencerDepotPointById(depotId, graph) {
+  const id = normalizeRouteSequencerText(depotId);
+  if (!id) return null;
+  const depot = getRouteSequencerDepots().find(item => String(item.id) === id);
+  if (!depot) return null;
+  const snap = graph ? findNearestRouteSequencerGraphNode(graph, depot.lat, depot.lon) : null;
+  return {
+    type: "depot",
+    id: String(depot.id),
+    name: normalizeRouteSequencerName(depot.name, "Depot"),
+    lat: Number(depot.lat),
+    lon: Number(depot.lon),
+    facilityMinutes: 0,
+    allowIntermediate: false,
+    nodeKey: snap?.nodeKey || "",
+    snapMiles: snap?.distanceMiles || NaN
+  };
+}
+
+function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
+  const routeStops = Array.isArray(stops) ? stops.slice() : [];
+  if (!routeStops.length) return null;
+
+  routeStops.sort((a, b) => Number(a.order) - Number(b.order));
+  const unserved = new Map(routeStops.map(item => [item.id, item]));
+  const capacityTons = Number(options.capacityTons);
+  const fallbackSpeedMph = clampRouteSequencerNumber(options.fallbackSpeedMph, 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH);
+  const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+    options.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+  );
+  const dumpPoints = Array.isArray(options.dumpPoints) ? options.dumpPoints.filter(Boolean) : [];
+  const breakMinutesList = parseRouteSequencerBreakMinutesList(options.breakMinutesList);
+  const graph = options.graph || null;
+  const startDepot = options.startDepot || null;
+  const endDepot = options.endDepot || null;
+  const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
+  const timeAtStartMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtStartMinutes, 0));
+  const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
+
+  let fixedFirstStop = null;
+  let fixedLastStop = null;
+  if (!startDepot && routeStops.length) {
+    fixedFirstStop = routeStops[0];
+    unserved.delete(fixedFirstStop.id);
+  }
+  if (!endDepot && routeStops.length > 1) {
+    const candidate = routeStops[routeStops.length - 1];
+    if (!fixedFirstStop || candidate.id !== fixedFirstStop.id) {
+      fixedLastStop = candidate;
+      unserved.delete(candidate.id);
+    }
+  }
+
+  const stopVisits = [];
+  const events = [];
+  let currentPoint = null;
+  let currentLoad = 0;
+  let tripNumber = 1;
+  let totalDriveMinutes = 0;
+  let totalDriveMiles = 0;
+  let totalServiceMinutes = 0;
+  let totalFacilityMinutes = 0;
+  let totalDumpFacilityMinutes = 0;
+  let totalStartEndFacilityMinutes = 0;
+  let totalBreakMinutes = 0;
+  let totalOtherMinutes = 0;
+  let dumpVisits = 0;
+  let networkLegs = 0;
+  let fallbackLegs = 0;
+
+  const applyDriveLeg = pickResult => {
+    const driveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
+    const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
+    totalDriveMinutes += driveMinutes;
+    totalDriveMiles += driveMiles;
+    if (pickResult?.usedNetwork) networkLegs += 1;
+    else fallbackLegs += 1;
+    return { driveMinutes, driveMiles };
+  };
+
+  const appendStopVisit = (stopPoint, pickResult) => {
+    const { driveMinutes, driveMiles } = applyDriveLeg(pickResult);
+    const demand = Math.max(0, Number(stopPoint?.demand) || 0);
+    const serviceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
+    currentLoad += demand;
+    totalServiceMinutes += serviceMinutes;
+    const sequence = stopVisits.length + 1;
+    const visit = {
+      sequence,
+      rowId: Number(stopPoint.rowId),
+      routeDayKey,
+      trip: tripNumber,
+      demand,
+      cumulativeLoad: currentLoad,
+      driveMinutes,
+      driveMiles,
+      serviceMinutes,
+      totalMinutes: driveMinutes + serviceMinutes
+    };
+    stopVisits.push(visit);
+    events.push({
+      type: "stop",
+      rowId: visit.rowId,
+      sequence: visit.sequence,
+      trip: visit.trip,
+      name: stopPoint.name,
+      demand,
+      driveMinutes,
+      driveMiles,
+      serviceMinutes,
+      cumulativeLoad: visit.cumulativeLoad,
+      lat: Number(stopPoint?.lat),
+      lon: Number(stopPoint?.lon)
+    });
+    currentPoint = stopPoint;
+    return visit;
+  };
+
+  const appendDumpVisit = (pickResult, reason = "capacity") => {
+    const point = pickResult?.point;
+    if (!point) return false;
+    const { driveMinutes, driveMiles } = applyDriveLeg(pickResult);
+    const facilityMinutes = Math.max(0, parseRouteSequencerMinutesValue(point?.facilityMinutes, 0));
+    totalDumpFacilityMinutes += facilityMinutes;
+    totalFacilityMinutes += facilityMinutes;
+    events.push({
+      type: "dump",
+      name: point.name,
+      driveMinutes,
+      driveMiles,
+      beforeLoad: currentLoad,
+      facilityMinutes,
+      reason: String(reason || "capacity"),
+      trip: tripNumber,
+      lat: Number(point?.lat),
+      lon: Number(point?.lon)
+    });
+    currentPoint = point;
+    currentLoad = 0;
+    tripNumber += 1;
+    dumpVisits += 1;
+    return true;
+  };
+
+  const appendBreakEvent = (minutesValue, breakNumber = 1) => {
+    const breakMinutes = Math.max(0, parseRouteSequencerMinutesValue(minutesValue, 0));
+    if (!(breakMinutes > 0)) return false;
+    totalBreakMinutes += breakMinutes;
+    totalOtherMinutes += breakMinutes;
+    events.push({
+      type: "break",
+      name: `Driver Break ${Math.max(1, Number(breakNumber) || 1)}`,
+      driveMinutes: 0,
+      serviceMinutes: 0,
+      facilityMinutes: 0,
+      minutes: breakMinutes,
+      otherMinutes: breakMinutes,
+      trip: tripNumber
+    });
+    return true;
+  };
+
+  if (timeAtStartMinutes > 0) {
+    totalStartEndFacilityMinutes += timeAtStartMinutes;
+    totalFacilityMinutes += timeAtStartMinutes;
+    events.push({ type: "timeAtStart", facilityMinutes: timeAtStartMinutes, trip: tripNumber });
+  }
+
+  if (breakMinutesList.length) {
+    breakMinutesList.forEach((breakMinutes, index) => {
+      appendBreakEvent(breakMinutes, index + 1);
+    });
+  }
+
+  if (startDepot) {
+    currentPoint = startDepot;
+    events.push({
+      type: "startDepot",
+      name: startDepot.name,
+      trip: tripNumber,
+      lat: Number(startDepot?.lat),
+      lon: Number(startDepot?.lon)
+    });
+  } else if (fixedFirstStop) {
+    appendStopVisit(fixedFirstStop, { minutes: 0, miles: 0, usedNetwork: false });
+  } else {
+    const first = routeStops[0];
+    unserved.delete(first.id);
+    appendStopVisit(first, { minutes: 0, miles: 0, usedNetwork: false });
+  }
+
+  while (unserved.size) {
+    const candidates = [...unserved.values()];
+    if (!candidates.length) break;
+
+    const nextStopPick = pickNearestRouteSequencerCandidate(
+      currentPoint,
+      candidates,
+      graph,
+      fallbackSpeedMph,
+      { travelMode: "service", fallbackServiceSpeedMph }
+    );
+    if (!nextStopPick?.point) break;
+    const nextStop = nextStopPick.point;
+    const nextDemand = Math.max(0, Number(nextStop?.demand) || 0);
+
+    const wouldExceedCapacity = Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad > 0
+      && (currentLoad + nextDemand) > capacityTons;
+
+    if (wouldExceedCapacity && dumpPoints.length) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point && appendDumpVisit(dumpPick, "capacity-before-next-stop")) {
+        continue;
+      }
+    }
+
+    unserved.delete(nextStop.id);
+    appendStopVisit(nextStop, nextStopPick);
+
+    const atOrAboveCapacity = Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad >= capacityTons;
+    if (atOrAboveCapacity && dumpPoints.length && unserved.size) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point) {
+        appendDumpVisit(dumpPick, "capacity-reached");
+      }
+    }
+  }
+
+  if (fixedLastStop) {
+    const nextDemand = Math.max(0, Number(fixedLastStop?.demand) || 0);
+    const wouldExceedCapacity = Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad > 0
+      && (currentLoad + nextDemand) > capacityTons;
+
+    if (wouldExceedCapacity && dumpPoints.length) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point) {
+        appendDumpVisit(dumpPick, "capacity-before-last-stop");
+      }
+    }
+
+    const pick = pickNearestRouteSequencerCandidate(
+      currentPoint,
+      [fixedLastStop],
+      graph,
+      fallbackSpeedMph,
+      { travelMode: "service", fallbackServiceSpeedMph }
+    )
+      || {
+        point: fixedLastStop,
+        minutes: estimateRouteSequencerTravelMinutes(currentPoint, fixedLastStop, fallbackSpeedMph, {
+          travelMode: "service",
+          fallbackServiceSpeedMph
+        }),
+        miles: estimateRouteSequencerTravelMiles(currentPoint, fixedLastStop),
+        usedNetwork: false
+      };
+    appendStopVisit(fixedLastStop, pick);
+  }
+
+  if (endDepot) {
+    const needsFinalDump = forceDumpBeforeEnd
+      && Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad > 0
+      && dumpPoints.length;
+    if (needsFinalDump) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point) {
+        appendDumpVisit(dumpPick, "final-before-end");
+      }
+    }
+
+    const depotPick = pickNearestRouteSequencerCandidate(
+      currentPoint,
+      [endDepot],
+      graph,
+      fallbackSpeedMph,
+      { travelMode: "driving", fallbackServiceSpeedMph }
+    )
+      || {
+        point: endDepot,
+        minutes: estimateRouteSequencerTravelMinutes(currentPoint, endDepot, fallbackSpeedMph, {
+          travelMode: "driving",
+          fallbackServiceSpeedMph
+        }),
+        miles: estimateRouteSequencerTravelMiles(currentPoint, endDepot),
+        usedNetwork: false
+      };
+    const { driveMinutes, driveMiles } = applyDriveLeg(depotPick);
+    events.push({
+      type: "endDepot",
+      name: endDepot.name,
+      driveMinutes,
+      driveMiles,
+      trip: tripNumber,
+      lat: Number(endDepot?.lat),
+      lon: Number(endDepot?.lon)
+    });
+  }
+
+  if (timeAtEndMinutes > 0) {
+    totalStartEndFacilityMinutes += timeAtEndMinutes;
+    totalFacilityMinutes += timeAtEndMinutes;
+    events.push({ type: "timeAtEnd", facilityMinutes: timeAtEndMinutes, trip: tripNumber });
+  }
+
+  const split = routeSequencerSplitRouteDayKey(routeDayKey);
+  return {
+    routeDayKey,
+    route: split.route,
+    day: split.day,
+    stopVisits,
+    events,
+    dumpVisits,
+    totalDriveMinutes,
+    totalDriveMiles,
+    totalServiceMinutes,
+    totalDumpFacilityMinutes,
+    totalStartEndFacilityMinutes,
+    totalBreakMinutes,
+    totalOtherMinutes,
+    totalFacilityMinutes,
+    totalMinutes: totalDriveMinutes + totalServiceMinutes + totalFacilityMinutes + totalOtherMinutes,
+    capacityTons: Number.isFinite(capacityTons) && capacityTons > 0 ? capacityTons : null,
+    networkLegs,
+    fallbackLegs
+  };
+}
+
+function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
+  const orderedStops = Array.isArray(stops) ? stops.slice() : [];
+  if (!orderedStops.length) return null;
+
+  orderedStops.sort((a, b) => {
+    const aSeq = Number(a?.sequenceOrder);
+    const bSeq = Number(b?.sequenceOrder);
+    const aHas = Number.isFinite(aSeq) && aSeq > 0;
+    const bHas = Number.isFinite(bSeq) && bSeq > 0;
+    if (aHas && bHas && aSeq !== bSeq) return aSeq - bSeq;
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    return Number(a?.order) - Number(b?.order);
+  });
+
+  const graph = options.graph || null;
+  const capacityTons = Number(options.capacityTons);
+  const dumpPoints = Array.isArray(options.dumpPoints) ? options.dumpPoints.filter(Boolean) : [];
+  const breakMinutesList = parseRouteSequencerBreakMinutesList(options.breakMinutesList);
+  const fallbackSpeedMph = clampRouteSequencerNumber(options.fallbackSpeedMph, 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH);
+  const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+    options.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+  );
+  const startDepot = options.startDepot || null;
+  const endDepot = options.endDepot || null;
+  const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
+  const timeAtStartMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtStartMinutes, 0));
+  const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
+
+  const stopVisits = [];
+  const events = [];
+  let currentPoint = null;
+  let currentLoad = 0;
+  let tripNumber = 1;
+  let dumpVisits = 0;
+  let totalDriveMinutes = 0;
+  let totalDriveMiles = 0;
+  let totalServiceMinutes = 0;
+  let totalFacilityMinutes = 0;
+  let totalDumpFacilityMinutes = 0;
+  let totalStartEndFacilityMinutes = 0;
+  let totalBreakMinutes = 0;
+  let totalOtherMinutes = 0;
+  let networkLegs = 0;
+  let fallbackLegs = 0;
+  const maxExistingSequence = orderedStops.reduce((maxValue, stopPoint) => {
+    const seq = Number(stopPoint?.sequenceOrder);
+    if (Number.isFinite(seq) && seq > maxValue) return seq;
+    return maxValue;
+  }, 0);
+  let fallbackSequenceCursor = maxExistingSequence;
+
+  const applyDriveLeg = pickResult => {
+    const driveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
+    const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
+    totalDriveMinutes += driveMinutes;
+    totalDriveMiles += driveMiles;
+    if (pickResult?.usedNetwork) networkLegs += 1;
+    else fallbackLegs += 1;
+    return { driveMinutes, driveMiles };
+  };
+
+  const appendDumpVisit = (pickResult, reason = "capacity") => {
+    const point = pickResult?.point;
+    if (!point) return false;
+    const { driveMinutes, driveMiles } = applyDriveLeg(pickResult);
+    const facilityMinutes = Math.max(0, parseRouteSequencerMinutesValue(point?.facilityMinutes, 0));
+    totalDumpFacilityMinutes += facilityMinutes;
+    totalFacilityMinutes += facilityMinutes;
+    events.push({
+      type: "dump",
+      name: point.name,
+      driveMinutes,
+      driveMiles,
+      beforeLoad: currentLoad,
+      facilityMinutes,
+      reason: String(reason || "capacity"),
+      trip: tripNumber,
+      lat: Number(point?.lat),
+      lon: Number(point?.lon)
+    });
+    currentPoint = point;
+    currentLoad = 0;
+    tripNumber += 1;
+    dumpVisits += 1;
+    return true;
+  };
+
+  const appendBreakEvent = (minutesValue, breakNumber = 1) => {
+    const breakMinutes = Math.max(0, parseRouteSequencerMinutesValue(minutesValue, 0));
+    if (!(breakMinutes > 0)) return false;
+    totalBreakMinutes += breakMinutes;
+    totalOtherMinutes += breakMinutes;
+    events.push({
+      type: "break",
+      name: `Driver Break ${Math.max(1, Number(breakNumber) || 1)}`,
+      driveMinutes: 0,
+      serviceMinutes: 0,
+      facilityMinutes: 0,
+      minutes: breakMinutes,
+      otherMinutes: breakMinutes,
+      trip: tripNumber
+    });
+    return true;
+  };
+
+  if (timeAtStartMinutes > 0) {
+    totalStartEndFacilityMinutes += timeAtStartMinutes;
+    totalFacilityMinutes += timeAtStartMinutes;
+    events.push({ type: "timeAtStart", facilityMinutes: timeAtStartMinutes, trip: tripNumber });
+  }
+
+  if (breakMinutesList.length) {
+    breakMinutesList.forEach((breakMinutes, index) => {
+      appendBreakEvent(breakMinutes, index + 1);
+    });
+  }
+
+  if (startDepot) {
+    currentPoint = startDepot;
+    events.push({
+      type: "startDepot",
+      name: startDepot.name,
+      trip: tripNumber,
+      lat: Number(startDepot?.lat),
+      lon: Number(startDepot?.lon)
+    });
+  }
+
+  orderedStops.forEach((stopPoint, index) => {
+    const nextDemand = Math.max(0, Number(stopPoint?.demand) || 0);
+    const wouldExceedCapacity = Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad > 0
+      && (currentLoad + nextDemand) > capacityTons;
+
+    if (wouldExceedCapacity && dumpPoints.length && currentPoint) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point) appendDumpVisit(dumpPick, "capacity-before-next-stop");
+    }
+
+    const pick = currentPoint
+      ? (
+          pickNearestRouteSequencerCandidate(
+            currentPoint,
+            [stopPoint],
+            graph,
+            fallbackSpeedMph,
+            { travelMode: "service", fallbackServiceSpeedMph }
+          )
+          || {
+            point: stopPoint,
+            minutes: estimateRouteSequencerTravelMinutes(currentPoint, stopPoint, fallbackSpeedMph, {
+              travelMode: "service",
+              fallbackServiceSpeedMph
+            }),
+            miles: estimateRouteSequencerTravelMiles(currentPoint, stopPoint),
+            usedNetwork: false
+          }
+        )
+      : { point: stopPoint, minutes: 0, miles: 0, usedNetwork: false };
+
+    const { driveMinutes, driveMiles } = applyDriveLeg(pick);
+    const demand = Math.max(0, Number(stopPoint?.demand) || 0);
+    const serviceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
+    currentLoad += demand;
+    totalServiceMinutes += serviceMinutes;
+
+    const rawSequence = Number(stopPoint?.sequenceOrder);
+    const outputSequenceValue = Number.isFinite(rawSequence) && rawSequence > 0
+      ? rawSequence
+      : (++fallbackSequenceCursor);
+
+    const visit = {
+      sequence: outputSequenceValue,
+      outputSequenceValue,
+      rowId: Number(stopPoint.rowId),
+      routeDayKey,
+      trip: tripNumber,
+      demand,
+      cumulativeLoad: currentLoad,
+      driveMinutes,
+      driveMiles,
+      serviceMinutes,
+      totalMinutes: driveMinutes + serviceMinutes
+    };
+    stopVisits.push(visit);
+    events.push({
+      type: "stop",
+      rowId: visit.rowId,
+      sequence: visit.sequence,
+      trip: visit.trip,
+      name: stopPoint.name,
+      demand,
+      driveMinutes,
+      driveMiles,
+      serviceMinutes,
+      cumulativeLoad: visit.cumulativeLoad,
+      lat: Number(stopPoint?.lat),
+      lon: Number(stopPoint?.lon)
+    });
+    currentPoint = stopPoint;
+
+    const hasRemainingStops = index < orderedStops.length - 1;
+    const atOrAboveCapacity = Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad >= capacityTons;
+    if (atOrAboveCapacity && dumpPoints.length && hasRemainingStops) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point) appendDumpVisit(dumpPick, "capacity-reached");
+    }
+  });
+
+  if (endDepot) {
+    const needsFinalDump = forceDumpBeforeEnd
+      && Number.isFinite(capacityTons)
+      && capacityTons > 0
+      && currentLoad > 0
+      && dumpPoints.length;
+    if (needsFinalDump && currentPoint) {
+      const dumpPick = pickNearestRouteSequencerCandidate(
+        currentPoint,
+        dumpPoints,
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph }
+      );
+      if (dumpPick?.point) appendDumpVisit(dumpPick, "final-before-end");
+    }
+
+    const depotPick = currentPoint
+      ? (
+        pickNearestRouteSequencerCandidate(
+          currentPoint,
+          [endDepot],
+          graph,
+          fallbackSpeedMph,
+          { travelMode: "driving", fallbackServiceSpeedMph }
+        )
+        || {
+          point: endDepot,
+          minutes: estimateRouteSequencerTravelMinutes(currentPoint, endDepot, fallbackSpeedMph, {
+            travelMode: "driving",
+            fallbackServiceSpeedMph
+          }),
+          miles: estimateRouteSequencerTravelMiles(currentPoint, endDepot),
+          usedNetwork: false
+        }
+      )
+      : { point: endDepot, minutes: 0, miles: 0, usedNetwork: false };
+
+    const { driveMinutes, driveMiles } = applyDriveLeg(depotPick);
+    events.push({
+      type: "endDepot",
+      name: endDepot.name,
+      driveMinutes,
+      driveMiles,
+      trip: tripNumber,
+      lat: Number(endDepot?.lat),
+      lon: Number(endDepot?.lon)
+    });
+  }
+
+  if (timeAtEndMinutes > 0) {
+    totalStartEndFacilityMinutes += timeAtEndMinutes;
+    totalFacilityMinutes += timeAtEndMinutes;
+    events.push({ type: "timeAtEnd", facilityMinutes: timeAtEndMinutes, trip: tripNumber });
+  }
+
+  const split = routeSequencerSplitRouteDayKey(routeDayKey);
+  return {
+    routeDayKey,
+    route: split.route,
+    day: split.day,
+    stopVisits,
+    events,
+    dumpVisits,
+    totalDriveMinutes,
+    totalDriveMiles,
+    totalServiceMinutes,
+    totalDumpFacilityMinutes,
+    totalStartEndFacilityMinutes,
+    totalBreakMinutes,
+    totalOtherMinutes,
+    totalFacilityMinutes,
+    totalMinutes: totalDriveMinutes + totalServiceMinutes + totalFacilityMinutes + totalOtherMinutes,
+    capacityTons: Number.isFinite(capacityTons) && capacityTons > 0 ? capacityTons : null,
+    networkLegs,
+    fallbackLegs
+  };
+}
+
+function applyRouteSequencerPlansToRows(plans, outputFieldMapping, options = {}) {
+  const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  if (!rows.length) return 0;
+  ensureCanonicalRecordFields(rows);
+  ensureExistBackupColumns(rows);
+  const outputFields = normalizeRouteSequencerOutputFields(outputFieldMapping || getRouteSequencerActiveOutputFields());
+  const sequenceIncrement = normalizeRouteSequencerSequenceIncrement(options?.sequenceIncrement, 1);
+  const resetFieldNames = [...new Set(Object.values(outputFields).map(name => String(name || "").trim()).filter(Boolean))];
+  const idsToReset = new Set();
+  Object.values(routeDayGroups).forEach(group => {
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(layer => {
+      const rowId = Number(layer?._rowId);
+      if (Number.isFinite(rowId)) idsToReset.add(rowId);
+    });
+  });
+
+  idsToReset.forEach(rowId => {
+    const row = rows[rowId];
+    if (!row || typeof row !== "object") return;
+    resetFieldNames.forEach(fieldName => {
+      row[fieldName] = "";
+    });
+    row.SEQNO = "";
+  });
+
+  let updatedCount = 0;
+  (Array.isArray(plans) ? plans : []).forEach(plan => {
+    const dumpVisits = Number(plan?.dumpVisits) || 0;
+    const visits = Array.isArray(plan?.stopVisits) ? plan.stopVisits : [];
+    visits.forEach(visit => {
+      const rowId = Number(visit?.rowId);
+      if (!Number.isFinite(rowId)) return;
+      const row = rows[rowId];
+      if (!row || typeof row !== "object") return;
+      const explicitSequenceValue = Number(visit?.outputSequenceValue);
+      const visitSequenceOrder = Number(visit.sequence);
+      const sequenceValue = Number.isFinite(explicitSequenceValue) && explicitSequenceValue > 0
+        ? explicitSequenceValue
+        : (
+          Number.isFinite(visitSequenceOrder) && visitSequenceOrder > 0
+            ? toRouteSequencerSequenceValue(visitSequenceOrder, sequenceIncrement)
+            : ""
+        );
+      row[outputFields.sequence] = sequenceValue;
+      row.SEQNO = sequenceValue;
+      row[outputFields.trip] = Number(visit.trip) || "";
+      row[outputFields.cumulativeLoad] = Number.isFinite(Number(visit.cumulativeLoad))
+        ? Number(Number(visit.cumulativeLoad).toFixed(3))
+        : "";
+      row[outputFields.driveMinutes] = Number.isFinite(Number(visit.driveMinutes))
+        ? Number(Number(visit.driveMinutes).toFixed(2))
+        : "";
+      row[outputFields.serviceMinutes] = Number.isFinite(Number(visit.serviceMinutes))
+        ? Number(Number(visit.serviceMinutes).toFixed(2))
+        : "";
+      row[outputFields.totalMinutes] = Number.isFinite(Number(visit.totalMinutes))
+        ? Number(Number(visit.totalMinutes).toFixed(2))
+        : "";
+      row[outputFields.dumpVisits] = dumpVisits;
+      updatedCount += 1;
+    });
+  });
+
+  window._attributeHeaders = getAttributeHeaders(rows);
+  syncCurrentWorkbookSheetFromRows();
+  queueWorkbookCloudSave("Route Sequencer");
+  return updatedCount;
+}
+
+function refreshAllRecordPopupContent() {
+  Object.values(routeDayGroups).forEach(group => {
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    layers.forEach(layer => {
+      syncRecordPopupContent(layer);
+    });
+  });
+}
+
+function escapeRouteSequencerHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function renderRouteSequencerResultsList(node, plans) {
+  if (!node) return;
+  const entries = Array.isArray(plans) ? plans : [];
+  if (!entries.length) {
+    node.innerHTML = '<div class="route-sequencer-results-empty">No sequencing results yet.</div>';
+    return;
+  }
+
+  const formatNumber = (value, digits = 1, fallback = "-") => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(digits) : fallback;
+  };
+
+  const formatDurationHms = (minutesValue, fallback = "00:00:00") => {
+    const minutes = Number(minutesValue);
+    if (!Number.isFinite(minutes)) return fallback;
+    const totalSeconds = Math.max(0, Math.round(minutes * 60));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutesRemainder = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutesRemainder).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  };
+
+  const computePlanTimeBreakdown = plan => {
+    const events = Array.isArray(plan?.events) ? plan.events : [];
+    const stops = Array.isArray(plan?.stopVisits) ? plan.stopVisits : [];
+    const startMinutesFromEvents = events
+      .filter(event => String(event?.type || "") === "timeAtStart")
+      .reduce((sum, event) => sum + Math.max(0, Number(event?.facilityMinutes) || 0), 0);
+    const endMinutesFromEvents = events
+      .filter(event => String(event?.type || "") === "timeAtEnd")
+      .reduce((sum, event) => sum + Math.max(0, Number(event?.facilityMinutes) || 0), 0);
+    const dumpFacilityMinutesFromEvents = events
+      .filter(event => String(event?.type || "") === "dump")
+      .reduce((sum, event) => sum + Math.max(0, Number(event?.facilityMinutes) || 0), 0);
+    const breakMinutesFromEvents = events
+      .filter(event => String(event?.type || "") === "break")
+      .reduce((sum, event) => sum + Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0), 0);
+    const otherMinutes = events
+      .filter(event => String(event?.type || "") === "otherTime")
+      .reduce((sum, event) => sum + Math.max(0, Number(event?.minutes) || 0), 0);
+
+    const serviceFromStops = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.serviceMinutes) || 0), 0);
+    const demandTons = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0);
+    const driveMinutes = Math.max(0, Number(plan?.totalDriveMinutes) || 0);
+    const driveMilesFromEvents = events.reduce((sum, event) => sum + Math.max(0, Number(event?.driveMiles) || 0), 0);
+    const driveMiles = Number.isFinite(Number(plan?.totalDriveMiles))
+      ? Math.max(0, Number(plan.totalDriveMiles))
+      : driveMilesFromEvents;
+    const serviceMinutes = Math.max(serviceFromStops, Math.max(0, Number(plan?.totalServiceMinutes) || 0));
+    const dumpFacilityMinutes = Number.isFinite(Number(plan?.totalDumpFacilityMinutes))
+      ? Math.max(0, Number(plan.totalDumpFacilityMinutes))
+      : dumpFacilityMinutesFromEvents;
+    const breakMinutes = Number.isFinite(Number(plan?.totalBreakMinutes))
+      ? Math.max(0, Number(plan.totalBreakMinutes))
+      : breakMinutesFromEvents;
+    const startMinutes = startMinutesFromEvents;
+    const endMinutes = endMinutesFromEvents;
+    const facilityMinutesFromPlan = Number.isFinite(Number(plan?.totalFacilityMinutes))
+      ? Math.max(0, Number(plan.totalFacilityMinutes))
+      : NaN;
+    const facilityMinutesFromEvents = dumpFacilityMinutes + startMinutes + endMinutes;
+    const facilityMinutesResolved = Number.isFinite(facilityMinutesFromPlan)
+      ? facilityMinutesFromPlan
+      : facilityMinutesFromEvents;
+    const totalMinutesResolved = driveMinutes + serviceMinutes + facilityMinutesResolved + breakMinutes + otherMinutes;
+
+    return {
+      driveMinutes,
+      driveMiles,
+      serviceMinutes,
+      dumpFacilityMinutes,
+      breakMinutes,
+      startMinutes,
+      endMinutes,
+      facilityMinutes: facilityMinutesResolved,
+      otherMinutes,
+      totalMinutes: totalMinutesResolved,
+      demandTons
+    };
+  };
+
+  const formatEventAction = (event, index) => {
+    const type = String(event?.type || "");
+    if (type === "stop") return `Stop ${Number(event?.sequence) || (index + 1)}`;
+    if (type === "dump") return "Dump Facility";
+    if (type === "startDepot") return "Start Facility";
+    if (type === "endDepot") return "End Facility";
+    if (type === "timeAtStart") return "Time at Start";
+    if (type === "timeAtEnd") return "Time at End";
+    if (type === "break") return "Driver Break";
+    return type || `Step ${index + 1}`;
+  };
+
+  const formatEventNotes = event => {
+    const type = String(event?.type || "");
+    const name = String(event?.name || "").trim();
+    if (type === "dump") {
+      const beforeLoad = Number(event?.beforeLoad);
+      const reason = String(event?.reason || "").trim();
+      const reasonLabel = reason
+        ? reason.replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase())
+        : "";
+      const loadText = Number.isFinite(beforeLoad) ? `Load ${beforeLoad.toFixed(2)} tons` : "";
+      return [name, reasonLabel, loadText].filter(Boolean).join(" | ") || "Capacity dump";
+    }
+    if (type === "stop") return name || "Stop";
+    if (type === "startDepot" || type === "endDepot") return name || "Facility";
+    if (type === "break") {
+      const breakMinutes = Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0);
+      const breakLabel = Number.isFinite(breakMinutes) && breakMinutes > 0
+        ? formatDurationHms(breakMinutes)
+        : "";
+      return [name || "Driver idle break", breakLabel].filter(Boolean).join(" | ");
+    }
+    return name || "";
+  };
+
+  const sortedEntries = entries.slice().sort((a, b) => {
+    const keyA = `${a?.route || ""}|${a?.day || ""}`;
+    const keyB = `${b?.route || ""}|${b?.day || ""}`;
+    return keyA.localeCompare(keyB, undefined, { sensitivity: "base", numeric: true });
+  });
+
+  const summaryRowsHtml = sortedEntries.map(plan => {
+    const route = plan?.route || "Unassigned";
+    const day = plan?.day || "No Day";
+    const stopCount = Number(plan?.stopVisits?.length) || 0;
+    const dumpCount = Number(plan?.dumpVisits) || 0;
+    const tripCount = new Set(
+      (Array.isArray(plan?.stopVisits) ? plan.stopVisits : [])
+        .map(visit => Number(visit?.trip))
+        .filter(value => Number.isFinite(value) && value > 0)
+    ).size || 1;
+    const capacityText = Number.isFinite(Number(plan?.capacityTons))
+      ? Number(plan.capacityTons).toFixed(2)
+      : "-";
+    const breakdown = computePlanTimeBreakdown(plan);
+    return `
+      <tr>
+        <td>${escapeRouteSequencerHtml(route)}</td>
+        <td>${escapeRouteSequencerHtml(day)}</td>
+        <td>${stopCount.toLocaleString()}</td>
+        <td>${tripCount.toLocaleString()}</td>
+        <td>${dumpCount.toLocaleString()}</td>
+        <td>${capacityText}</td>
+        <td>${formatNumber(breakdown.demandTons, 2)}</td>
+        <td>${formatDurationHms(breakdown.driveMinutes)}</td>
+        <td>${formatNumber(breakdown.driveMiles, 2)}</td>
+        <td>${formatDurationHms(breakdown.serviceMinutes)}</td>
+        <td>${formatDurationHms(breakdown.dumpFacilityMinutes)}</td>
+        <td>${formatDurationHms(breakdown.breakMinutes)}</td>
+        <td>${formatDurationHms(breakdown.startMinutes)}</td>
+        <td>${formatDurationHms(breakdown.endMinutes)}</td>
+        <td>${formatDurationHms(breakdown.otherMinutes)}</td>
+        <td>${formatDurationHms(breakdown.totalMinutes)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  const summaryTableHtml = `
+    <section class="route-sequencer-summary-card">
+      <div class="route-sequencer-report-key">Sequencing Route Report (Excel Format)</div>
+      <div class="route-sequencer-summary-table-wrap">
+        <table class="route-sequencer-summary-table">
+          <thead>
+            <tr>
+              <th>Route</th>
+              <th>Day</th>
+              <th>Stops</th>
+              <th>Trips</th>
+              <th>Dumps</th>
+              <th>Cap (tons)</th>
+              <th>Demand (tons)</th>
+              <th>Drive (HH:MM:SS)</th>
+              <th>Miles</th>
+              <th>Service (HH:MM:SS)</th>
+              <th>Dump Facility (HH:MM:SS)</th>
+              <th>Break (HH:MM:SS)</th>
+              <th>Start (HH:MM:SS)</th>
+              <th>End (HH:MM:SS)</th>
+              <th>Other (HH:MM:SS)</th>
+              <th>Total (HH:MM:SS)</th>
+            </tr>
+          </thead>
+          <tbody>${summaryRowsHtml}</tbody>
+        </table>
+      </div>
+      <div class="route-sequencer-report-truncated">Time fields are shown as HH:MM:SS. Total = Drive + Service + Dump Facility + Break + Start + End + Other. Dump Facility time is counted on every dump visit (for example, 00:25:00 x 2 dumps = 00:50:00). Break time is route-level idle time. Drive includes travel between stops, to/from dump locations, from start facility to first stop, and from last stop to end facility.</div>
+    </section>
+  `;
+
+  const detailHtml = sortedEntries.map(plan => {
+    const key = `${plan.route || "Unassigned"} | ${plan.day || "No Day"}`;
+    const stopCount = Number(plan.stopVisits?.length) || 0;
+    const dumpCount = Number(plan.dumpVisits) || 0;
+    const capacityText = Number.isFinite(Number(plan.capacityTons))
+      ? `${Number(plan.capacityTons).toFixed(2)} tons`
+      : "Not set";
+    const breakdown = computePlanTimeBreakdown(plan);
+    const tripCount = new Set(
+      (Array.isArray(plan.stopVisits) ? plan.stopVisits : [])
+        .map(visit => Number(visit?.trip))
+        .filter(value => Number.isFinite(value) && value > 0)
+    ).size || 1;
+
+    const events = Array.isArray(plan.events) ? plan.events : [];
+    const maxReportRows = 450;
+    const reportRows = events.slice(0, maxReportRows);
+    let runningLoadTons = 0;
+    const reportRowsHtml = reportRows.map((event, index) => {
+      const trip = Number(event?.trip);
+      const type = String(event?.type || "");
+      const rowId = Number(event?.rowId);
+      const lat = Number(event?.lat);
+      const lon = Number(event?.lon);
+      const isStopSelectable = type === "stop" && Number.isFinite(rowId);
+      const isFacilitySelectable = (
+        type === "dump"
+        || type === "startDepot"
+        || type === "endDepot"
+      ) && Number.isFinite(lat) && Number.isFinite(lon);
+      const isClickable = isStopSelectable || isFacilitySelectable;
+      const rowClass = isClickable ? "route-sequencer-result-row-clickable" : "";
+      const rowAttributes = [
+        isClickable ? 'data-rs-clickable="1"' : "",
+        isClickable ? `data-rs-event-type="${type.replace(/"/g, "&quot;")}"` : "",
+        isStopSelectable ? `data-rs-row-id="${rowId}"` : "",
+        isFacilitySelectable ? `data-rs-lat="${lat}"` : "",
+        isFacilitySelectable ? `data-rs-lon="${lon}"` : "",
+        isStopSelectable
+          ? 'title="Click to select this stop on the map and in the Attribute Table."'
+          : (
+            isFacilitySelectable
+              ? 'title="Click to focus this facility on the map."'
+              : ""
+          )
+      ].filter(Boolean).join(" ");
+      const demandTons = type === "stop"
+        ? Math.max(0, Number(event?.demand) || 0)
+        : 0;
+      if (type === "stop") {
+        const eventCumulative = Number(event?.cumulativeLoad);
+        runningLoadTons = Number.isFinite(eventCumulative)
+          ? Math.max(0, eventCumulative)
+          : (runningLoadTons + demandTons);
+      } else if (type === "dump") {
+        runningLoadTons = 0;
+      }
+      const otherMinutes = type === "otherTime"
+        ? Math.max(0, Number(event?.minutes) || 0)
+        : Math.max(0, Number(event?.otherMinutes) || 0);
+      return `
+        <tr class="${rowClass}" ${rowAttributes}>
+          <td>${index + 1}</td>
+          <td>${escapeRouteSequencerHtml(formatEventAction(event, index))}</td>
+          <td>${Number.isFinite(trip) && trip > 0 ? trip : "-"}</td>
+          <td>${formatDurationHms(event?.driveMinutes)}</td>
+          <td>${formatDurationHms(event?.serviceMinutes)}</td>
+          <td>${formatDurationHms(event?.facilityMinutes)}</td>
+          <td>${formatDurationHms(otherMinutes)}</td>
+          <td>${formatNumber(demandTons, 2, "0.00")}</td>
+          <td>${formatNumber(runningLoadTons, 2, "0.00")}</td>
+          <td>${escapeRouteSequencerHtml(formatEventNotes(event))}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const truncatedHtml = events.length > maxReportRows
+      ? `<div class="route-sequencer-report-truncated">Showing first ${maxReportRows.toLocaleString()} events of ${events.length.toLocaleString()}.</div>`
+      : "";
+
+    return `
+      <section class="route-sequencer-report-card">
+        <div class="route-sequencer-report-head">
+          <div class="route-sequencer-report-key">${escapeRouteSequencerHtml(key)}</div>
+          <div class="route-sequencer-report-metrics">
+            <span>Stops: ${stopCount.toLocaleString()}</span>
+            <span>Dumps: ${dumpCount.toLocaleString()}</span>
+            <span>Trips: ${tripCount.toLocaleString()}</span>
+            <span>Capacity: ${escapeRouteSequencerHtml(capacityText)}</span>
+            <span>Demand: ${formatNumber(breakdown.demandTons, 2)} tons</span>
+            <span>Drive: ${formatDurationHms(breakdown.driveMinutes)}</span>
+            <span>Miles: ${formatNumber(breakdown.driveMiles, 2)} mi</span>
+            <span>Service: ${formatDurationHms(breakdown.serviceMinutes)}</span>
+            <span>Break: ${formatDurationHms(breakdown.breakMinutes)}</span>
+            <span>Start: ${formatDurationHms(breakdown.startMinutes)}</span>
+            <span>End: ${formatDurationHms(breakdown.endMinutes)}</span>
+            <span>Dump Facility: ${formatDurationHms(breakdown.dumpFacilityMinutes)}</span>
+            <span>Other: ${formatDurationHms(breakdown.otherMinutes)}</span>
+            <span>Total: ${formatDurationHms(breakdown.totalMinutes)}</span>
+          </div>
+        </div>
+        <div class="route-sequencer-report-table-wrap">
+          <table class="route-sequencer-report-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Action</th>
+                <th>Trip</th>
+                <th>Drive (HH:MM:SS)</th>
+                <th>Service (HH:MM:SS)</th>
+                <th>Facility (HH:MM:SS)</th>
+                <th>Other (HH:MM:SS)</th>
+                <th>Demand (tons)</th>
+                <th>Load (tons)</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>${reportRowsHtml}</tbody>
+          </table>
+        </div>
+        ${truncatedHtml}
+      </section>
+    `;
+  }).join("");
+  node.innerHTML = `${summaryTableHtml}${detailHtml}`;
+}
+
+function loadRouteSequencerSettings() {
+  const raw = storageGet(ROUTE_SEQUENCER_SETTINGS_KEY);
+  if (!raw) {
+    setRouteSequencerActiveOutputFields(ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    const settings = parsed && typeof parsed === "object" ? parsed : {};
+    setRouteSequencerActiveOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+    return settings;
+  } catch {
+    setRouteSequencerActiveOutputFields(ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+    return {};
+  }
+}
+
+function saveRouteSequencerSettings(settings) {
+  const payload = settings && typeof settings === "object" ? settings : {};
+  payload.outputFields = normalizeRouteSequencerOutputFields(payload.outputFields);
+  storageSet(ROUTE_SEQUENCER_SETTINGS_KEY, JSON.stringify(payload));
+  setRouteSequencerActiveOutputFields(payload.outputFields);
+}
+
+function initFacilitiesControls() {
+  const openBtn = document.getElementById("facilitiesBtn");
+  const openBtnMobile = document.getElementById("facilitiesBtnMobile");
+  const modal = document.getElementById("facilitiesModal");
+  const closeBtn = document.getElementById("facilitiesCloseBtn");
+  const nameInput = document.getElementById("facilityNameInput");
+  const roleSelect = document.getElementById("facilityRoleSelect");
+  const timeInput = document.getElementById("facilityTimeInput");
+  const latInput = document.getElementById("facilityLatInput");
+  const lonInput = document.getElementById("facilityLonInput");
+  const mapCenterBtn = document.getElementById("facilityUseMapCenterBtn");
+  const saveBtn = document.getElementById("facilitySaveBtn");
+  const clearBtn = document.getElementById("facilityClearBtn");
+  const listSelect = document.getElementById("facilityListSelect");
+  const loadSelectedBtn = document.getElementById("facilityLoadSelectedBtn");
+  const removeBtn = document.getElementById("facilityRemoveBtn");
+  const statusNode = document.getElementById("facilitiesStatus");
+
+  if (
+    !openBtn || !modal || !closeBtn || !nameInput || !roleSelect || !timeInput ||
+    !latInput || !lonInput ||
+    !mapCenterBtn || !saveBtn || !clearBtn || !listSelect || !loadSelectedBtn ||
+    !removeBtn || !statusNode
+  ) {
+    return;
+  }
+
+  if (openBtn.dataset.facilitiesBound === "1") return;
+  openBtn.dataset.facilitiesBound = "1";
+
+  const setStatus = (message, kind = "") => {
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (kind === "error") statusNode.classList.add("error");
+    if (kind === "success") statusNode.classList.add("success");
+  };
+
+  const isTexasFacilityLatLng = (lat, lon) => {
+    if (typeof isTexasLatLng === "function") {
+      try {
+        return !!isTexasLatLng(lat, lon);
+      } catch {
+        // Fall through to bounds fallback.
+      }
+    }
+    const latNum = Number(lat);
+    const lonNum = Number(lon);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return false;
+    // Texas bounding box fallback.
+    return latNum >= 25.8372 && latNum <= 36.5007 && lonNum >= -106.6456 && lonNum <= -93.5080;
+  };
+
+  const refreshSequencerFacilityUi = () => {
+    if (typeof window.__refreshRouteSequencerFacilitiesUi === "function") {
+      window.__refreshRouteSequencerFacilitiesUi();
+    }
+  };
+
+  const syncTimeInputForRole = () => {
+    const role = normalizeRouteSequencerFacilityRole(roleSelect.value);
+    const isDump = role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP;
+    if (!isDump) {
+      timeInput.value = "00:00";
+    }
+    timeInput.disabled = !isDump;
+    timeInput.title = isDump
+      ? "Time spent at dump location (MM:SS)."
+      : "Start/End facilities use Time at Start and Time at End in the solver.";
+  };
+
+  const clearForm = () => {
+    nameInput.value = "";
+    roleSelect.value = ROUTE_SEQUENCER_FACILITY_ROLE_START_END;
+    timeInput.value = "00:00";
+    latInput.value = "";
+    lonInput.value = "";
+    listSelect.value = "";
+    syncTimeInputForRole();
+  };
+
+  const renderFacilityList = (selectedId = "") => {
+    const facilities = getRouteSequencerFacilities()
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base", numeric: true }));
+    listSelect.innerHTML = "";
+    if (!facilities.length) {
+      listSelect.innerHTML = '<option value="">No facilities saved yet</option>';
+      loadSelectedBtn.disabled = true;
+      removeBtn.disabled = true;
+      return;
+    }
+    facilities.forEach(item => {
+      const option = document.createElement("option");
+      option.value = String(item.id);
+      const roleLabel = getRouteSequencerFacilityRoleLabel(item.role);
+      const isDump = normalizeRouteSequencerFacilityRole(item.role) === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP;
+      const timeLabel = isDump ? ` | Dump ${formatRouteSequencerMinutesClock(item.facilityMinutes)}` : "";
+      option.textContent = `${item.name} | ${roleLabel}${timeLabel} | ${Number(item.lat).toFixed(5)}, ${Number(item.lon).toFixed(5)}`;
+      listSelect.appendChild(option);
+    });
+    if (selectedId && [...listSelect.options].some(opt => opt.value === selectedId)) {
+      listSelect.value = selectedId;
+    } else if (listSelect.options.length) {
+      listSelect.value = listSelect.options[0].value;
+    }
+    loadSelectedBtn.disabled = false;
+    removeBtn.disabled = false;
+  };
+
+  const loadSelectedFacilityIntoForm = () => {
+    const selectedId = String(listSelect.value || "");
+    if (!selectedId) {
+      setStatus("Choose a facility to load.", "error");
+      return;
+    }
+    const facility = getRouteSequencerFacilities().find(item => String(item.id) === selectedId);
+    if (!facility) {
+      setStatus("Selected facility was not found.", "error");
+      return;
+    }
+    nameInput.value = String(facility.name || "");
+    roleSelect.value = normalizeRouteSequencerFacilityRole(facility.role);
+    timeInput.value = formatRouteSequencerMinutesClock(facility.facilityMinutes);
+    syncTimeInputForRole();
+    latInput.value = String(Number(facility.lat).toFixed(6));
+    lonInput.value = String(Number(facility.lon).toFixed(6));
+    setStatus(`Loaded facility "${facility.name}".`);
+  };
+
+  const saveFacility = () => {
+    const name = normalizeRouteSequencerName(nameInput.value, "Facility");
+    const role = normalizeRouteSequencerFacilityRole(roleSelect.value);
+    const facilityMinutes = role === ROUTE_SEQUENCER_FACILITY_ROLE_DUMP
+      ? parseRouteSequencerMinutesValue(timeInput.value, 0)
+      : 0;
+    const lat = Number(latInput.value);
+    const lon = Number(lonInput.value);
+    const selectedId = String(listSelect.value || "");
+
+    if (!name || name === "Facility") {
+      setStatus("Enter a facility name.", "error");
+      return;
+    }
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      setStatus("Enter valid latitude and longitude.", "error");
+      return;
+    }
+    if (!isTexasFacilityLatLng(lat, lon)) {
+      setStatus("Facility location must be inside Texas bounds.", "error");
+      return;
+    }
+
+    const facilities = getRouteSequencerFacilities();
+    const existingIndex = facilities.findIndex(item => String(item.id) === selectedId);
+    const baseId = existingIndex >= 0
+      ? String(facilities[existingIndex].id)
+      : `facility_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const updatedFacility = normalizeRouteSequencerFacilityEntry({
+      id: baseId,
+      name,
+      role,
+      facilityMinutes,
+      lat,
+      lon
+    }, "Facility");
+    if (!updatedFacility) {
+      setStatus("Unable to save facility. Check name and coordinates.", "error");
+      return;
+    }
+
+    if (existingIndex >= 0) {
+      facilities[existingIndex] = updatedFacility;
+    } else {
+      facilities.push(updatedFacility);
+    }
+    setRouteSequencerFacilities(facilities);
+    renderFacilityList(String(updatedFacility.id));
+    refreshSequencerFacilityUi();
+    setStatus(
+      existingIndex >= 0
+        ? `Updated facility "${updatedFacility.name}".`
+        : `Added facility "${updatedFacility.name}".`,
+      "success"
+    );
+  };
+
+  const removeSelectedFacility = () => {
+    const selectedId = String(listSelect.value || "");
+    if (!selectedId) {
+      setStatus("Choose a facility to remove.", "error");
+      return;
+    }
+    const facilities = getRouteSequencerFacilities();
+    const target = facilities.find(item => String(item.id) === selectedId);
+    if (!target) {
+      setStatus("Selected facility was not found.", "error");
+      return;
+    }
+    const next = facilities.filter(item => String(item.id) !== selectedId);
+    setRouteSequencerFacilities(next);
+    renderFacilityList("");
+    refreshSequencerFacilityUi();
+    clearForm();
+    setStatus(`Removed facility "${target.name}".`, "success");
+  };
+
+  const useMapCenter = () => {
+    const center = map?.getCenter?.();
+    if (!center) {
+      setStatus("Map center is unavailable.", "error");
+      return;
+    }
+    latInput.value = String(Number(center.lat).toFixed(6));
+    lonInput.value = String(Number(center.lng).toFixed(6));
+    setStatus("Loaded coordinates from map center.");
+  };
+
+  const openModal = () => {
+    renderFacilityList("");
+    clearForm();
+    setStatus("Manage reusable facilities using Texas latitude/longitude.");
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  openBtn.addEventListener("click", openModal);
+  if (openBtnMobile) openBtnMobile.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+  roleSelect.addEventListener("change", () => {
+    syncTimeInputForRole();
+  });
+  mapCenterBtn.addEventListener("click", useMapCenter);
+  saveBtn.addEventListener("click", () => {
+    try {
+      saveFacility();
+    } catch (error) {
+      console.error("Failed to save facility:", error);
+      setStatus(`Unable to save facility: ${error?.message || error}`, "error");
+    }
+  });
+  clearBtn.addEventListener("click", () => {
+    clearForm();
+    setStatus("Form cleared.");
+  });
+  loadSelectedBtn.addEventListener("click", loadSelectedFacilityIntoForm);
+  removeBtn.addEventListener("click", removeSelectedFacility);
+  listSelect.addEventListener("dblclick", loadSelectedFacilityIntoForm);
+  window.addEventListener("keydown", event => {
+    if (modal.style.display !== "flex") return;
+    if (event.key === "Escape") closeModal();
+  });
+}
+
+function initRouteSequencerControls() {
+  const openBtn = document.getElementById("routeSequencerBtn");
+  const openBtnMobile = document.getElementById("routeSequencerBtnMobile");
+  const modal = document.getElementById("routeSequencerModal");
+  const closeBtn = document.getElementById("routeSequencerCloseBtn");
+  const evaluateBtn = document.getElementById("routeSequencerEvaluateBtn");
+  const runBtn = document.getElementById("routeSequencerRunBtn");
+  const demandFieldSelect = document.getElementById("routeSequencerDemandField");
+  const serviceFieldSelect = document.getElementById("routeSequencerServiceTimeField");
+  const sequenceOutputSelect = document.getElementById("routeSequencerSequenceOutputField");
+  const tripOutputSelect = document.getElementById("routeSequencerTripOutputField");
+  const cumulativeOutputSelect = document.getElementById("routeSequencerCumulativeOutputField");
+  const driveOutputSelect = document.getElementById("routeSequencerDriveOutputField");
+  const serviceOutputSelect = document.getElementById("routeSequencerServiceOutputField");
+  const totalOutputSelect = document.getElementById("routeSequencerTotalOutputField");
+  const dumpVisitsOutputSelect = document.getElementById("routeSequencerDumpVisitsOutputField");
+  const scopeListSelect = document.getElementById("routeSequencerScopeList");
+  const scopeAllBtn = document.getElementById("routeSequencerScopeAllBtn");
+  const scopeNoneBtn = document.getElementById("routeSequencerScopeNoneBtn");
+  const scopeVisibleBtn = document.getElementById("routeSequencerScopeVisibleBtn");
+  const formatHintNode = document.getElementById("routeSequencerFormatHint");
+  const capacityInput = document.getElementById("routeSequencerCapacityInput");
+  const defaultSpeedInput = document.getElementById("routeSequencerDefaultSpeedInput");
+  const sequenceIncrementInput = document.getElementById("routeSequencerSequenceIncrementInput");
+  const speedClassFieldInput = document.getElementById("routeSequencerSpeedClassField");
+  const dumpSourceSelect = document.getElementById("routeSequencerDumpSource");
+  const startDepotSelect = document.getElementById("routeSequencerStartDepotSelect");
+  const endDepotSelect = document.getElementById("routeSequencerEndDepotSelect");
+  const timeAtStartInput = document.getElementById("routeSequencerTimeAtStartInput");
+  const timeAtEndInput = document.getElementById("routeSequencerTimeAtEndInput");
+  const breaksInput = document.getElementById("routeSequencerBreaksInput");
+  const dumpBeforeEndToggle = document.getElementById("routeSequencerDumpBeforeEnd");
+  const depotNameInput = document.getElementById("routeSequencerDepotNameInput");
+  const addDepotBtn = document.getElementById("routeSequencerAddDepotBtn");
+  const removeDepotBtn = document.getElementById("routeSequencerRemoveDepotBtn");
+  const dumpNameInput = document.getElementById("routeSequencerDumpNameInput");
+  const customDumpSelect = document.getElementById("routeSequencerCustomDumpSelect");
+  const addDumpBtn = document.getElementById("routeSequencerAddDumpBtn");
+  const removeDumpBtn = document.getElementById("routeSequencerRemoveDumpBtn");
+  const statusNode = document.getElementById("routeSequencerStatus");
+  const resultsNode = document.getElementById("routeSequencerResults");
+  const drivingSpeedCatInputs = {
+    1: document.getElementById("routeSequencerDrivingSpeedCat1"),
+    2: document.getElementById("routeSequencerDrivingSpeedCat2"),
+    3: document.getElementById("routeSequencerDrivingSpeedCat3"),
+    4: document.getElementById("routeSequencerDrivingSpeedCat4"),
+    5: document.getElementById("routeSequencerDrivingSpeedCat5"),
+    6: document.getElementById("routeSequencerDrivingSpeedCat6"),
+    7: document.getElementById("routeSequencerDrivingSpeedCat7"),
+    8: document.getElementById("routeSequencerDrivingSpeedCat8")
+  };
+  const serviceSpeedCatInputs = {
+    1: document.getElementById("routeSequencerServiceSpeedCat1"),
+    2: document.getElementById("routeSequencerServiceSpeedCat2"),
+    3: document.getElementById("routeSequencerServiceSpeedCat3"),
+    4: document.getElementById("routeSequencerServiceSpeedCat4"),
+    5: document.getElementById("routeSequencerServiceSpeedCat5"),
+    6: document.getElementById("routeSequencerServiceSpeedCat6"),
+    7: document.getElementById("routeSequencerServiceSpeedCat7"),
+    8: document.getElementById("routeSequencerServiceSpeedCat8")
+  };
+  const outputFieldSelectMap = {
+    sequence: sequenceOutputSelect,
+    trip: tripOutputSelect,
+    cumulativeLoad: cumulativeOutputSelect,
+    driveMinutes: driveOutputSelect,
+    serviceMinutes: serviceOutputSelect,
+    totalMinutes: totalOutputSelect,
+    dumpVisits: dumpVisitsOutputSelect
+  };
+
+  if (
+    !openBtn || !modal || !closeBtn || !evaluateBtn || !runBtn || !demandFieldSelect || !serviceFieldSelect ||
+    !sequenceOutputSelect || !tripOutputSelect || !cumulativeOutputSelect || !driveOutputSelect ||
+    !serviceOutputSelect || !totalOutputSelect || !dumpVisitsOutputSelect || !formatHintNode ||
+    !scopeListSelect || !scopeAllBtn || !scopeNoneBtn || !scopeVisibleBtn ||
+    !capacityInput || !defaultSpeedInput || !sequenceIncrementInput || !speedClassFieldInput ||
+    !dumpSourceSelect || !startDepotSelect || !endDepotSelect ||
+    !timeAtStartInput || !timeAtEndInput || !breaksInput ||
+    !dumpBeforeEndToggle || !depotNameInput || !addDepotBtn || !removeDepotBtn ||
+    !dumpNameInput || !customDumpSelect || !addDumpBtn || !removeDumpBtn ||
+    !statusNode || !resultsNode ||
+    Object.values(drivingSpeedCatInputs).some(node => !node) ||
+    Object.values(serviceSpeedCatInputs).some(node => !node)
+  ) {
+    return;
+  }
+
+  if (openBtn.dataset.routeSequencerBound === "1") return;
+  openBtn.dataset.routeSequencerBound = "1";
+  loadRouteSequencerSettings();
+  let routeSequencerTaskRunning = false;
+
+  const setStatus = (message, kind = "") => {
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (kind === "error") statusNode.classList.add("error");
+    if (kind === "success") statusNode.classList.add("success");
+    if (routeSequencerTaskRunning && typeof window.showLoading === "function") {
+      window.showLoading(String(message || "Running solver..."));
+    }
+  };
+
+  const yieldRouteSequencerUi = async () => {
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  };
+
+  const setRouteSequencerLoading = (active, message = "") => {
+    const next = !!active;
+    routeSequencerTaskRunning = next;
+    evaluateBtn.disabled = next;
+    runBtn.disabled = next;
+    if (next) {
+      if (typeof window.showLoading === "function") {
+        window.showLoading(String(message || "Running solver..."));
+      }
+      return;
+    }
+    if (typeof window.hideLoading === "function") {
+      window.hideLoading();
+    }
+  };
+
+  const setActiveSequenceResultRow = row => {
+    resultsNode
+      .querySelectorAll(".route-sequencer-report-table tbody tr.route-sequencer-result-row-active")
+      .forEach(node => node.classList.remove("route-sequencer-result-row-active"));
+    if (row) row.classList.add("route-sequencer-result-row-active");
+  };
+
+  const focusSequencerFacilityFromResult = (lat, lon) => {
+    const latNum = Number(lat);
+    const lonNum = Number(lon);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum) || !map) return false;
+
+    let bestLayer = null;
+    let bestDistanceMiles = Infinity;
+    const considerLayerGroup = layerGroup => {
+      if (!layerGroup || typeof layerGroup.eachLayer !== "function") return;
+      layerGroup.eachLayer(layer => {
+        const ll = getLayerLatLng(layer);
+        if (!ll) return;
+        const distanceMiles = haversineMiles(latNum, lonNum, ll.lat, ll.lng);
+        if (!Number.isFinite(distanceMiles)) return;
+        if (!bestLayer || distanceMiles < bestDistanceMiles) {
+          bestLayer = layer;
+          bestDistanceMiles = distanceMiles;
+        }
+      });
+    };
+
+    considerLayerGroup(routeSequencerFacilitiesLayerGroup);
+    considerLayerGroup(texasLandfillsLayerGroup);
+
+    const fallbackLatLng = L.latLng(latNum, lonNum);
+    const targetZoom = Math.max(Number(map.getZoom()) || 0, 15);
+    const matchedThresholdMiles = 2;
+    if (bestLayer && Number.isFinite(bestDistanceMiles) && bestDistanceMiles <= matchedThresholdMiles) {
+      const markerLatLng = getLayerLatLng(bestLayer) || fallbackLatLng;
+      map.setView(markerLatLng, targetZoom, { animate: true });
+      bestLayer.openPopup?.();
+      try {
+        bestLayer.bringToFront?.();
+      } catch {
+        // Non-path layers may not support z-order operations.
+      }
+      return true;
+    }
+
+    map.setView(fallbackLatLng, targetZoom, { animate: true });
+    return false;
+  };
+
+  const selectSequencerStopFromResult = rowId => {
+    const id = Number(rowId);
+    if (!Number.isFinite(id)) return false;
+    if (attributeTableMode !== "records") {
+      setAttributeTableMode("records");
+    }
+    if (typeof window.setAttributeSelectedRowIds === "function") {
+      window.setAttributeSelectedRowIds([id]);
+    }
+    if (typeof window.focusAttributeRowOnMap === "function") {
+      window.focusAttributeRowOnMap(id);
+    }
+    return true;
+  };
+
+  const parseSpeedCatMapFromInputs = (inputMap, defaultMap) => {
+    const map = {};
+    ROUTE_SEQUENCER_SPEED_CAT_IDS.forEach(id => {
+      const input = inputMap?.[id];
+      const fallback = Number(defaultMap?.[id]);
+      const value = clampRouteSequencerNumber(input?.value, 5, 85, fallback);
+      map[id] = value;
+      if (input) input.value = String(value);
+    });
+    return normalizeRouteSequencerSpeedCatMap(map, defaultMap);
+  };
+
+  const applySpeedCatMapToInputs = (inputMap, speedMap, defaultMap) => {
+    const normalized = normalizeRouteSequencerSpeedCatMap(speedMap, defaultMap);
+    ROUTE_SEQUENCER_SPEED_CAT_IDS.forEach(id => {
+      const input = inputMap?.[id];
+      if (!input) return;
+      input.value = String(normalized[id]);
+    });
+  };
+
+  const fillSelect = (selectNode, options, includeNoneLabel = "") => {
+    const select = selectNode;
+    if (!select) return;
+    const prev = String(select.value || "");
+    select.innerHTML = "";
+    if (includeNoneLabel) {
+      const noneOption = document.createElement("option");
+      noneOption.value = "";
+      noneOption.textContent = includeNoneLabel;
+      select.appendChild(noneOption);
+    }
+    (Array.isArray(options) ? options : []).forEach(item => {
+      const option = document.createElement("option");
+      option.value = String(item.value ?? "");
+      option.textContent = String(item.label ?? item.value ?? "");
+      select.appendChild(option);
+    });
+    if ([...select.options].some(option => option.value === prev)) {
+      select.value = prev;
+    }
+  };
+
+  const getAllRouteDayKeysForScope = () =>
+    Object.keys(routeDayGroups).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+
+  const buildRouteDayScopeLabel = routeDayKey => {
+    const [routeToken = "", dayTokenRaw = ""] = String(routeDayKey || "").split("|");
+    const dayToken = normalizeDayToken(dayTokenRaw) || String(dayTokenRaw || "").trim();
+    const dayLabel = dayName(Number(dayToken)) || dayToken || "No Day";
+    const group = routeDayGroups[routeDayKey];
+    const stopCount = Array.isArray(group?.layers) ? group.layers.length : 0;
+    return `Route ${routeToken || "Unassigned"} - ${dayLabel} (${stopCount.toLocaleString()})`;
+  };
+
+  const getSelectedRouteDayScopeKeysFromUi = () =>
+    [...scopeListSelect.options]
+      .filter(option => option.selected)
+      .map(option => String(option.value || ""))
+      .filter(key => Object.prototype.hasOwnProperty.call(routeDayGroups, key));
+
+  const setSelectedRouteDayScopeKeys = keys => {
+    const selected = new Set(
+      (Array.isArray(keys) ? keys : [])
+        .map(value => String(value || ""))
+        .filter(key => Object.prototype.hasOwnProperty.call(routeDayGroups, key))
+    );
+    [...scopeListSelect.options].forEach(option => {
+      option.selected = selected.has(String(option.value || ""));
+    });
+  };
+
+  const populateRouteDayScopeSelector = settings => {
+    const keys = getAllRouteDayKeysForScope();
+    const selectedFromSettings = Array.isArray(settings?.routeDayScopeKeys)
+      ? settings.routeDayScopeKeys.map(value => String(value || ""))
+      : [];
+    const selectedSet = new Set(selectedFromSettings.filter(key => keys.includes(key)));
+    if (!selectedSet.size) keys.forEach(key => selectedSet.add(key));
+
+    scopeListSelect.innerHTML = "";
+    if (!keys.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No Route+Day layers loaded.";
+      option.disabled = true;
+      option.selected = true;
+      scopeListSelect.appendChild(option);
+      return;
+    }
+
+    keys.forEach(key => {
+      const option = document.createElement("option");
+      option.value = key;
+      option.textContent = buildRouteDayScopeLabel(key);
+      option.selected = selectedSet.has(key);
+      scopeListSelect.appendChild(option);
+    });
+  };
+
+  const getRouteDayScopeKeysForRun = () => {
+    const allKeys = getAllRouteDayKeysForScope();
+    if (!allKeys.length) return [];
+    const selectedKeys = getSelectedRouteDayScopeKeysFromUi();
+    return selectedKeys.filter(key => allKeys.includes(key));
+  };
+
+  const readOutputFieldMappingFromUi = () => normalizeRouteSequencerOutputFields({
+    sequence: sequenceOutputSelect.value,
+    trip: tripOutputSelect.value,
+    cumulativeLoad: cumulativeOutputSelect.value,
+    driveMinutes: driveOutputSelect.value,
+    serviceMinutes: serviceOutputSelect.value,
+    totalMinutes: totalOutputSelect.value,
+    dumpVisits: dumpVisitsOutputSelect.value
+  });
+
+  const validateOutputFieldMapping = outputFields => {
+    const mapped = normalizeRouteSequencerOutputFields(outputFields);
+    const values = Object.values(mapped).map(value => String(value || "").trim());
+    if (values.some(value => !value)) {
+      return { ok: false, message: "Choose all output fields in Output Field Mapping." };
+    }
+    const seen = new Set();
+    for (const value of values) {
+      const token = value.toLowerCase();
+      if (seen.has(token)) {
+        return { ok: false, message: `Each output metric must use a different field. "${value}" is duplicated.` };
+      }
+      seen.add(token);
+    }
+    return { ok: true, message: "" };
+  };
+
+  const updateFormatHint = (outputFieldsOverride = null) => {
+    const outputFields = outputFieldsOverride || readOutputFieldMappingFromUi();
+    formatHintNode.textContent = buildRouteSequencerFormatHintText(
+      String(demandFieldSelect.value || ""),
+      String(serviceFieldSelect.value || ""),
+      outputFields,
+      sequenceIncrementInput.value
+    );
+  };
+
+  const populateOutputFieldSelectors = settings => {
+    const fieldNames = getRouteSequencerFieldNames();
+    const fieldSet = new Set(fieldNames);
+    Object.values(ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS).forEach(name => fieldSet.add(name));
+    const outputOptions = [...fieldSet]
+      .filter(name => {
+        const text = String(name || "").trim();
+        if (!text) return false;
+        return !isProtectedNewPlanningFieldName(text);
+      })
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }))
+      .map(name => ({ value: name, label: name }));
+
+    const mapped = normalizeRouteSequencerOutputFields(settings?.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+    Object.keys(outputFieldSelectMap).forEach(key => {
+      const select = outputFieldSelectMap[key];
+      if (!select) return;
+      fillSelect(select, outputOptions);
+      const selectedValue = String(mapped[key] || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS[key] || "").trim();
+      if ([...select.options].some(option => option.value === selectedValue)) {
+        select.value = selectedValue;
+      } else if ([...select.options].some(option => option.value === ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS[key])) {
+        select.value = ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS[key];
+      }
+    });
+    updateFormatHint(mapped);
+  };
+
+  const applySettingsToUi = () => {
+    const settings = loadRouteSequencerSettings();
+    capacityInput.value = String(
+      clampRouteSequencerNumber(
+        settings.capacityTons,
+        0.1,
+        1000,
+        ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS
+      )
+    );
+    defaultSpeedInput.value = String(
+      clampRouteSequencerNumber(
+        settings.fallbackSpeedMph,
+        5,
+        85,
+        ROUTE_SEQUENCER_DEFAULT_SPEED_MPH
+      )
+    );
+    sequenceIncrementInput.value = String(
+      normalizeRouteSequencerSequenceIncrement(settings.sequenceIncrement, 1)
+    );
+    dumpSourceSelect.value = ["both", "landfills", "custom", "none"].includes(String(settings.dumpSource))
+      ? String(settings.dumpSource)
+      : "both";
+    dumpBeforeEndToggle.checked = settings.forceDumpBeforeEnd !== false;
+    timeAtStartInput.value = formatRouteSequencerMinutesClock(
+      parseRouteSequencerMinutesValue(settings.timeAtStartMinutes, 0)
+    );
+    timeAtEndInput.value = formatRouteSequencerMinutesClock(
+      parseRouteSequencerMinutesValue(settings.timeAtEndMinutes, 0)
+    );
+    breaksInput.value = formatRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    speedClassFieldInput.value = normalizeRouteSequencerSpeedClassField(
+      settings.speedClassField || ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD
+    );
+    applySpeedCatMapToInputs(
+      drivingSpeedCatInputs,
+      settings.drivingSpeedCatMap || settings.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+      ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+    );
+    applySpeedCatMapToInputs(
+      serviceSpeedCatInputs,
+      settings.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+      ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+    );
+    return settings;
+  };
+
+  const populateFieldSelectors = settings => {
+    const fieldNames = getRouteSequencerFieldNames();
+    const demandOptions = fieldNames.map(name => ({ value: name, label: name }));
+    const serviceOptions = fieldNames.map(name => ({ value: name, label: name }));
+    fillSelect(demandFieldSelect, demandOptions, "Choose demand field...");
+    fillSelect(serviceFieldSelect, serviceOptions, "None (0 minutes)");
+    const preferredServiceField = fieldNames.find(name => normalizeRouteSequencerFieldToken(name) === "servicetime");
+
+    const guessedDemand = guessRouteSequencerFieldByAliases(fieldNames, [
+      "demand", "demand_a", "tons", "tonnage", "load", "totaldemand", "volume"
+    ]);
+    const guessedService = guessRouteSequencerFieldByAliases(fieldNames, [
+      "duration_a",
+      "durationa",
+      "duration",
+      "servicetime",
+      "service_time",
+      "servmin",
+      "servicemin",
+      "minutes",
+      "minutesperstop",
+      "timeonsite"
+    ]);
+
+    const demandValue = String(settings?.demandField || "");
+    if (demandValue && [...demandFieldSelect.options].some(option => option.value === demandValue)) {
+      demandFieldSelect.value = demandValue;
+    } else if (guessedDemand) {
+      demandFieldSelect.value = guessedDemand;
+    }
+
+    const serviceValue = String(settings?.serviceField || "");
+    if (serviceValue && [...serviceFieldSelect.options].some(option => option.value === serviceValue)) {
+      serviceFieldSelect.value = serviceValue;
+    } else if (preferredServiceField) {
+      serviceFieldSelect.value = preferredServiceField;
+    } else if (guessedService) {
+      serviceFieldSelect.value = guessedService;
+    } else {
+      serviceFieldSelect.value = "";
+    }
+  };
+
+  const populateDepotSelectors = settings => {
+    const depots = getRouteSequencerDepots();
+    const options = depots.map(item => ({
+      value: String(item.id),
+      label: `${item.name} (${Number(item.lat).toFixed(5)}, ${Number(item.lon).toFixed(5)})`
+    }));
+    fillSelect(startDepotSelect, options, "None (use first stop)");
+    fillSelect(endDepotSelect, options, "None (use last stop)");
+    if (settings?.startDepotId && [...startDepotSelect.options].some(option => option.value === String(settings.startDepotId))) {
+      startDepotSelect.value = String(settings.startDepotId);
+    }
+    if (settings?.endDepotId && [...endDepotSelect.options].some(option => option.value === String(settings.endDepotId))) {
+      endDepotSelect.value = String(settings.endDepotId);
+    }
+  };
+
+  const populateCustomDumpSelector = settings => {
+    const customDumps = getRouteSequencerCustomDumps();
+    const options = customDumps.map(item => ({
+      value: String(item.id),
+      label: `${item.name} (${Number(item.lat).toFixed(5)}, ${Number(item.lon).toFixed(5)}) - time ${formatRouteSequencerMinutesClock(item.facilityMinutes)}`
+    }));
+    fillSelect(customDumpSelect, options, "Select custom dump...");
+    if (settings?.selectedDumpId && [...customDumpSelect.options].some(option => option.value === String(settings.selectedDumpId))) {
+      customDumpSelect.value = String(settings.selectedDumpId);
+    }
+  };
+
+  const renderModalUi = () => {
+    const settings = applySettingsToUi();
+    populateFieldSelectors(settings);
+    populateOutputFieldSelectors(settings);
+    populateRouteDayScopeSelector(settings);
+    populateDepotSelectors(settings);
+    populateCustomDumpSelector(settings);
+    renderRouteSequencerResultsList(resultsNode, []);
+    setStatus("Ready.");
+  };
+
+  window.__refreshRouteSequencerFacilitiesUi = () => {
+    if (modal.style.display !== "flex") return;
+    const settings = loadRouteSequencerSettings();
+    populateDepotSelectors(settings);
+    populateCustomDumpSelector(settings);
+  };
+
+  const saveCurrentUiSettings = () => {
+    const outputFields = readOutputFieldMappingFromUi();
+    const sequenceIncrement = normalizeRouteSequencerSequenceIncrement(sequenceIncrementInput.value, 1);
+    const timeAtStartMinutes = parseRouteSequencerMinutesValue(timeAtStartInput.value, 0);
+    const timeAtEndMinutes = parseRouteSequencerMinutesValue(timeAtEndInput.value, 0);
+    const breakMinutesList = parseRouteSequencerBreakMinutesList(breaksInput.value);
+    const speedClassField = normalizeRouteSequencerSpeedClassField(speedClassFieldInput.value);
+    speedClassFieldInput.value = speedClassField;
+    const drivingSpeedCatMap = parseSpeedCatMapFromInputs(
+      drivingSpeedCatInputs,
+      ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+    );
+    const serviceSpeedCatMap = parseSpeedCatMapFromInputs(
+      serviceSpeedCatInputs,
+      ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+    );
+    sequenceIncrementInput.value = String(sequenceIncrement);
+    timeAtStartInput.value = formatRouteSequencerMinutesClock(timeAtStartMinutes);
+    timeAtEndInput.value = formatRouteSequencerMinutesClock(timeAtEndMinutes);
+    breaksInput.value = formatRouteSequencerBreakMinutesList(breakMinutesList);
+    const payload = {
+      demandField: String(demandFieldSelect.value || ""),
+      serviceField: String(serviceFieldSelect.value || ""),
+      capacityTons: clampRouteSequencerNumber(capacityInput.value, 0.1, 1000, ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS),
+      fallbackSpeedMph: clampRouteSequencerNumber(defaultSpeedInput.value, 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH),
+      sequenceIncrement,
+      routeDayScopeKeys: getSelectedRouteDayScopeKeysFromUi(),
+      dumpSource: ["both", "landfills", "custom", "none"].includes(String(dumpSourceSelect.value))
+        ? String(dumpSourceSelect.value)
+        : "both",
+      startDepotId: String(startDepotSelect.value || ""),
+      endDepotId: String(endDepotSelect.value || ""),
+      timeAtStartMinutes,
+      timeAtEndMinutes,
+      breakMinutesList,
+      forceDumpBeforeEnd: !!dumpBeforeEndToggle.checked,
+      speedClassField,
+      drivingSpeedCatMap,
+      serviceSpeedCatMap,
+      classSpeedMap: drivingSpeedCatMap,
+      selectedDumpId: String(customDumpSelect.value || ""),
+      outputFields
+    };
+    saveRouteSequencerSettings(payload);
+    updateFormatHint(outputFields);
+    return payload;
+  };
+
+  const openModal = () => {
+    renderModalUi();
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  const addDepotFromCenter = () => {
+    const center = map?.getCenter?.();
+    if (!center) {
+      setStatus("Map center is unavailable.", "error");
+      return;
+    }
+    const name = normalizeRouteSequencerName(depotNameInput.value, "Depot");
+    const depots = getRouteSequencerDepots();
+    depots.push({
+      id: `depot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      lat: Number(center.lat),
+      lon: Number(center.lng)
+    });
+    setRouteSequencerDepots(depots);
+    depotNameInput.value = "";
+    const settings = saveCurrentUiSettings();
+    populateDepotSelectors(settings);
+    setStatus(`Depot "${name}" added from map center.`, "success");
+  };
+
+  const removeSelectedDepot = () => {
+    const selectedId = String(startDepotSelect.value || endDepotSelect.value || "");
+    if (!selectedId) {
+      setStatus("Choose a start or end depot to remove.", "error");
+      return;
+    }
+    const depots = getRouteSequencerDepots();
+    const target = depots.find(item => String(item.id) === selectedId);
+    if (!target) {
+      setStatus("Selected depot was not found.", "error");
+      return;
+    }
+    const next = depots.filter(item => String(item.id) !== selectedId);
+    setRouteSequencerDepots(next);
+    startDepotSelect.value = "";
+    endDepotSelect.value = "";
+    const settings = saveCurrentUiSettings();
+    populateDepotSelectors(settings);
+    setStatus(`Removed depot "${target.name}".`, "success");
+  };
+
+  const addDumpFromCenter = () => {
+    const center = map?.getCenter?.();
+    if (!center) {
+      setStatus("Map center is unavailable.", "error");
+      return;
+    }
+    const name = normalizeRouteSequencerName(dumpNameInput.value, "Custom Dump");
+    const dumps = getRouteSequencerCustomDumps();
+    const id = `dump_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    dumps.push({
+      id,
+      name,
+      lat: Number(center.lat),
+      lon: Number(center.lng)
+    });
+    setRouteSequencerCustomDumps(dumps);
+    dumpNameInput.value = "";
+    const settings = saveCurrentUiSettings();
+    settings.selectedDumpId = id;
+    populateCustomDumpSelector(settings);
+    customDumpSelect.value = id;
+    setStatus(`Custom dump "${name}" added from map center.`, "success");
+  };
+
+  const removeSelectedDump = () => {
+    const selectedId = String(customDumpSelect.value || "");
+    if (!selectedId) {
+      setStatus("Select a custom dump to remove.", "error");
+      return;
+    }
+    const dumps = getRouteSequencerCustomDumps();
+    const target = dumps.find(item => String(item.id) === selectedId);
+    if (!target) {
+      setStatus("Selected custom dump was not found.", "error");
+      return;
+    }
+    const next = dumps.filter(item => String(item.id) !== selectedId);
+    setRouteSequencerCustomDumps(next);
+    customDumpSelect.value = "";
+    const settings = saveCurrentUiSettings();
+    settings.selectedDumpId = "";
+    populateCustomDumpSelector(settings);
+    setStatus(`Removed custom dump "${target.name}".`, "success");
+  };
+
+  const runEvaluateSequence = async () => {
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+    if (!rows.length || !Object.keys(routeDayGroups).length) {
+      setStatus("Load a route file before evaluating sequence.", "error");
+      return;
+    }
+
+    const settings = saveCurrentUiSettings();
+    const capacityTons = clampRouteSequencerNumber(settings.capacityTons, 0.1, 1000, ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS);
+    const fallbackSpeedMph = clampRouteSequencerNumber(settings.fallbackSpeedMph, 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH);
+    const speedClassField = normalizeRouteSequencerSpeedClassField(
+      settings.speedClassField || ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD
+    );
+    const drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+      settings.drivingSpeedCatMap || settings.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+      ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+    );
+    const serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+      settings.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+      ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+    );
+    const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+      settings.fallbackServiceSpeedMph,
+      5,
+      85,
+      Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+    );
+    const demandField = String(settings.demandField || "");
+    const serviceField = String(settings.serviceField || "");
+    const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    const dumpSource = String(settings.dumpSource || "both");
+    const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+    const sequenceField = String(outputFields.sequence || "").trim();
+
+    if (!sequenceField) {
+      setStatus("Choose a Sequence Output field before Evaluate Sequence.", "error");
+      return;
+    }
+
+    setStatus(`Building travel graph from loaded street segments (speed class field: ${speedClassField})...`);
+    await yieldRouteSequencerUi();
+    const graph = streetAttributeById.size
+      ? buildRouteSequencerStreetGraph({
+        speedClassField,
+        drivingSpeedCatMap,
+        serviceSpeedCatMap,
+        fallbackServiceSpeedMph
+      }, fallbackSpeedMph)
+      : null;
+    const graphSummary = graph
+      ? `${graph.nodeCount.toLocaleString()} nodes / ${graph.edgeCount.toLocaleString()} edges`
+      : "No street graph (fallback direct travel)";
+    setStatus(`Travel graph ready: ${graphSummary}. Evaluating existing sequence values...`);
+
+    let landfillPoints = [];
+    if (dumpSource === "both" || dumpSource === "landfills") {
+      try {
+        await ensureTexasLandfillsLoaded();
+      } catch (error) {
+        console.warn("Unable to load Texas landfills for sequence evaluation:", error);
+      }
+      landfillPoints = collectRouteSequencerLandfillDumpPoints(graph);
+    }
+    const customDumpPoints = (dumpSource === "both" || dumpSource === "custom")
+      ? collectRouteSequencerCustomDumpPoints(graph)
+      : [];
+    const dumpPoints = dumpSource === "none"
+      ? []
+      : [...customDumpPoints, ...landfillPoints];
+
+    const startDepot = getRouteSequencerDepotPointById(settings.startDepotId, graph);
+    const endDepot = getRouteSequencerDepotPointById(settings.endDepotId, graph);
+
+    const plans = [];
+    const routeDayKeys = getRouteDayScopeKeysForRun();
+    if (!routeDayKeys.length) {
+      setStatus("Select one or more Route+Day units in Route + Day Scope before Evaluate Sequence.", "error");
+      return;
+    }
+    let skippedRouteDayCount = 0;
+    let missingSequenceStops = 0;
+    let groupsWithoutAnySequence = 0;
+
+    for (let i = 0; i < routeDayKeys.length; i += 1) {
+      const key = routeDayKeys[i];
+      const group = routeDayGroups[key];
+      const built = buildRouteSequencerStopPointsFromExistingSequence(
+        key,
+        group,
+        demandField,
+        serviceField,
+        sequenceField,
+        graph
+      );
+      const stops = Array.isArray(built?.stops) ? built.stops : [];
+      if (!stops.length) {
+        skippedRouteDayCount += 1;
+        continue;
+      }
+
+      if (!(Number(built.validSequenceCount) > 0)) {
+        groupsWithoutAnySequence += 1;
+        continue;
+      }
+
+      missingSequenceStops += Number(built.missingSequenceCount) || 0;
+      const plan = solveRouteDaySequenceEvaluationPlan(key, stops, {
+        graph,
+        dumpPoints,
+        capacityTons,
+        fallbackSpeedMph,
+        fallbackServiceSpeedMph,
+        startDepot,
+        endDepot,
+        timeAtStartMinutes: settings.timeAtStartMinutes,
+        timeAtEndMinutes: settings.timeAtEndMinutes,
+        breakMinutesList,
+        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd
+      });
+      if (plan) plans.push(plan);
+
+      setStatus(`Evaluating Route+Day unit ${i + 1} of ${routeDayKeys.length} from "${sequenceField}"...`);
+      if (i % 4 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    if (!plans.length) {
+      setStatus(
+        `Evaluate Sequence could not run. No Route+Day group had usable numeric sequence values in "${sequenceField}".`,
+        "error"
+      );
+      renderRouteSequencerResultsList(resultsNode, []);
+      clearSequenceLayerData();
+      return;
+    }
+
+    const updatedRows = applyRouteSequencerPlansToRows(plans, outputFields, { sequenceIncrement: 1 });
+    rebuildSequenceLayerFromPlans(plans);
+    syncSequenceLayerVisibilityOnMap();
+    refreshAllRecordPopupContent();
+    applyAttributeSelectionStyles();
+    renderAttributeTable();
+    refreshAttributeStatus();
+
+    const totalStops = plans.reduce((sum, plan) => sum + (Number(plan.stopVisits?.length) || 0), 0);
+    const totalDumpVisits = plans.reduce((sum, plan) => sum + (Number(plan.dumpVisits) || 0), 0);
+    const totalDriveMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalDriveMinutes) || 0), 0);
+    const totalDriveMiles = plans.reduce((sum, plan) => sum + (Number(plan.totalDriveMiles) || 0), 0);
+    const totalServiceMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalServiceMinutes) || 0), 0);
+    const totalFacilityMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalFacilityMinutes) || 0), 0);
+    const totalBreakMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalBreakMinutes) || 0), 0);
+    const totalRouteMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalMinutes) || 0), 0);
+
+    renderRouteSequencerResultsList(resultsNode, plans);
+    const skipNote = skippedRouteDayCount
+      ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
+      : "";
+    const noSeqNote = groupsWithoutAnySequence
+      ? ` ${groupsWithoutAnySequence.toLocaleString()} route/day groups had no valid sequence values in "${sequenceField}".`
+      : "";
+    const partialNote = missingSequenceStops
+      ? ` ${missingSequenceStops.toLocaleString()} stop(s) were missing sequence values and were placed after sequenced stops.`
+      : "";
+    setStatus(
+      `Evaluate Sequence complete from "${sequenceField}": ${plans.length.toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups, ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min.${skipNote}${noSeqNote}${partialNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      "success"
+    );
+  };
+
+  const runSequencer = async () => {
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+    if (!rows.length || !Object.keys(routeDayGroups).length) {
+      setStatus("Load a route file before running Auto Sequence.", "error");
+      return;
+    }
+
+    const settings = saveCurrentUiSettings();
+    const capacityTons = clampRouteSequencerNumber(settings.capacityTons, 0.1, 1000, ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS);
+    const fallbackSpeedMph = clampRouteSequencerNumber(settings.fallbackSpeedMph, 5, 85, ROUTE_SEQUENCER_DEFAULT_SPEED_MPH);
+    const sequenceIncrement = normalizeRouteSequencerSequenceIncrement(settings.sequenceIncrement, 1);
+    const speedClassField = normalizeRouteSequencerSpeedClassField(
+      settings.speedClassField || ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD
+    );
+    const drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+      settings.drivingSpeedCatMap || settings.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+      ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+    );
+    const serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+      settings.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+      ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+    );
+    const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+      settings.fallbackServiceSpeedMph,
+      5,
+      85,
+      Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+    );
+    const demandField = String(settings.demandField || "");
+    const serviceField = String(settings.serviceField || "");
+    const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    const dumpSource = String(settings.dumpSource || "both");
+    const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+
+    if (!demandField) {
+      setStatus("Choose a Demand field (Tons) before running Auto Sequence.", "error");
+      return;
+    }
+    const outputCheck = validateOutputFieldMapping(outputFields);
+    if (!outputCheck.ok) {
+      setStatus(outputCheck.message, "error");
+      return;
+    }
+
+    setStatus(`Building travel graph from loaded street segments (speed class field: ${speedClassField})...`);
+    await yieldRouteSequencerUi();
+    const graph = streetAttributeById.size
+      ? buildRouteSequencerStreetGraph({
+        speedClassField,
+        drivingSpeedCatMap,
+        serviceSpeedCatMap,
+        fallbackServiceSpeedMph
+      }, fallbackSpeedMph)
+      : null;
+    const graphSummary = graph
+      ? `${graph.nodeCount.toLocaleString()} nodes / ${graph.edgeCount.toLocaleString()} edges`
+      : "No street graph (fallback direct travel)";
+    setStatus(`Travel graph ready: ${graphSummary}. Gathering facilities...`);
+
+    let landfillPoints = [];
+    if (dumpSource === "both" || dumpSource === "landfills") {
+      try {
+        await ensureTexasLandfillsLoaded();
+      } catch (error) {
+        console.warn("Unable to load Texas landfills for sequencer:", error);
+      }
+      landfillPoints = collectRouteSequencerLandfillDumpPoints(graph);
+    }
+    const customDumpPoints = (dumpSource === "both" || dumpSource === "custom")
+      ? collectRouteSequencerCustomDumpPoints(graph)
+      : [];
+    const dumpPoints = dumpSource === "none"
+      ? []
+      : [...customDumpPoints, ...landfillPoints];
+
+    const startDepot = getRouteSequencerDepotPointById(settings.startDepotId, graph);
+    const endDepot = getRouteSequencerDepotPointById(settings.endDepotId, graph);
+
+    const plans = [];
+    const routeDayKeys = getRouteDayScopeKeysForRun();
+    if (!routeDayKeys.length) {
+      setStatus("Select one or more Route+Day units in Route + Day Scope before Auto Sequence.", "error");
+      return;
+    }
+    let skippedRouteDayCount = 0;
+
+    for (let i = 0; i < routeDayKeys.length; i += 1) {
+      const key = routeDayKeys[i];
+      const group = routeDayGroups[key];
+      const stops = buildRouteSequencerStopPoints(key, group, demandField, serviceField, graph);
+      if (!stops.length) {
+        skippedRouteDayCount += 1;
+        continue;
+      }
+      const plan = solveRouteDaySequencingPlan(key, stops, {
+        graph,
+        dumpPoints,
+        startDepot,
+        endDepot,
+        timeAtStartMinutes: settings.timeAtStartMinutes,
+        timeAtEndMinutes: settings.timeAtEndMinutes,
+        breakMinutesList,
+        capacityTons,
+        fallbackSpeedMph,
+        fallbackServiceSpeedMph,
+        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd
+      });
+      if (plan) plans.push(plan);
+      setStatus(`Sequencing Route+Day unit ${i + 1} of ${routeDayKeys.length}...`);
+      if (i % 4 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    if (!plans.length) {
+      setStatus("No route/day stops were available to sequence.", "error");
+      renderRouteSequencerResultsList(resultsNode, []);
+      clearSequenceLayerData();
+      return;
+    }
+
+    const updatedRows = applyRouteSequencerPlansToRows(plans, outputFields, { sequenceIncrement });
+    rebuildSequenceLayerFromPlans(plans);
+    syncSequenceLayerVisibilityOnMap();
+    refreshAllRecordPopupContent();
+    applyAttributeSelectionStyles();
+    renderAttributeTable();
+    refreshAttributeStatus();
+
+    const totalStops = plans.reduce((sum, plan) => sum + (Number(plan.stopVisits?.length) || 0), 0);
+    const totalDumpVisits = plans.reduce((sum, plan) => sum + (Number(plan.dumpVisits) || 0), 0);
+    const totalDriveMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalDriveMinutes) || 0), 0);
+    const totalDriveMiles = plans.reduce((sum, plan) => sum + (Number(plan.totalDriveMiles) || 0), 0);
+    const totalServiceMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalServiceMinutes) || 0), 0);
+    const totalFacilityMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalFacilityMinutes) || 0), 0);
+    const totalBreakMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalBreakMinutes) || 0), 0);
+    const totalRouteMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalMinutes) || 0), 0);
+
+    renderRouteSequencerResultsList(resultsNode, plans);
+    const skipNote = skippedRouteDayCount
+      ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
+      : "";
+    setStatus(
+      `Auto Sequence complete: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      "success"
+    );
+  };
+
+  openBtn.addEventListener("click", openModal);
+  if (openBtnMobile) openBtnMobile.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+
+  addDepotBtn.addEventListener("click", addDepotFromCenter);
+  removeDepotBtn.addEventListener("click", removeSelectedDepot);
+  addDumpBtn.addEventListener("click", addDumpFromCenter);
+  removeDumpBtn.addEventListener("click", removeSelectedDump);
+  scopeAllBtn.addEventListener("click", () => {
+    setSelectedRouteDayScopeKeys(getAllRouteDayKeysForScope());
+    saveCurrentUiSettings();
+    const count = getRouteDayScopeKeysForRun().length;
+    setStatus(`Scope set to all Route+Day units (${count.toLocaleString()}).`);
+  });
+  scopeNoneBtn.addEventListener("click", () => {
+    setSelectedRouteDayScopeKeys([]);
+    saveCurrentUiSettings();
+    setStatus("Scope cleared. Select one or more Route+Day units before run.");
+  });
+  scopeVisibleBtn.addEventListener("click", () => {
+    const visibleKeys = getAllRouteDayKeysForScope().filter(key => isRouteDayLayerVisibleOnMap(key));
+    setSelectedRouteDayScopeKeys(visibleKeys);
+    saveCurrentUiSettings();
+    setStatus(
+      visibleKeys.length
+        ? `Scope set to visible Route+Day units (${visibleKeys.length.toLocaleString()}).`
+        : "No visible Route+Day units found."
+    );
+  });
+  scopeListSelect.addEventListener("change", () => {
+    saveCurrentUiSettings();
+    const count = getRouteDayScopeKeysForRun().length;
+    setStatus(
+      count
+        ? `Scope: ${count.toLocaleString()} Route+Day unit(s) selected.`
+        : "Scope cleared. Select one or more Route+Day units before run."
+    );
+  });
+
+  resultsNode.addEventListener("click", event => {
+    const clickableRow = event.target?.closest?.('tr[data-rs-clickable="1"]');
+    if (!clickableRow || !resultsNode.contains(clickableRow)) return;
+
+    const eventType = String(clickableRow.dataset.rsEventType || "");
+    if (!eventType) return;
+    setActiveSequenceResultRow(clickableRow);
+
+    if (eventType === "stop") {
+      const rowId = Number(clickableRow.dataset.rsRowId);
+      selectSequencerStopFromResult(rowId);
+      return;
+    }
+
+    if (eventType === "dump" || eventType === "startDepot" || eventType === "endDepot") {
+      const lat = Number(clickableRow.dataset.rsLat);
+      const lon = Number(clickableRow.dataset.rsLon);
+      focusSequencerFacilityFromResult(lat, lon);
+    }
+  });
+
+  [
+    demandFieldSelect,
+    serviceFieldSelect,
+    sequenceOutputSelect,
+    tripOutputSelect,
+    cumulativeOutputSelect,
+    driveOutputSelect,
+    serviceOutputSelect,
+    totalOutputSelect,
+    dumpVisitsOutputSelect,
+    capacityInput,
+    defaultSpeedInput,
+    sequenceIncrementInput,
+    dumpSourceSelect,
+    startDepotSelect,
+    endDepotSelect,
+    timeAtStartInput,
+    timeAtEndInput,
+    breaksInput,
+    dumpBeforeEndToggle,
+    customDumpSelect
+  ]
+    .forEach(node => {
+      node?.addEventListener("change", () => {
+        saveCurrentUiSettings();
+      });
+    });
+  [
+    speedClassFieldInput,
+    ...Object.values(drivingSpeedCatInputs),
+    ...Object.values(serviceSpeedCatInputs)
+  ].forEach(input => {
+    input?.addEventListener("change", () => saveCurrentUiSettings());
+  });
+
+  evaluateBtn.addEventListener("click", () => {
+    if (routeSequencerTaskRunning) return;
+    setRouteSequencerLoading(true, "Preparing Evaluate Sequence...");
+    runEvaluateSequence().catch(error => {
+      console.error("Route sequence evaluation failed:", error);
+      setStatus(`Evaluate Sequence failed: ${error?.message || error}`, "error");
+    }).finally(() => {
+      setRouteSequencerLoading(false);
+    });
+  });
+
+  runBtn.addEventListener("click", () => {
+    if (routeSequencerTaskRunning) return;
+    setRouteSequencerLoading(true, "Preparing Auto Sequence...");
+    runSequencer().catch(error => {
+      console.error("Route sequencer failed:", error);
+      setStatus(`Auto Sequence failed: ${error?.message || error}`, "error");
+    }).finally(() => {
+      setRouteSequencerLoading(false);
+    });
+  });
+}
+
+const SET_SEGMENT_ID_SIDE_SETTINGS_KEY = "setSegmentIdSideSettings";
+const SET_SEGMENT_MATCH_PROFILES_KEY = "setSegmentMatchProfiles";
+const SET_SEGMENT_MATCH_STATUS_FIELD_FALLBACK = "Segment_Match_Status";
+const SET_SEGMENT_SEQUENCE_READY_FIELD_FALLBACK = "Sequence_Ready";
+const SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK = "Segment_Match_Method";
+const SET_SEGMENT_PROFILE_MAX_COUNT = 48;
+const SET_SEGMENT_FEET_PER_DEG_LAT = 364000;
+const SET_SEGMENT_MATCH_CELL_DEG = 0.01;
+const SET_SEGMENT_ZERO_SIDE_FEET = 2.5;
+const SET_SEGMENT_DIRECTION_TOKENS = new Set([
+  "N", "S", "E", "W", "NE", "NW", "SE", "SW",
+  "NORTH", "SOUTH", "EAST", "WEST"
+]);
+const SET_SEGMENT_SUFFIX_TOKENS = new Set([
+  "ST", "STREET", "RD", "ROAD", "AVE", "AV", "AVENUE", "BLVD", "BOULEVARD",
+  "DR", "DRIVE", "LN", "LANE", "CT", "COURT", "PL", "PLACE", "PKWY", "PARKWAY",
+  "HWY", "HIGHWAY", "TRL", "TRAIL", "WAY", "CIR", "CIRCLE", "TER", "TERRACE"
+]);
+const setSegmentRowKeyMapCache = new WeakMap();
+
+function normalizeSetSegmentIdentityToken(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeSetSegmentCoordinateToken(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "";
+  let token = num.toFixed(6);
+  token = token.replace(/0+$/, "").replace(/\.$/, "");
+  if (token === "-0") token = "0";
+  return token;
+}
+
+function normalizeSetSegmentSideValue(value) {
+  const token = String(value ?? "").trim().toLowerCase();
+  if (!token) return "";
+  if (token.startsWith("l")) return "Left";
+  if (token.startsWith("r")) return "Right";
+  if (token.startsWith("c") || token.includes("center")) return "Centerline";
+  return "";
+}
+
+function normalizeSetSegmentMatchMethod(value) {
+  const token = String(value ?? "").trim();
+  if (!token) return "";
+  return token.slice(0, 60);
+}
+
+function normalizeSetSegmentToken(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function getSetSegmentRowKeyMap(row) {
+  if (!row || typeof row !== "object") return new Map();
+  const cached = setSegmentRowKeyMapCache.get(row);
+  if (cached) return cached;
+  const map = new Map();
+  Object.keys(row).forEach(key => {
+    map.set(normalizeSetSegmentToken(key), key);
+  });
+  setSegmentRowKeyMapCache.set(row, map);
+  return map;
+}
+
+function getSetSegmentRowValue(row, aliases = []) {
+  if (!row || typeof row !== "object") return "";
+  const candidates = Array.isArray(aliases) ? aliases : [];
+  for (const alias of candidates) {
+    if (Object.prototype.hasOwnProperty.call(row, alias)) return row[alias];
+  }
+  const keyMap = getSetSegmentRowKeyMap(row);
+  for (const alias of candidates) {
+    const existing = keyMap.get(normalizeSetSegmentToken(alias));
+    if (existing && Object.prototype.hasOwnProperty.call(row, existing)) return row[existing];
+  }
+  return "";
+}
+
+function getSetSegmentSegmentIdString(row, preferredField = "") {
+  if (!row || typeof row !== "object") return "";
+  let raw = "";
+  if (preferredField && Object.prototype.hasOwnProperty.call(row, preferredField)) {
+    raw = row[preferredField];
+  }
+  if (String(raw ?? "").trim() === "") {
+    raw = getSetSegmentRowValue(row, ["SEGMENT_ID", "Segment_ID", "segment_id", "SEGMENTID", "SegmentId"]);
+  }
+  const token = String(raw ?? "").trim();
+  if (!token) return "";
+  const lowered = token.toLowerCase();
+  if (lowered === "unknown" || lowered === "null" || lowered === "undefined") return "";
+  return token;
+}
+
+function getSetSegmentSegmentSideString(row, preferredField = "") {
+  if (!row || typeof row !== "object") return "";
+  let raw = "";
+  if (preferredField && Object.prototype.hasOwnProperty.call(row, preferredField)) {
+    raw = row[preferredField];
+  }
+  if (String(raw ?? "").trim() === "") {
+    raw = getSetSegmentRowValue(row, ["SEGMENT_SIDE", "Segment_Side", "segment_side", "SEGMENTSIDE"]);
+  }
+  return normalizeSetSegmentSideValue(raw);
+}
+
+function getSetSegmentMatchMethodString(row, preferredField = "") {
+  if (!row || typeof row !== "object") return "";
+  let raw = "";
+  if (preferredField && Object.prototype.hasOwnProperty.call(row, preferredField)) {
+    raw = row[preferredField];
+  }
+  if (String(raw ?? "").trim() === "") {
+    raw = getSetSegmentRowValue(row, [SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK, "segment_match_method", "SEGMENT_MATCH_METHOD"]);
+  }
+  return normalizeSetSegmentMatchMethod(raw);
+}
+
+function hasSetSegmentMatch(row, segmentIdField = "") {
+  return !!getSetSegmentSegmentIdString(row, segmentIdField);
+}
+
+function getSetSegmentRecordIdentityKeys(row, lat, lon) {
+  if (!row || typeof row !== "object") return [];
+  const keys = [];
+  const pushUnique = value => {
+    const token = String(value || "").trim().toLowerCase();
+    if (!token) return;
+    if (!keys.includes(token)) keys.push(token);
+  };
+
+  const uniqueIdToken = normalizeSetSegmentIdentityToken(
+    getSetSegmentRowValue(row, ["UNIQUEID", "UNIQUE_ID", "CUSTOMER_ID", "STOP_ID", "Record_ID", "ID"])
+  );
+  if (uniqueIdToken) pushUnique(`uid:${uniqueIdToken}`);
+
+  const binToken = normalizeSetSegmentIdentityToken(getSetSegmentRowValue(row, ["BINNO", "BIN_NO", "CONTAINER_ID"]));
+  if (binToken) pushUnique(`bin:${binToken}`);
+
+  const addressToken = normalizeSetSegmentIdentityToken([
+    getSetSegmentRowValue(row, ["CSADR#", "ADDRESS_NUMBER", "NUMBER"]),
+    getSetSegmentRowValue(row, ["CSSDIR", "PREDIR", "STREET_DIR"]),
+    getSetSegmentRowValue(row, ["CSSTRT", "STREET", "STREET_NAME", "ROAD"]),
+    getSetSegmentRowValue(row, ["CSSFUX", "SUFFIX", "STREET_SUFFIX"])
+  ].join(" "));
+  if (addressToken) pushUnique(`addr:${addressToken}`);
+
+  const latToken = normalizeSetSegmentCoordinateToken(lat ?? getSetSegmentRowValue(row, ["LATITUDE", "LAT", "Y"]));
+  const lonToken = normalizeSetSegmentCoordinateToken(lon ?? getSetSegmentRowValue(row, ["LONGITUDE", "LON", "LNG", "X"]));
+  if (latToken && lonToken) pushUnique(`coord:${latToken}|${lonToken}`);
+
+  if (uniqueIdToken && latToken && lonToken) pushUnique(`uidcoord:${uniqueIdToken}|${latToken}|${lonToken}`);
+  if (addressToken && latToken && lonToken) pushUnique(`addrcoord:${addressToken}|${latToken}|${lonToken}`);
+  if (binToken && latToken && lonToken) pushUnique(`bincoord:${binToken}|${latToken}|${lonToken}`);
+  if (uniqueIdToken && addressToken) pushUnique(`uidaddr:${uniqueIdToken}|${addressToken}`);
+
+  return keys;
+}
+
+function normalizeSetSegmentMatchProfiles(rawProfiles) {
+  const source = Array.isArray(rawProfiles) ? rawProfiles : [];
+  const out = [];
+
+  source.forEach((profile, index) => {
+    const rawName = String(profile?.name ?? "").trim();
+    if (!rawName) return;
+    const entriesSource = (profile?.entries && typeof profile.entries === "object" && !Array.isArray(profile.entries))
+      ? profile.entries
+      : {};
+    const entries = {};
+    Object.entries(entriesSource).forEach(([rawKey, rawValue]) => {
+      const key = String(rawKey || "").trim().toLowerCase();
+      if (!key) return;
+      let segmentId = "";
+      let side = "";
+      let method = "";
+      if (Array.isArray(rawValue)) {
+        segmentId = String(rawValue[0] ?? "").trim();
+        side = normalizeSetSegmentSideValue(rawValue[1]);
+        method = normalizeSetSegmentMatchMethod(rawValue[2]);
+      } else if (rawValue && typeof rawValue === "object") {
+        segmentId = String(rawValue.segmentId ?? "").trim();
+        side = normalizeSetSegmentSideValue(rawValue.side);
+        method = normalizeSetSegmentMatchMethod(rawValue.method);
+      } else {
+        segmentId = String(rawValue ?? "").trim();
+      }
+      if (!segmentId) return;
+      entries[key] = { segmentId, side, method };
+    });
+    const entryCount = Object.keys(entries).length;
+    if (!entryCount) return;
+    const createdAt = String(profile?.createdAt || profile?.updatedAt || "");
+    const updatedAt = String(profile?.updatedAt || profile?.createdAt || "");
+    out.push({
+      id: String(profile?.id || `set-segment-profile-${index + 1}-${Date.now()}`),
+      name: rawName,
+      createdAt: createdAt || new Date().toISOString(),
+      updatedAt: updatedAt || new Date().toISOString(),
+      entryCount,
+      entries
+    });
+  });
+
+  out.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { sensitivity: "base", numeric: true }));
+  return out.slice(0, SET_SEGMENT_PROFILE_MAX_COUNT);
+}
+
+function loadSetSegmentMatchProfiles() {
+  const raw = storageGet(SET_SEGMENT_MATCH_PROFILES_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return normalizeSetSegmentMatchProfiles(parsed);
+  } catch {
+    return [];
+  }
+}
+
+function saveSetSegmentMatchProfiles(profiles) {
+  const normalized = normalizeSetSegmentMatchProfiles(profiles);
+  storageSet(SET_SEGMENT_MATCH_PROFILES_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+function syncSetSegmentMatchStatusFields(rows, options = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    return {
+      segmentIdField: "SEGMENT_ID",
+      segmentSideField: "SEGMENT_SIDE",
+      matchStatusField: SET_SEGMENT_MATCH_STATUS_FIELD_FALLBACK,
+      readyField: SET_SEGMENT_SEQUENCE_READY_FIELD_FALLBACK,
+      methodField: SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK,
+      total: 0,
+      matchedCount: 0,
+      unmatchedCount: 0,
+      readyCount: 0,
+      leftCount: 0,
+      rightCount: 0,
+      centerCount: 0
+    };
+  }
+
+  const segmentIdField = options.segmentIdField || findSetSegmentOutputFieldName(list, "SEGMENT_ID");
+  const segmentSideField = options.segmentSideField || findSetSegmentOutputFieldName(list, "SEGMENT_SIDE");
+  const matchStatusField = options.matchStatusField || findSetSegmentOutputFieldName(list, SET_SEGMENT_MATCH_STATUS_FIELD_FALLBACK);
+  const readyField = options.readyField || findSetSegmentOutputFieldName(list, SET_SEGMENT_SEQUENCE_READY_FIELD_FALLBACK);
+  const methodField = options.methodField || findSetSegmentOutputFieldName(list, SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK);
+  const defaultMethod = normalizeSetSegmentMatchMethod(options.defaultMethod);
+
+  let matchedCount = 0;
+  let unmatchedCount = 0;
+  let readyCount = 0;
+  let leftCount = 0;
+  let rightCount = 0;
+  let centerCount = 0;
+
+  list.forEach(row => {
+    if (!row || typeof row !== "object") return;
+    const segmentId = getSetSegmentSegmentIdString(row, segmentIdField);
+    const side = getSetSegmentSegmentSideString(row, segmentSideField);
+    const matched = !!segmentId;
+    const ready = matched;
+
+    row[matchStatusField] = matched ? "Matched" : "Unmatched";
+    row[readyField] = ready ? "Ready" : "Not Ready";
+    row[segmentSideField] = side || "";
+    row[methodField] = matched
+      ? (getSetSegmentMatchMethodString(row, methodField) || defaultMethod || "")
+      : "";
+
+    if (matched) {
+      matchedCount += 1;
+      readyCount += 1;
+      if (side === "Left") leftCount += 1;
+      else if (side === "Right") rightCount += 1;
+      else if (side === "Centerline") centerCount += 1;
+    } else {
+      unmatchedCount += 1;
+    }
+  });
+
+  return {
+    segmentIdField,
+    segmentSideField,
+    matchStatusField,
+    readyField,
+    methodField,
+    total: list.length,
+    matchedCount,
+    unmatchedCount,
+    readyCount,
+    leftCount,
+    rightCount,
+    centerCount
+  };
+}
+
+function normalizeSetSegmentStreetName(value, parseAddresses = false) {
+  let text = String(value ?? "").trim().toUpperCase();
+  if (!text) return "";
+  text = text.replace(/&/g, " AND ");
+  text = text.replace(/[^A-Z0-9\s]/g, " ");
+  let tokens = text.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return "";
+
+  if (parseAddresses) {
+    while (tokens.length && /^\d+[A-Z]?$/.test(tokens[0])) tokens.shift();
+    while (tokens.length && SET_SEGMENT_DIRECTION_TOKENS.has(tokens[0])) tokens.shift();
+    while (tokens.length && SET_SEGMENT_DIRECTION_TOKENS.has(tokens[tokens.length - 1])) tokens.pop();
+    while (tokens.length && SET_SEGMENT_SUFFIX_TOKENS.has(tokens[tokens.length - 1])) tokens.pop();
+  }
+
+  return tokens.join(" ").trim();
+}
+
+function buildSetSegmentNameKeys(value, parseAddresses = false) {
+  const out = new Set();
+  const parsed = normalizeSetSegmentStreetName(value, parseAddresses);
+  if (parsed) {
+    out.add(`s:${parsed}`);
+    out.add(`c:${parsed.replace(/\s+/g, "")}`);
+  }
+  const direct = normalizeSetSegmentStreetName(value, false);
+  if (direct) {
+    out.add(`s:${direct}`);
+    out.add(`c:${direct.replace(/\s+/g, "")}`);
+  }
+  return out;
+}
+
+function collectSetSegmentRecordNameKeys(row, parseAddresses = false) {
+  const candidates = [];
+  const streetName = getSetSegmentRowValue(row, ["CSSTRT", "STREET_NAME", "STREET", "ROAD_NAME", "ROAD"]);
+  const streetDir = getSetSegmentRowValue(row, ["CSSDIR", "PREDIR", "STREET_DIR", "DIR"]);
+  const streetSfx = getSetSegmentRowValue(row, ["CSSFUX", "STREET_SUFFIX", "SUFFIX", "POSTTYPE"]);
+  const houseNumber = getSetSegmentRowValue(row, ["CSADR#", "ADDRESS_NUMBER", "HOUSE_NUMBER", "NUMBER"]);
+
+  if (String(streetName || "").trim()) {
+    candidates.push(`${streetDir || ""} ${streetName || ""} ${streetSfx || ""}`);
+    candidates.push(streetName);
+    candidates.push(`${houseNumber || ""} ${streetDir || ""} ${streetName || ""} ${streetSfx || ""}`);
+  }
+
+  if (parseAddresses) {
+    [
+      "ADDRESS", "FULL_ADDRESS", "SERVICE_ADDRESS", "SITE_ADDRESS", "ADDR1", "ADDR", "LOCATION", "ADDRESS1"
+    ].forEach(fieldName => {
+      const value = getSetSegmentRowValue(row, [fieldName]);
+      if (String(value || "").trim()) candidates.push(value);
+    });
+  }
+
+  const keys = new Set();
+  candidates.forEach(raw => {
+    buildSetSegmentNameKeys(raw, parseAddresses).forEach(key => keys.add(key));
+  });
+  return keys;
+}
+
+function buildSetSegmentStreetMatchIndex(options = {}) {
+  const selectedStreetsOnly = !!options.selectedStreetsOnly;
+  const includeAliases = !!options.includeAliases;
+  const parseAddresses = !!options.parseAddresses;
+  const entries = selectedStreetsOnly
+    ? [...streetAttributeSelectedIds]
+      .map(id => streetAttributeById.get(Number(id)))
+      .filter(Boolean)
+    : [...streetAttributeById.values()];
+
+  const cellSizeDeg = SET_SEGMENT_MATCH_CELL_DEG;
+  const cellMap = new Map();
+  const segments = [];
+  const streetById = new Map();
+  const streetToSegmentIndices = new Map();
+  const nameToStreetIds = new Map();
+
+  const addCellRef = (latIdx, lonIdx, segmentIndex) => {
+    const key = `${latIdx}:${lonIdx}`;
+    let bucket = cellMap.get(key);
+    if (!bucket) {
+      bucket = [];
+      cellMap.set(key, bucket);
+    }
+    bucket.push(segmentIndex);
+  };
+
+  const addStreetName = (streetId, rawName) => {
+    const name = String(rawName ?? "").trim();
+    if (!name) return;
+    buildSetSegmentNameKeys(name, parseAddresses).forEach(key => {
+      let ids = nameToStreetIds.get(key);
+      if (!ids) {
+        ids = new Set();
+        nameToStreetIds.set(key, ids);
+      }
+      ids.add(streetId);
+    });
+  };
+
+  entries.forEach(entry => {
+    const streetId = Number(entry?.id ?? entry?.row?.id);
+    if (!Number.isFinite(streetId)) return;
+    const row = entry?.row || {};
+    const latLon = flattenStreetLayerLatLngs(entry?.layer?.getLatLngs?.(), []);
+    if (!Array.isArray(latLon) || latLon.length < 2) return;
+
+    streetById.set(streetId, { id: streetId, row });
+    addStreetName(streetId, row?.name);
+    addStreetName(streetId, row?.ref);
+    if (includeAliases) {
+      [
+        row?.alt_name,
+        row?.official_name,
+        row?.old_name,
+        row?.loc_name,
+        row?.short_name
+      ].forEach(alias => {
+        String(alias || "")
+          .split(/[;|/]/)
+          .map(part => part.trim())
+          .filter(Boolean)
+          .forEach(value => addStreetName(streetId, value));
+      });
+    }
+
+    for (let i = 1; i < latLon.length; i += 1) {
+      const a = latLon[i - 1];
+      const b = latLon[i];
+      const aLat = Number(a?.lat);
+      const aLon = Number(a?.lon);
+      const bLat = Number(b?.lat);
+      const bLon = Number(b?.lon);
+      if (!Number.isFinite(aLat) || !Number.isFinite(aLon) || !Number.isFinite(bLat) || !Number.isFinite(bLon)) continue;
+      if (aLat === bLat && aLon === bLon) continue;
+
+      const segment = {
+        streetId,
+        aLat,
+        aLon,
+        bLat,
+        bLon,
+        minLat: Math.min(aLat, bLat),
+        maxLat: Math.max(aLat, bLat),
+        minLon: Math.min(aLon, bLon),
+        maxLon: Math.max(aLon, bLon)
+      };
+      const segmentIndex = segments.length;
+      segments.push(segment);
+
+      let segmentRefs = streetToSegmentIndices.get(streetId);
+      if (!segmentRefs) {
+        segmentRefs = [];
+        streetToSegmentIndices.set(streetId, segmentRefs);
+      }
+      segmentRefs.push(segmentIndex);
+
+      const minLatIdx = Math.floor(segment.minLat / cellSizeDeg);
+      const maxLatIdx = Math.floor(segment.maxLat / cellSizeDeg);
+      const minLonIdx = Math.floor(segment.minLon / cellSizeDeg);
+      const maxLonIdx = Math.floor(segment.maxLon / cellSizeDeg);
+      for (let latIdx = minLatIdx; latIdx <= maxLatIdx; latIdx += 1) {
+        for (let lonIdx = minLonIdx; lonIdx <= maxLonIdx; lonIdx += 1) {
+          addCellRef(latIdx, lonIdx, segmentIndex);
+        }
+      }
+    }
+  });
+
+  return {
+    cellSizeDeg,
+    cellMap,
+    segments,
+    streetById,
+    streetToSegmentIndices,
+    nameToStreetIds,
+    segmentCount: segments.length,
+    streetCount: streetById.size
+  };
+}
+
+function measureSetSegmentPointToSegmentFeet(lat, lon, segment) {
+  const refLat = ((Number(lat) + Number(segment?.aLat) + Number(segment?.bLat)) / 3) * (Math.PI / 180);
+  const feetPerDegLon = SET_SEGMENT_FEET_PER_DEG_LAT * Math.max(0.05, Math.cos(refLat));
+  const ax = (Number(segment?.aLon) - Number(lon)) * feetPerDegLon;
+  const ay = (Number(segment?.aLat) - Number(lat)) * SET_SEGMENT_FEET_PER_DEG_LAT;
+  const bx = (Number(segment?.bLon) - Number(lon)) * feetPerDegLon;
+  const by = (Number(segment?.bLat) - Number(lat)) * SET_SEGMENT_FEET_PER_DEG_LAT;
+
+  const abx = bx - ax;
+  const aby = by - ay;
+  const lenSq = (abx * abx) + (aby * aby);
+  let t = 0;
+  if (lenSq > 1e-9) {
+    t = (-(ax * abx + ay * aby)) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+  }
+
+  const cx = ax + (abx * t);
+  const cy = ay + (aby * t);
+  const distanceFeet = Math.hypot(cx, cy);
+  const apx = -ax;
+  const apy = -ay;
+  const sideCross = (abx * apy) - (aby * apx);
+  return { distanceFeet, sideCross, t };
+}
+
+function getSetSegmentCandidateIndicesByRadius(index, lat, lon, maxDistanceFeet) {
+  if (!index?.segments?.length) return [];
+  const latNum = Number(lat);
+  const lonNum = Number(lon);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return [];
+  const maxFeet = Number(maxDistanceFeet);
+
+  if (!Number.isFinite(maxFeet) || maxFeet <= 0) {
+    return index.segments.map((_, idx) => idx);
+  }
+
+  const radiusLatDeg = maxFeet / SET_SEGMENT_FEET_PER_DEG_LAT;
+  const radiusCells = Math.max(1, Math.ceil(radiusLatDeg / index.cellSizeDeg) + 1);
+  const baseLatIdx = Math.floor(latNum / index.cellSizeDeg);
+  const baseLonIdx = Math.floor(lonNum / index.cellSizeDeg);
+  const out = new Set();
+
+  for (let dy = -radiusCells; dy <= radiusCells; dy += 1) {
+    for (let dx = -radiusCells; dx <= radiusCells; dx += 1) {
+      const key = `${baseLatIdx + dy}:${baseLonIdx + dx}`;
+      const bucket = index.cellMap.get(key);
+      if (!bucket || !bucket.length) continue;
+      bucket.forEach(segmentIndex => out.add(segmentIndex));
+    }
+  }
+
+  return [...out];
+}
+
+function findBestSetSegmentMatchForPoint(index, lat, lon, options = {}) {
+  if (!index?.segments?.length) return null;
+  const allowedStreetIds = options.allowedStreetIds instanceof Set ? options.allowedStreetIds : null;
+  const maxDistanceFeet = Number(options.maxDistanceFeet);
+  const hasMaxDistance = Number.isFinite(maxDistanceFeet) && maxDistanceFeet > 0;
+  const indices = Array.isArray(options.candidateIndices)
+    ? options.candidateIndices
+    : getSetSegmentCandidateIndicesByRadius(index, lat, lon, hasMaxDistance ? maxDistanceFeet : NaN);
+  if (!indices.length) return null;
+
+  let best = null;
+  const visited = new Set();
+  indices.forEach(segmentIndex => {
+    const idx = Number(segmentIndex);
+    if (!Number.isFinite(idx) || visited.has(idx)) return;
+    visited.add(idx);
+    const segment = index.segments[idx];
+    if (!segment) return;
+    if (allowedStreetIds && !allowedStreetIds.has(segment.streetId)) return;
+    const measure = measureSetSegmentPointToSegmentFeet(lat, lon, segment);
+    if (!Number.isFinite(measure.distanceFeet)) return;
+    if (hasMaxDistance && measure.distanceFeet > maxDistanceFeet) return;
+    if (!best || measure.distanceFeet < best.distanceFeet) {
+      best = {
+        segmentIndex: idx,
+        streetId: segment.streetId,
+        distanceFeet: measure.distanceFeet,
+        sideCross: measure.sideCross
+      };
+    }
+  });
+
+  return best;
+}
+
+function getSetSegmentRecordCandidates(scope = "all") {
+  const selectedOnly = String(scope || "all") === "selected";
+  const out = [];
+
+  attributeMarkerByRowId.forEach((marker, rowId) => {
+    const numericRowId = Number(rowId);
+    if (!Number.isFinite(numericRowId)) return;
+    if (selectedOnly && !attributeState.selectedRowIds.has(numericRowId)) return;
+    const row = marker?._rowRef;
+    if (!row || typeof row !== "object") return;
+    const ll = getLayerLatLng(marker);
+    const lat = Number(ll?.lat ?? marker?._base?.lat ?? row?.LATITUDE);
+    const lon = Number(ll?.lng ?? marker?._base?.lon ?? row?.LONGITUDE);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    out.push({
+      rowId: numericRowId,
+      row,
+      marker,
+      lat,
+      lon
+    });
+  });
+
+  out.sort((a, b) => Number(a.rowId) - Number(b.rowId));
+  return out;
+}
+
+function getSetSegmentReadinessSnapshot(scope = "all", segmentIdField = "") {
+  const records = getSetSegmentRecordCandidates(scope);
+  let matchedCount = 0;
+  let unmatchedCount = 0;
+  records.forEach(item => {
+    if (hasSetSegmentMatch(item?.row, segmentIdField)) matchedCount += 1;
+    else unmatchedCount += 1;
+  });
+  return {
+    total: records.length,
+    matchedCount,
+    unmatchedCount,
+    readyCount: matchedCount
+  };
+}
+
+function findSetSegmentOutputFieldName(rows, fallback) {
+  const preferred = normalizeSetSegmentToken(fallback);
+  const fields = new Set();
+  (Array.isArray(rows) ? rows : []).forEach(row => {
+    Object.keys(row || {}).forEach(key => fields.add(String(key)));
+  });
+  for (const field of fields) {
+    if (normalizeSetSegmentToken(field) === preferred) return field;
+  }
+  return fallback;
+}
+
+function matchRecordToStreetForSegmentId(recordItem, index, settings = {}) {
+  if (!recordItem || !index) return null;
+  const useStreetName = !!settings.matchByStreetName;
+  const useProximity = !!settings.useProximity;
+  const toleranceFeetRaw = Number(settings.toleranceFeet);
+  const toleranceFeet = Number.isFinite(toleranceFeetRaw) && toleranceFeetRaw > 0 ? toleranceFeetRaw : NaN;
+  const parseAddresses = !!settings.parseAddresses;
+
+  let matchedStreetIds = null;
+  if (useStreetName) {
+    const nameKeys = collectSetSegmentRecordNameKeys(recordItem.row, parseAddresses);
+    matchedStreetIds = new Set();
+    nameKeys.forEach(key => {
+      const ids = index.nameToStreetIds.get(key);
+      if (!ids) return;
+      ids.forEach(id => matchedStreetIds.add(id));
+    });
+
+    if (!matchedStreetIds.size && !useProximity) return null;
+  }
+
+  let best = null;
+  let method = "";
+
+  if (useStreetName && matchedStreetIds && matchedStreetIds.size) {
+    if (useProximity) {
+      best = findBestSetSegmentMatchForPoint(index, recordItem.lat, recordItem.lon, {
+        maxDistanceFeet: toleranceFeet,
+        allowedStreetIds: matchedStreetIds
+      });
+      if (best) method = "name+proximity";
+    } else {
+      const candidateIndices = [];
+      matchedStreetIds.forEach(streetId => {
+        const indices = index.streetToSegmentIndices.get(streetId);
+        if (Array.isArray(indices) && indices.length) candidateIndices.push(...indices);
+      });
+      best = findBestSetSegmentMatchForPoint(index, recordItem.lat, recordItem.lon, {
+        maxDistanceFeet: toleranceFeet,
+        candidateIndices
+      });
+      if (best) method = "name";
+    }
+  }
+
+  if (!best && useProximity) {
+    best = findBestSetSegmentMatchForPoint(index, recordItem.lat, recordItem.lon, {
+      maxDistanceFeet: toleranceFeet
+    });
+    if (best) method = useStreetName ? "proximity-fallback" : "proximity";
+  }
+
+  if (!best) return null;
+  const street = index.streetById.get(best.streetId);
+  const side = Math.abs(best.sideCross) <= SET_SEGMENT_ZERO_SIDE_FEET
+    ? "Centerline"
+    : (best.sideCross > 0 ? "Left" : "Right");
+
+  return {
+    streetId: best.streetId,
+    side,
+    distanceFeet: best.distanceFeet,
+    method,
+    streetName: String(street?.row?.name || street?.row?.ref || "").trim()
+  };
+}
+
+function loadSetSegmentIdSideSettings() {
+  const raw = storageGet(SET_SEGMENT_ID_SIDE_SETTINGS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSetSegmentIdSideSettings(settings) {
+  const payload = settings && typeof settings === "object" ? settings : {};
+  storageSet(SET_SEGMENT_ID_SIDE_SETTINGS_KEY, JSON.stringify(payload));
+}
+
+function initSetSegmentIdSideControls() {
+  const openBtn = document.getElementById("setSegmentIdSideBtn");
+  const openBtnMobile = document.getElementById("setSegmentIdSideBtnMobile");
+  const modal = document.getElementById("setSegmentIdSideModal");
+  const closeBtn = document.getElementById("setSegmentIdSideCloseBtn");
+  const runBtn = document.getElementById("setSegmentIdSideRunBtn");
+  const inputAllRadio = document.getElementById("setSegmentInputAllRecords");
+  const inputSelectedRadio = document.getElementById("setSegmentInputSelectedRecords");
+  const inputAllLabel = document.getElementById("setSegmentInputAllLabel");
+  const inputSelectedLabel = document.getElementById("setSegmentInputSelectedLabel");
+  const selectedStreetsOnlyToggle = document.getElementById("setSegmentSelectedStreetsOnly");
+  const selectedStreetsOnlyLabel = document.getElementById("setSegmentSelectedStreetsOnlyLabel");
+  const parseAddressesToggle = document.getElementById("setSegmentParseAddresses");
+  const matchStreetNameToggle = document.getElementById("setSegmentMatchStreetName");
+  const useProximityToggle = document.getElementById("setSegmentUseProximity");
+  const includeAliasesToggle = document.getElementById("setSegmentIncludeStreetAliases");
+  const toleranceInput = document.getElementById("setSegmentSearchToleranceFeet");
+  const statusNode = document.getElementById("setSegmentIdSideStatus");
+  const layerSelect = document.getElementById("setSegmentIdSideLayer");
+  const skipMatchedToggle = document.getElementById("setSegmentSkipMatchedRecords");
+  const profileSelect = document.getElementById("setSegmentSavedProfileList");
+  const profileNameInput = document.getElementById("setSegmentSavedProfileName");
+  const applyOnlyUnmatchedToggle = document.getElementById("setSegmentApplyOnlyUnmatched");
+  const saveProfileBtn = document.getElementById("setSegmentSaveProfileBtn");
+  const applyProfileBtn = document.getElementById("setSegmentApplyProfileBtn");
+  const deleteProfileBtn = document.getElementById("setSegmentDeleteProfileBtn");
+  const readySummaryNode = document.getElementById("setSegmentReadySummary");
+
+  if (
+    !openBtn || !modal || !closeBtn || !runBtn ||
+    !inputAllRadio || !inputSelectedRadio || !inputAllLabel || !inputSelectedLabel ||
+    !selectedStreetsOnlyToggle || !selectedStreetsOnlyLabel || !parseAddressesToggle ||
+    !matchStreetNameToggle || !useProximityToggle || !includeAliasesToggle || !toleranceInput || !statusNode || !layerSelect
+  ) {
+    return;
+  }
+
+  if (openBtn.dataset.segmentIdSideBound === "1") return;
+  openBtn.dataset.segmentIdSideBound = "1";
+
+  const setStatus = (message, kind = "") => {
+    statusNode.textContent = String(message || "");
+    statusNode.classList.remove("error", "success");
+    if (kind === "error") statusNode.classList.add("error");
+    if (kind === "success") statusNode.classList.add("success");
+  };
+
+  const refreshProfileList = (preferredName = "") => {
+    if (!profileSelect) return [];
+    const profiles = loadSetSegmentMatchProfiles();
+    const desiredName = String(preferredName || profileSelect.value || "").trim();
+    profileSelect.innerHTML = "";
+
+    if (!profiles.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No saved profiles";
+      profileSelect.appendChild(option);
+      profileSelect.disabled = true;
+      if (applyProfileBtn) applyProfileBtn.disabled = true;
+      if (deleteProfileBtn) deleteProfileBtn.disabled = true;
+      return profiles;
+    }
+
+    profiles.forEach(profile => {
+      const option = document.createElement("option");
+      option.value = profile.name;
+      option.textContent = `${profile.name} (${Number(profile.entryCount || 0).toLocaleString()})`;
+      profileSelect.appendChild(option);
+    });
+
+    const selected = profiles.some(profile => profile.name === desiredName)
+      ? desiredName
+      : profiles[0].name;
+    profileSelect.value = selected;
+    profileSelect.disabled = false;
+    if (applyProfileBtn) applyProfileBtn.disabled = false;
+    if (deleteProfileBtn) deleteProfileBtn.disabled = false;
+    return profiles;
+  };
+
+  const refreshReadySummary = (segmentIdField = "") => {
+    if (!readySummaryNode) return;
+    const allSnapshot = getSetSegmentReadinessSnapshot("all", segmentIdField);
+    const selectedSnapshot = getSetSegmentReadinessSnapshot("selected", segmentIdField);
+    if (!allSnapshot.total) {
+      readySummaryNode.textContent = "No mappable records loaded yet. Load a route file to view match readiness.";
+      return;
+    }
+    readySummaryNode.textContent =
+      `All: ${allSnapshot.matchedCount.toLocaleString()}/${allSnapshot.total.toLocaleString()} matched and ready. ` +
+      `Selected: ${selectedSnapshot.matchedCount.toLocaleString()}/${selectedSnapshot.total.toLocaleString()} matched and ready.`;
+  };
+
+  const applySettingsToUi = settings => {
+    const payload = settings && typeof settings === "object" ? settings : {};
+    inputSelectedRadio.checked = payload.scope === "selected";
+    inputAllRadio.checked = !inputSelectedRadio.checked;
+    parseAddressesToggle.checked = !!payload.parseAddresses;
+    matchStreetNameToggle.checked = payload.matchByStreetName !== false;
+    useProximityToggle.checked = payload.useProximity !== false;
+    includeAliasesToggle.checked = !!payload.includeAliases;
+    selectedStreetsOnlyToggle.checked = !!payload.selectedStreetsOnly;
+    if (skipMatchedToggle) skipMatchedToggle.checked = payload.skipMatchedRecords !== false;
+    if (applyOnlyUnmatchedToggle) applyOnlyUnmatchedToggle.checked = payload.applyOnlyUnmatched !== false;
+    const tolerance = Number(payload.toleranceFeet);
+    toleranceInput.value = Number.isFinite(tolerance) && tolerance > 0 ? String(Math.round(tolerance)) : "9999";
+    layerSelect.value = "serviceLocation";
+  };
+
+  const collectUiSettings = () => {
+    const payload = {
+      scope: inputSelectedRadio.checked ? "selected" : "all",
+      parseAddresses: !!parseAddressesToggle.checked,
+      matchByStreetName: !!matchStreetNameToggle.checked,
+      useProximity: !!useProximityToggle.checked,
+      includeAliases: !!includeAliasesToggle.checked,
+      selectedStreetsOnly: !!selectedStreetsOnlyToggle.checked,
+      skipMatchedRecords: skipMatchedToggle ? !!skipMatchedToggle.checked : true,
+      applyOnlyUnmatched: applyOnlyUnmatchedToggle ? !!applyOnlyUnmatchedToggle.checked : true,
+      selectedProfileName: profileSelect ? String(profileSelect.value || "").trim() : "",
+      toleranceFeet: Math.max(10, Math.round(clampRouteSequencerNumber(toleranceInput.value, 10, 250000, 9999)))
+    };
+    toleranceInput.value = String(payload.toleranceFeet);
+    saveSetSegmentIdSideSettings(payload);
+    return payload;
+  };
+
+  const refreshCounts = () => {
+    const allRecords = getSetSegmentRecordCandidates("all").length;
+    const selectedRecords = getSetSegmentRecordCandidates("selected").length;
+    const selectedStreets = streetAttributeSelectedIds.size;
+    inputAllLabel.textContent = `All records (${allRecords.toLocaleString()})`;
+    inputSelectedLabel.textContent = `Selected records (${selectedRecords.toLocaleString()})`;
+    selectedStreetsOnlyLabel.textContent = `Consider selected streets only (${selectedStreets.toLocaleString()})`;
+    refreshReadySummary();
+  };
+
+  const refreshUiAfterRowChanges = (saveReason = "Set Segment ID + Side", recordsToRefresh = []) => {
+    const allRows = (Array.isArray(window._currentRows) && window._currentRows.length)
+      ? window._currentRows
+      : recordsToRefresh.map(item => item?.row).filter(Boolean);
+    window._attributeHeaders = getAttributeHeaders(allRows);
+    if (typeof refreshAllRecordPopupContent === "function") refreshAllRecordPopupContent();
+    else recordsToRefresh.forEach(item => syncRecordPopupContent(item.marker));
+    applyAttributeSelectionStyles();
+    renderAttributeTable();
+    refreshAttributeStatus();
+    refreshCounts();
+    syncCurrentWorkbookSheetFromRows();
+    queueWorkbookCloudSave(saveReason);
+
+    const selectAttributesSource = document.getElementById("selectAttributesSource");
+    if (selectAttributesSource && String(selectAttributesSource.value || "").toLowerCase() === "records") {
+      selectAttributesSource.dispatchEvent(new Event("change"));
+    }
+  };
+
+  const openModal = () => {
+    const storedSettings = loadSetSegmentIdSideSettings();
+    applySettingsToUi(storedSettings);
+    refreshProfileList(storedSettings.selectedProfileName || "");
+    if (profileNameInput && !String(profileNameInput.value || "").trim() && profileSelect && !profileSelect.disabled) {
+      profileNameInput.value = String(profileSelect.value || "");
+    }
+    refreshCounts();
+    setStatus("Ready.");
+    modal.style.display = "flex";
+    openBtn.classList.add("active");
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    openBtn.classList.remove("active");
+  };
+
+  const runMatcher = async () => {
+    if (runBtn.dataset.running === "1") return;
+    runBtn.dataset.running = "1";
+    runBtn.disabled = true;
+    try {
+      if (!streetAttributeById.size) {
+        setStatus("No street segments are loaded. Load streets first, then run this tool.", "error");
+        return;
+      }
+
+      const settings = collectUiSettings();
+      const allRows = (Array.isArray(window._currentRows) && window._currentRows.length)
+        ? window._currentRows
+        : getSetSegmentRecordCandidates("all").map(item => item.row);
+      const segmentIdField = findSetSegmentOutputFieldName(allRows, "SEGMENT_ID");
+      const segmentSideField = findSetSegmentOutputFieldName(allRows, "SEGMENT_SIDE");
+      const matchStatusField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_MATCH_STATUS_FIELD_FALLBACK);
+      const readyField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_SEQUENCE_READY_FIELD_FALLBACK);
+      const methodField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK);
+
+      if (!settings.matchByStreetName && !settings.useProximity) {
+        setStatus("Enable at least one match method: street name or proximity.", "error");
+        return;
+      }
+      if (settings.selectedStreetsOnly && !streetAttributeSelectedIds.size) {
+        setStatus("Selected streets only is enabled, but no street segments are selected.", "error");
+        return;
+      }
+
+      const records = getSetSegmentRecordCandidates(settings.scope);
+      if (!records.length) {
+        setStatus(
+          settings.scope === "selected"
+            ? "No selected records are available to process."
+            : "No mappable records are available to process.",
+          "error"
+        );
+        return;
+      }
+
+      const skippedMatchedCount = settings.skipMatchedRecords
+        ? records.filter(item => hasSetSegmentMatch(item.row, segmentIdField)).length
+        : 0;
+      const processRecords = settings.skipMatchedRecords
+        ? records.filter(item => !hasSetSegmentMatch(item.row, segmentIdField))
+        : records;
+
+      if (!processRecords.length) {
+        const syncSummary = syncSetSegmentMatchStatusFields(allRows, {
+          segmentIdField,
+          segmentSideField,
+          matchStatusField,
+          readyField,
+          methodField
+        });
+        refreshUiAfterRowChanges("Set Segment ID + Side (No Changes)", records);
+        setStatus(
+          `All ${records.length.toLocaleString()} records in scope are already matched. Ready: ${syncSummary.readyCount.toLocaleString()}/${syncSummary.total.toLocaleString()}.`,
+          "success"
+        );
+        return;
+      }
+
+      setStatus("Building street matching index...");
+      const index = buildSetSegmentStreetMatchIndex({
+        selectedStreetsOnly: settings.selectedStreetsOnly,
+        includeAliases: settings.includeAliases,
+        parseAddresses: settings.parseAddresses
+      });
+      if (!index.segmentCount) {
+        setStatus("No street geometry is available for matching under the current street scope.", "error");
+        return;
+      }
+
+      let matchedCount = 0;
+      let unmatchedCount = 0;
+      let leftCount = 0;
+      let rightCount = 0;
+      let centerCount = 0;
+
+      for (let i = 0; i < processRecords.length; i += 1) {
+        const item = processRecords[i];
+        const match = matchRecordToStreetForSegmentId(item, index, settings);
+        if (match) {
+          item.row[segmentIdField] = Number.isFinite(Number(match.streetId)) ? Number(match.streetId) : "";
+          item.row[segmentSideField] = match.side || "";
+          item.row[methodField] = normalizeSetSegmentMatchMethod(match.method || "matched");
+          matchedCount += 1;
+          if (match.side === "Left") leftCount += 1;
+          else if (match.side === "Right") rightCount += 1;
+          else centerCount += 1;
+        } else {
+          item.row[segmentIdField] = "";
+          item.row[segmentSideField] = "";
+          item.row[methodField] = "";
+          unmatchedCount += 1;
+        }
+
+        if (i % 180 === 0) {
+          setStatus(
+            `Matching records... ${Math.min(i + 1, processRecords.length).toLocaleString()}/${processRecords.length.toLocaleString()}`
+          );
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      const syncSummary = syncSetSegmentMatchStatusFields(allRows, {
+        segmentIdField,
+        segmentSideField,
+        matchStatusField,
+        readyField,
+        methodField
+      });
+      refreshUiAfterRowChanges("Set Segment ID + Side", records);
+
+      setStatus(
+        `Set Segment ID + Side complete. Processed ${processRecords.length.toLocaleString()} records` +
+        (skippedMatchedCount ? ` (skipped ${skippedMatchedCount.toLocaleString()} already matched).` : ".") +
+        ` Newly matched: ${matchedCount.toLocaleString()}, unmatched: ${unmatchedCount.toLocaleString()}.` +
+        ` Side split - Left: ${leftCount.toLocaleString()}, Right: ${rightCount.toLocaleString()}, Centerline: ${centerCount.toLocaleString()}.` +
+        ` Ready now: ${syncSummary.readyCount.toLocaleString()}/${syncSummary.total.toLocaleString()}.`,
+        "success"
+      );
+    } catch (error) {
+      console.error("Set Segment ID + Side failed:", error);
+      setStatus(`Set Segment ID + Side failed: ${error?.message || error}`, "error");
+    } finally {
+      runBtn.disabled = false;
+      runBtn.dataset.running = "0";
+    }
+  };
+
+  const saveCurrentMatchesProfile = () => {
+    const settings = collectUiSettings();
+    const records = getSetSegmentRecordCandidates(settings.scope);
+    if (!records.length) {
+      setStatus("No records in scope to save as a profile.", "error");
+      return;
+    }
+
+    const allRows = Array.isArray(window._currentRows) ? window._currentRows : records.map(item => item.row);
+    const segmentIdField = findSetSegmentOutputFieldName(allRows, "SEGMENT_ID");
+    const segmentSideField = findSetSegmentOutputFieldName(allRows, "SEGMENT_SIDE");
+    const methodField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK);
+
+    const profileNameRaw = String(profileNameInput?.value || profileSelect?.value || "").trim();
+    if (!profileNameRaw) {
+      setStatus("Type a profile name before saving.", "error");
+      return;
+    }
+    const profileName = profileNameRaw.slice(0, 80);
+
+    const entries = {};
+    let matchedInScope = 0;
+    records.forEach(item => {
+      const segmentId = getSetSegmentSegmentIdString(item.row, segmentIdField);
+      if (!segmentId) return;
+      matchedInScope += 1;
+      const side = getSetSegmentSegmentSideString(item.row, segmentSideField);
+      const method = getSetSegmentMatchMethodString(item.row, methodField);
+      const keys = getSetSegmentRecordIdentityKeys(item.row, item.lat, item.lon);
+      keys.forEach(key => {
+        if (!entries[key]) {
+          entries[key] = { segmentId, side, method };
+        }
+      });
+    });
+
+    const entryCount = Object.keys(entries).length;
+    if (!entryCount) {
+      setStatus("No matched records were found in the chosen scope. Run Set Segment ID + Side first.", "error");
+      return;
+    }
+
+    const profiles = loadSetSegmentMatchProfiles();
+    const existingIndex = profiles.findIndex(profile =>
+      String(profile?.name || "").trim().toLowerCase() === profileName.toLowerCase()
+    );
+    const nowIso = new Date().toISOString();
+    const nextProfile = {
+      id: existingIndex >= 0
+        ? profiles[existingIndex].id
+        : `set-segment-profile-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      name: profileName,
+      createdAt: existingIndex >= 0 ? profiles[existingIndex].createdAt : nowIso,
+      updatedAt: nowIso,
+      entryCount,
+      entries
+    };
+    if (existingIndex >= 0) profiles[existingIndex] = nextProfile;
+    else profiles.push(nextProfile);
+    const savedProfiles = saveSetSegmentMatchProfiles(profiles);
+    const selectedName = savedProfiles.find(profile =>
+      String(profile?.name || "").trim().toLowerCase() === profileName.toLowerCase()
+    )?.name || profileName;
+    refreshProfileList(selectedName);
+    if (profileNameInput) profileNameInput.value = selectedName;
+    collectUiSettings();
+
+    setStatus(
+      `Saved profile "${selectedName}" with ${entryCount.toLocaleString()} mapped keys from ${matchedInScope.toLocaleString()} matched records.`,
+      "success"
+    );
+  };
+
+  const applySavedProfile = async () => {
+    const settings = collectUiSettings();
+    const selectedProfileName = String(profileSelect?.value || "").trim();
+    if (!selectedProfileName) {
+      setStatus("Choose a saved profile to apply.", "error");
+      return;
+    }
+
+    const profiles = loadSetSegmentMatchProfiles();
+    const profile = profiles.find(item => item.name === selectedProfileName);
+    if (!profile) {
+      setStatus(`Saved profile "${selectedProfileName}" was not found.`, "error");
+      refreshProfileList("");
+      return;
+    }
+
+    const records = getSetSegmentRecordCandidates(settings.scope);
+    if (!records.length) {
+      setStatus("No records in scope to apply profile mappings.", "error");
+      return;
+    }
+
+    const allRows = Array.isArray(window._currentRows) ? window._currentRows : records.map(item => item.row);
+    const segmentIdField = findSetSegmentOutputFieldName(allRows, "SEGMENT_ID");
+    const segmentSideField = findSetSegmentOutputFieldName(allRows, "SEGMENT_SIDE");
+    const matchStatusField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_MATCH_STATUS_FIELD_FALLBACK);
+    const readyField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_SEQUENCE_READY_FIELD_FALLBACK);
+    const methodField = findSetSegmentOutputFieldName(allRows, SET_SEGMENT_MATCH_METHOD_FIELD_FALLBACK);
+    const applyOnlyUnmatched = applyOnlyUnmatchedToggle ? !!applyOnlyUnmatchedToggle.checked : true;
+
+    let appliedCount = 0;
+    let alreadyMatchedSkipped = 0;
+    let noKeyCount = 0;
+    let noMatchCount = 0;
+
+    for (let i = 0; i < records.length; i += 1) {
+      const item = records[i];
+      if (applyOnlyUnmatched && hasSetSegmentMatch(item.row, segmentIdField)) {
+        alreadyMatchedSkipped += 1;
+        continue;
+      }
+
+      const keys = getSetSegmentRecordIdentityKeys(item.row, item.lat, item.lon);
+      if (!keys.length) {
+        noKeyCount += 1;
+        continue;
+      }
+
+      let matchedEntry = null;
+      for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(profile.entries, key)) continue;
+        matchedEntry = profile.entries[key];
+        break;
+      }
+      if (!matchedEntry) {
+        noMatchCount += 1;
+        continue;
+      }
+
+      item.row[segmentIdField] = String(matchedEntry.segmentId || "").trim();
+      item.row[segmentSideField] = normalizeSetSegmentSideValue(matchedEntry.side);
+      item.row[methodField] = normalizeSetSegmentMatchMethod(matchedEntry.method || "saved-profile");
+      appliedCount += 1;
+
+      if (i % 220 === 0) {
+        setStatus(
+          `Applying "${selectedProfileName}"... ${Math.min(i + 1, records.length).toLocaleString()}/${records.length.toLocaleString()}`
+        );
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    const syncSummary = syncSetSegmentMatchStatusFields(allRows, {
+      segmentIdField,
+      segmentSideField,
+      matchStatusField,
+      readyField,
+      methodField
+    });
+    refreshUiAfterRowChanges("Apply Segment Match Profile", records);
+    setStatus(
+      `Applied profile "${selectedProfileName}". Updated ${appliedCount.toLocaleString()} records` +
+      (applyOnlyUnmatched ? `, skipped ${alreadyMatchedSkipped.toLocaleString()} already matched` : "") +
+      `. No key: ${noKeyCount.toLocaleString()}, no profile match: ${noMatchCount.toLocaleString()}. ` +
+      `Ready now: ${syncSummary.readyCount.toLocaleString()}/${syncSummary.total.toLocaleString()}.`,
+      "success"
+    );
+  };
+
+  const deleteSelectedProfile = () => {
+    const selectedProfileName = String(profileSelect?.value || "").trim();
+    if (!selectedProfileName) {
+      setStatus("Choose a profile to delete.", "error");
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete saved match profile "${selectedProfileName}"?`);
+    if (!confirmed) return;
+
+    const profiles = loadSetSegmentMatchProfiles();
+    const nextProfiles = profiles.filter(profile => profile.name !== selectedProfileName);
+    if (nextProfiles.length === profiles.length) {
+      setStatus(`Profile "${selectedProfileName}" was not found.`, "error");
+      refreshProfileList("");
+      return;
+    }
+    saveSetSegmentMatchProfiles(nextProfiles);
+    refreshProfileList("");
+    if (profileNameInput) profileNameInput.value = "";
+    collectUiSettings();
+    setStatus(`Deleted profile "${selectedProfileName}".`, "success");
+  };
+
+  openBtn.addEventListener("click", openModal);
+  if (openBtnMobile) openBtnMobile.addEventListener("click", openModal);
+  closeBtn.addEventListener("click", closeModal);
+  modal.addEventListener("click", event => {
+    if (event.target === modal) closeModal();
+  });
+  runBtn.addEventListener("click", () => {
+    runMatcher().catch(error => {
+      console.error("Set Segment ID + Side uncaught error:", error);
+      setStatus(`Set Segment ID + Side failed: ${error?.message || error}`, "error");
+    });
+  });
+  saveProfileBtn?.addEventListener("click", saveCurrentMatchesProfile);
+  applyProfileBtn?.addEventListener("click", () => {
+    applySavedProfile().catch(error => {
+      console.error("Apply Set Segment profile failed:", error);
+      setStatus(`Apply saved profile failed: ${error?.message || error}`, "error");
+    });
+  });
+  deleteProfileBtn?.addEventListener("click", deleteSelectedProfile);
+  profileSelect?.addEventListener("change", () => {
+    if (profileNameInput) profileNameInput.value = String(profileSelect.value || "");
+    collectUiSettings();
+  });
+  profileNameInput?.addEventListener("change", () => {
+    profileNameInput.value = String(profileNameInput.value || "").trim().slice(0, 80);
+  });
+
+  [
+    inputAllRadio,
+    inputSelectedRadio,
+    selectedStreetsOnlyToggle,
+    parseAddressesToggle,
+    matchStreetNameToggle,
+    useProximityToggle,
+    includeAliasesToggle,
+    toleranceInput,
+    skipMatchedToggle,
+    applyOnlyUnmatchedToggle
+  ].forEach(node => {
+    node?.addEventListener("change", () => {
+      collectUiSettings();
+      refreshCounts();
+    });
+  });
+}
+
 function initServiceDayLabelLayerControls() {
   const toggleHeader = document.getElementById("serviceDayLabelLayerToggle");
   const content = document.getElementById("serviceDayLabelLayerContent");
@@ -12186,6 +18781,7 @@ function renderAttributeTable() {
     if (pageInfo) pageInfo.textContent = "Page 1/1";
     if (prevBtn) prevBtn.disabled = true;
     if (nextBtn) nextBtn.disabled = true;
+    syncAttributeSortControls();
     refreshAttributeStatus();
     return;
   }
@@ -12208,13 +18804,14 @@ function renderAttributeTable() {
     if (pageInfo) pageInfo.textContent = "Page 1/1";
     if (prevBtn) prevBtn.disabled = true;
     if (nextBtn) nextBtn.disabled = true;
+    syncAttributeSortControls();
     refreshAttributeStatus();
     return;
   }
 
   const sortIndicator = (key) => {
     if (attributeState.sortKey !== key) return "";
-    return attributeState.sortDir > 0 ? " ▲" : " ▼";
+    return attributeState.sortDir > 0 ? " â–²" : " â–¼";
   };
 
   let html = "<thead><tr><th>Sel</th><th>#</th>";
@@ -12248,6 +18845,7 @@ function renderAttributeTable() {
         attributeState.sortDir = 1;
       }
       attributeState.page = 1;
+      syncAttributeSortControls();
       renderAttributeTable();
     });
   });
@@ -12268,6 +18866,7 @@ function renderAttributeTable() {
     });
   });
 
+  syncAttributeSortControls();
   refreshAttributeStatus();
 }
 
@@ -12510,87 +19109,366 @@ function zoomToSelectedAttributeRows() {
   map.fitBounds(bounds.pad(0.18));
 }
 
-function openStreetAttributeTablePopout() {
-  const headers = ["id", "name", "func_class", "highway", "ref", "maxspeed", "lanes", "surface", "oneway"];
+function getAttributePopoutThemeMode() {
+  return document.body.classList.contains("sun-mode") ? "sun" : "dark";
+}
+
+window.getStreetAttributePopoutSnapshot = function() {
+  const headers = STREET_ATTRIBUTE_TABLE_HEADERS.slice();
   const rows = (Array.isArray(streetAttributesRows) && streetAttributesRows.length
     ? streetAttributesRows
     : [...streetAttributeById.values()].map(entry => entry?.row).filter(Boolean))
-    .map(row => ({ rowId: Number(row?.id), values: row || {} }))
+    .map(row => ({ rowId: Number(row?.id), values: { ...(row || {}) } }))
     .filter(item => Number.isFinite(item.rowId));
+  return { headers, rows };
+};
 
-  if (!rows.length) {
-    alert("No street attributes to open.");
+window.getRecordAttributePopoutSnapshot = function() {
+  const recordRows = Array.isArray(window._currentRows) ? window._currentRows : [];
+  const headers = Array.isArray(window._attributeHeaders) && window._attributeHeaders.length
+    ? window._attributeHeaders.slice()
+    : getAttributeHeaders(recordRows);
+  const rows = recordRows
+    .map(row => ({ rowId: getAttributeRowId(row), values: { ...(row || {}) } }))
+    .filter(item => Number.isFinite(item.rowId));
+  return { headers, rows };
+};
+
+window.promptAndAddAttributeFieldFromPopout = function() {
+  setAttributeTableMode("records");
+  openAttributePanel();
+  promptAndAddAttributeField();
+};
+
+window.openFieldCalculatorFromPopout = function() {
+  setAttributeTableMode("records");
+  openAttributePanel();
+  const calcBtn = document.getElementById("attributeFieldCalcBtn");
+  if (calcBtn) {
+    calcBtn.click();
+    return true;
+  }
+  return false;
+};
+
+function openAttributeLikePopoutWindow(options = {}) {
+  const title = String(options.title || "Attribute Table");
+  const safeTitle = title
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+  const filterPlaceholder = String(options.filterPlaceholder || "Filter by any field...");
+  const exportFileName = String(options.exportFileName || "attribute-table.csv");
+  const snapshotGetterName = String(options.snapshotGetterName || "");
+  const selectionGetterName = String(options.selectionGetterName || "");
+  const selectionSetterName = String(options.selectionSetterName || "");
+  const focusRowName = String(options.focusRowName || "");
+  const zoomName = String(options.zoomName || "");
+  const allowRecordTools = !!options.allowRecordTools;
+  const addFieldActionName = String(options.addFieldActionName || "");
+  const openFieldCalcActionName = String(options.openFieldCalcActionName || "");
+  const themeMode = getAttributePopoutThemeMode();
+
+  let snapshot = { headers: [], rows: [] };
+  if (snapshotGetterName && typeof window[snapshotGetterName] === "function") {
+    try {
+      const data = window[snapshotGetterName]();
+      if (data && typeof data === "object") snapshot = data;
+    } catch {}
+  } else {
+    snapshot = {
+      headers: Array.isArray(options.headers) ? options.headers.slice() : [],
+      rows: Array.isArray(options.rows) ? options.rows.slice() : []
+    };
+  }
+  const headers = Array.isArray(snapshot.headers) ? snapshot.headers : [];
+  const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+  if (!headers.length || !rows.length) {
+    alert(`No ${title.toLowerCase()} data to open.`);
     return;
   }
 
-  const win = window.open("", "_blank", "width=1180,height=700,resizable=yes,scrollbars=yes");
-  if (!win) {
-    alert("Unable to open street attribute table window.");
-    return;
-  }
-
+  const initialSelectedIds = Array.isArray(options.initialSelectedIds)
+    ? options.initialSelectedIds
+    : [];
   const seed = JSON.stringify({
+    title,
     headers,
     rows,
-    selectedIds: [...streetAttributeSelectedIds]
+    selectedIds: initialSelectedIds,
+    filterPlaceholder,
+    exportFileName,
+    snapshotGetterName,
+    selectionGetterName,
+    selectionSetterName,
+    focusRowName,
+    zoomName,
+    allowRecordTools,
+    addFieldActionName,
+    openFieldCalcActionName,
+    themeMode
   }).replace(/</g, "\\u003c");
+
+  const win = window.open("", "_blank", "width=1180,height=740,resizable=yes,scrollbars=yes");
+  if (!win) {
+    alert(`Unable to open ${title.toLowerCase()} window.`);
+    return;
+  }
 
   win.document.write(`
     <html>
       <head>
-        <title>Street Attributes</title>
+        <title>${safeTitle}</title>
         <style>
-          body { margin:0; font-family: Roboto, Arial, sans-serif; background:#0f1822; color:#e8f2fd; }
-          .bar { position:sticky; top:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px; background:#1a2938; border-bottom:1px solid #31495f; z-index:4; }
-          .bar button { border:1px solid #5a7ca1; background:#2a4258; color:#edf6ff; border-radius:8px; padding:6px 10px; cursor:pointer; }
-          .bar input[type=text] { min-width:220px; height:32px; border-radius:8px; border:1px solid #5a7ca1; background:#111a24; color:#eaf3fc; padding:0 10px; }
-          .bar label { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid #48647e; border-radius:8px; padding:5px 8px; background:#132130; }
-          .status { margin-left:auto; font-size:12px; color:#c8dcf1; }
-          .wrap { padding:10px; height:calc(100vh - 128px); overflow:auto; }
-          table { border-collapse:collapse; min-width:100%; width:max-content; background:#16212b; }
-          th, td { border:1px solid #31475b; padding:6px 8px; white-space:nowrap; font-size:12px; }
-          th { position:sticky; top:0; background:#26394a; text-align:left; }
-          th button { border:0; background:transparent; color:inherit; font:inherit; font-weight:700; cursor:pointer; padding:0; }
-          tbody tr { cursor:pointer; }
-          tbody tr:nth-child(even) { background:#192633; }
-          tbody tr.selected { background: rgba(84,176,255,0.22); }
+          :root {
+            --bg: #0f1822;
+            --panel: #162433;
+            --panel-soft: #1a2b3d;
+            --line: #2d455c;
+            --text: #e8f2fd;
+            --muted: #b9cde2;
+            --btn-bg: #2a4359;
+            --btn-line: #5a7ca1;
+            --btn-hover: #355671;
+            --input-bg: #111d2a;
+            --row-alt: #172636;
+            --row-sel: rgba(84,176,255,0.24);
+            --accent: #42a5f5;
+            --warn: #7f97ad;
+          }
+          body.sun-mode {
+            --bg: #f2f7fc;
+            --panel: #ffffff;
+            --panel-soft: #f5f9fe;
+            --line: #cad9e8;
+            --text: #18324a;
+            --muted: #4f6a84;
+            --btn-bg: #edf4fb;
+            --btn-line: #a8c3dc;
+            --btn-hover: #dfebf8;
+            --input-bg: #ffffff;
+            --row-alt: #f8fbff;
+            --row-sel: rgba(66,165,245,0.22);
+            --accent: #287fcb;
+            --warn: #5b7894;
+          }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            padding: 12px;
+            font-family: Roboto, "Segoe UI", Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+          }
+          .shell {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--panel);
+            overflow: hidden;
+            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+          }
+          .head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--line);
+            background: linear-gradient(180deg, var(--panel-soft) 0%, var(--panel) 100%);
+          }
+          .head-title {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 700;
+          }
+          .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--line);
+            background: var(--panel-soft);
+          }
+          .toolbar button,
+          .toolbar select,
+          .toolbar input[type="text"] {
+            height: 32px;
+            border-radius: 8px;
+            border: 1px solid var(--btn-line);
+            background: var(--btn-bg);
+            color: var(--text);
+            padding: 0 10px;
+            font-size: 12px;
+          }
+          .toolbar button {
+            cursor: pointer;
+            font-weight: 600;
+          }
+          .toolbar button:hover {
+            background: var(--btn-hover);
+          }
+          .toolbar input[type="text"] {
+            min-width: 240px;
+            background: var(--input-bg);
+          }
+          .toolbar .selected-only {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid var(--btn-line);
+            border-radius: 8px;
+            padding: 5px 8px;
+            font-size: 12px;
+            background: var(--input-bg);
+          }
+          .toolbar .spacer {
+            flex: 1 1 auto;
+          }
+          .toolbar-status {
+            min-width: 140px;
+            text-align: right;
+            font-size: 12px;
+            color: var(--muted);
+          }
+          .table-wrap {
+            height: calc(100vh - 174px);
+            overflow: auto;
+            padding: 10px 12px 12px;
+          }
+          table {
+            border-collapse: collapse;
+            min-width: 100%;
+            width: max-content;
+            background: var(--panel);
+          }
+          th, td {
+            border: 1px solid var(--line);
+            padding: 6px 8px;
+            white-space: nowrap;
+            font-size: 12px;
+          }
+          th {
+            position: sticky;
+            top: 0;
+            background: var(--panel-soft);
+            text-align: left;
+          }
+          th button {
+            border: 0;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+            padding: 0;
+          }
+          tbody tr { cursor: pointer; }
+          tbody tr:nth-child(even) { background: var(--row-alt); }
+          tbody tr.selected { background: var(--row-sel); }
+          .note {
+            font-size: 12px;
+            color: var(--warn);
+          }
+          .record-tool {
+            display: none;
+          }
+          .record-tool.show {
+            display: inline-flex;
+          }
+          .refresh-btn {
+            border-color: var(--accent) !important;
+          }
         </style>
       </head>
-      <body>
-        <div class="bar">
-          <button onclick="window.close()">Close</button>
-          <input id="searchInput" type="text" placeholder="Filter streets by any field..." />
-          <label><input id="selectedOnly" type="checkbox" /> Selected only</label>
-          <button id="selectVisibleBtn">Select Visible</button>
-          <button id="clearSelectedBtn">Clear Selection</button>
-          <button id="zoomSelectedBtn">Zoom to Selected</button>
-          <button id="exportCsvBtn">Export CSV</button>
-          <button id="prevBtn">Prev</button>
-          <button id="nextBtn">Next</button>
-          <span id="pageInfo">Page 1/1</span>
-          <span id="status" class="status">0 selected</span>
-        </div>
-        <div class="wrap">
-          <table id="table"></table>
+      <body class="">
+        <div class="shell">
+          <div class="head">
+            <h2 class="head-title" id="headTitle"></h2>
+            <button type="button" id="closeBtn">Close</button>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="refreshBtn" class="refresh-btn">Refresh</button>
+            <input id="searchInput" type="text" />
+            <select id="sortFieldSelect" aria-label="Sort field"></select>
+            <button id="sortAscBtn" type="button">Least->Greatest</button>
+            <button id="sortDescBtn" type="button">Greatest->Least</button>
+            <button id="clearSortBtn" type="button">Clear Sort</button>
+            <button id="addFieldBtn" class="record-tool" type="button">Add Field</button>
+            <button id="fieldCalcBtn" class="record-tool" type="button">Field Calculator</button>
+            <label class="selected-only"><input id="selectedOnly" type="checkbox" /> Selected only</label>
+            <button id="selectVisibleBtn" type="button">Select Visible</button>
+            <button id="clearSelectedBtn" type="button">Clear Selection</button>
+            <button id="zoomSelectedBtn" type="button">Zoom to Selected</button>
+            <button id="exportCsvBtn" type="button">Export CSV</button>
+            <button id="prevBtn" type="button">Prev</button>
+            <button id="nextBtn" type="button">Next</button>
+            <span id="pageInfo">Page 1/1</span>
+            <span class="spacer"></span>
+            <span id="status" class="toolbar-status">0 selected</span>
+          </div>
+          <div class="table-wrap">
+            <table id="table"></table>
+            <div id="note" class="note"></div>
+          </div>
         </div>
         <script>
           const seed = ${seed};
-          const headers = seed.headers || [];
-          const rows = seed.rows || [];
-          let selectedSet = new Set(seed.selectedIds || []);
-          const state = { sortKey: null, sortDir: 1, filterText: "", selectedOnly: false, page: 1, pageSize: 300 };
+          const state = { sortKey: "", sortDir: 1, filterText: "", selectedOnly: false, page: 1, pageSize: 300 };
+          let headers = Array.isArray(seed.headers) ? seed.headers.slice() : [];
+          let rows = Array.isArray(seed.rows) ? seed.rows.slice() : [];
+          let selectedSet = new Set((seed.selectedIds || []).map(v => Number(v)).filter(Number.isFinite));
 
-          const table = document.getElementById("table");
-          const pageInfo = document.getElementById("pageInfo");
-          const status = document.getElementById("status");
-          const prevBtn = document.getElementById("prevBtn");
-          const nextBtn = document.getElementById("nextBtn");
+          document.body.className = seed.themeMode === "sun" ? "sun-mode" : "";
+          const headTitle = document.getElementById("headTitle");
+          const closeBtn = document.getElementById("closeBtn");
+          const refreshBtn = document.getElementById("refreshBtn");
           const searchInput = document.getElementById("searchInput");
+          const sortFieldSelect = document.getElementById("sortFieldSelect");
+          const sortAscBtn = document.getElementById("sortAscBtn");
+          const sortDescBtn = document.getElementById("sortDescBtn");
+          const clearSortBtn = document.getElementById("clearSortBtn");
+          const addFieldBtn = document.getElementById("addFieldBtn");
+          const fieldCalcBtn = document.getElementById("fieldCalcBtn");
           const selectedOnly = document.getElementById("selectedOnly");
           const selectVisibleBtn = document.getElementById("selectVisibleBtn");
           const clearSelectedBtn = document.getElementById("clearSelectedBtn");
           const zoomSelectedBtn = document.getElementById("zoomSelectedBtn");
           const exportCsvBtn = document.getElementById("exportCsvBtn");
+          const prevBtn = document.getElementById("prevBtn");
+          const nextBtn = document.getElementById("nextBtn");
+          const pageInfo = document.getElementById("pageInfo");
+          const status = document.getElementById("status");
+          const table = document.getElementById("table");
+          const note = document.getElementById("note");
+
+          headTitle.textContent = String(seed.title || "Attribute Table");
+          searchInput.placeholder = String(seed.filterPlaceholder || "Filter by any field...");
+          if (seed.allowRecordTools) {
+            addFieldBtn.classList.add("show");
+            fieldCalcBtn.classList.add("show");
+          }
+
+          function esc(v) {
+            return String(v ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          }
+
+          function callOpener(name, ...args) {
+            if (!name) return undefined;
+            if (!window.opener || window.opener.closed) return undefined;
+            const fn = window.opener[name];
+            if (typeof fn !== "function") return undefined;
+            try {
+              return fn(...args);
+            } catch {
+              return undefined;
+            }
+          }
 
           function setsEqual(a, b) {
             if (a.size !== b.size) return false;
@@ -12601,45 +19479,76 @@ function openStreetAttributeTablePopout() {
           }
 
           function pullSelectionFromOpener() {
-            if (!window.opener || typeof window.opener.getStreetSelectedSegmentIds !== "function") return false;
-            const ids = window.opener.getStreetSelectedSegmentIds() || [];
-            const next = new Set(ids.map(v => Number(v)).filter(v => Number.isFinite(v)));
+            const ids = callOpener(seed.selectionGetterName) || [];
+            const next = new Set((Array.isArray(ids) ? ids : []).map(v => Number(v)).filter(Number.isFinite));
             if (setsEqual(selectedSet, next)) return false;
             selectedSet = next;
             return true;
           }
 
           function pushSelectionToOpener() {
-            if (!window.opener || typeof window.opener.setStreetSelectedSegmentIds !== "function") return;
-            window.opener.setStreetSelectedSegmentIds([...selectedSet]);
+            callOpener(seed.selectionSetterName, [...selectedSet]);
           }
 
-          function esc(v) {
-            return String(v ?? "")
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;");
+          function refreshDatasetFromOpener(message = "") {
+            const snapshot = callOpener(seed.snapshotGetterName);
+            if (!snapshot || typeof snapshot !== "object") return false;
+            const nextHeaders = Array.isArray(snapshot.headers) ? snapshot.headers.slice() : [];
+            const nextRows = Array.isArray(snapshot.rows) ? snapshot.rows.slice() : [];
+            if (!nextHeaders.length || !nextRows.length) return false;
+            headers = nextHeaders;
+            rows = nextRows;
+            if (state.sortKey && !headers.includes(state.sortKey)) {
+              state.sortKey = "";
+              state.sortDir = 1;
+            }
+            if (message) note.textContent = message;
+            refreshSortFieldSelect();
+            render();
+            return true;
+          }
+
+          function refreshSortFieldSelect() {
+            const previous = String(state.sortKey || "");
+            sortFieldSelect.innerHTML = "";
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "Sort field...";
+            sortFieldSelect.appendChild(placeholder);
+            headers.forEach(field => {
+              const opt = document.createElement("option");
+              opt.value = String(field);
+              opt.textContent = String(field);
+              sortFieldSelect.appendChild(opt);
+            });
+            if ([...sortFieldSelect.options].some(option => option.value === previous)) {
+              sortFieldSelect.value = previous;
+            } else {
+              sortFieldSelect.value = "";
+            }
           }
 
           function getFilteredRows() {
-            const needle = (state.filterText || "").trim().toLowerCase();
+            const needle = String(state.filterText || "").trim().toLowerCase();
             let data = rows.slice();
             if (needle) {
-              data = data.filter(item => headers.some(h => String(item.values?.[h] ?? "").toLowerCase().includes(needle)));
+              data = data.filter(item =>
+                headers.some(h => String(item?.values?.[h] ?? "").toLowerCase().includes(needle))
+              );
             }
             if (state.selectedOnly) {
-              data = data.filter(item => selectedSet.has(item.rowId));
+              data = data.filter(item => selectedSet.has(Number(item?.rowId)));
             }
             if (state.sortKey) {
               const key = state.sortKey;
-              const dir = state.sortDir;
+              const dir = state.sortDir > 0 ? 1 : -1;
               data.sort((a, b) => {
-                const av = a.values?.[key];
-                const bv = b.values?.[key];
+                const av = a?.values?.[key];
+                const bv = b?.values?.[key];
                 const an = Number(av);
                 const bn = Number(bv);
                 if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
-                return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
+                return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true, sensitivity: "base" }) * dir;
               });
             }
             return data;
@@ -12647,17 +19556,19 @@ function openStreetAttributeTablePopout() {
 
           function exportCsv(items) {
             if (!items.length) return;
-            const csvEsc = (v) => {
-              const raw = String(v ?? "");
+            const csvEsc = value => {
+              const raw = String(value ?? "");
               return /[",\\n]/.test(raw) ? ('"' + raw.replace(/"/g, '""') + '"') : raw;
             };
             const lines = [headers.map(csvEsc).join(",")];
-            items.forEach(item => lines.push(headers.map(h => csvEsc(item.values?.[h] ?? "")).join(",")));
+            items.forEach(item => {
+              lines.push(headers.map(h => csvEsc(item?.values?.[h] ?? "")).join(","));
+            });
             const blob = new Blob([lines.join("\\n")], { type: "text/csv;charset=utf-8;" });
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
-            a.download = "street-attributes.csv";
+            a.download = String(seed.exportFileName || "attribute-table.csv");
             document.body.appendChild(a);
             a.click();
             a.remove();
@@ -12671,19 +19582,20 @@ function openStreetAttributeTablePopout() {
             const start = (state.page - 1) * state.pageSize;
             const pageRows = filtered.slice(start, start + state.pageSize);
 
-            const sortMarker = (key) => state.sortKey === key ? (state.sortDir > 0 ? " ^" : " v") : "";
+            const sortMarker = key => state.sortKey === key ? (state.sortDir > 0 ? " ^" : " v") : "";
             let html = "<thead><tr><th>Sel</th><th>#</th>";
             headers.forEach(h => {
               html += '<th><button type="button" data-sort="' + esc(h) + '">' + esc(h) + sortMarker(h) + "</button></th>";
             });
             html += "</tr></thead><tbody>";
-            pageRows.forEach((item, i) => {
-              const checked = selectedSet.has(item.rowId) ? " checked" : "";
-              html += '<tr data-row-id="' + item.rowId + '" class="' + (checked ? "selected" : "") + '">';
-              html += '<td><input type="checkbox" data-row-select="' + item.rowId + '"' + checked + "></td>";
-              html += "<td>" + (start + i + 1) + "</td>";
+            pageRows.forEach((item, index) => {
+              const rowId = Number(item?.rowId);
+              const checked = selectedSet.has(rowId) ? " checked" : "";
+              html += '<tr data-row-id="' + rowId + '" class="' + (checked ? "selected" : "") + '">';
+              html += '<td><input type="checkbox" data-row-select="' + rowId + '"' + checked + "></td>";
+              html += "<td>" + (start + index + 1) + "</td>";
               headers.forEach(h => {
-                html += "<td>" + esc(item.values?.[h] ?? "") + "</td>";
+                html += "<td>" + esc(item?.values?.[h] ?? "") + "</td>";
               });
               html += "</tr>";
             });
@@ -12694,10 +19606,11 @@ function openStreetAttributeTablePopout() {
             status.textContent = selectedSet.size + " selected • " + filtered.length + " visible";
             prevBtn.disabled = state.page <= 1;
             nextBtn.disabled = state.page >= totalPages;
+            sortFieldSelect.value = state.sortKey || "";
 
             table.querySelectorAll("button[data-sort]").forEach(btn => {
               btn.addEventListener("click", () => {
-                const key = btn.getAttribute("data-sort");
+                const key = String(btn.getAttribute("data-sort") || "");
                 if (!key) return;
                 if (state.sortKey === key) state.sortDir *= -1;
                 else { state.sortKey = key; state.sortDir = 1; }
@@ -12718,27 +19631,63 @@ function openStreetAttributeTablePopout() {
             });
 
             table.querySelectorAll("tbody tr[data-row-id]").forEach(tr => {
-              tr.addEventListener("click", (e) => {
-                if (e.target.closest("input")) return;
+              tr.addEventListener("click", event => {
+                if (event.target.closest("input")) return;
                 const rowId = Number(tr.getAttribute("data-row-id"));
-                if (window.opener && Number.isFinite(rowId) && typeof window.opener.focusStreetSegmentOnMap === "function") {
-                  window.opener.focusStreetSegmentOnMap(rowId);
-                }
+                if (!Number.isFinite(rowId)) return;
+                callOpener(seed.focusRowName, rowId);
               });
             });
           }
 
-          searchInput.addEventListener("input", () => { state.filterText = searchInput.value || ""; state.page = 1; render(); });
+          closeBtn.addEventListener("click", () => window.close());
+          refreshBtn.addEventListener("click", () => {
+            const ok = refreshDatasetFromOpener("Data refreshed from main window.");
+            if (!ok) note.textContent = "Refresh did not return updated data.";
+          });
+          searchInput.addEventListener("input", () => {
+            state.filterText = searchInput.value || "";
+            state.page = 1;
+            render();
+          });
+          sortFieldSelect.addEventListener("change", () => {
+            state.sortKey = String(sortFieldSelect.value || "");
+            state.sortDir = 1;
+            state.page = 1;
+            render();
+          });
+          sortAscBtn.addEventListener("click", () => {
+            if (!state.sortKey) state.sortKey = String(sortFieldSelect.value || "");
+            if (!state.sortKey) return;
+            state.sortDir = 1;
+            state.page = 1;
+            render();
+          });
+          sortDescBtn.addEventListener("click", () => {
+            if (!state.sortKey) state.sortKey = String(sortFieldSelect.value || "");
+            if (!state.sortKey) return;
+            state.sortDir = -1;
+            state.page = 1;
+            render();
+          });
+          clearSortBtn.addEventListener("click", () => {
+            state.sortKey = "";
+            state.sortDir = 1;
+            state.page = 1;
+            sortFieldSelect.value = "";
+            render();
+          });
           selectedOnly.addEventListener("change", () => {
             pullSelectionFromOpener();
             state.selectedOnly = !!selectedOnly.checked;
             state.page = 1;
             render();
           });
-          prevBtn.addEventListener("click", () => { state.page = Math.max(1, state.page - 1); render(); });
-          nextBtn.addEventListener("click", () => { state.page += 1; render(); });
           selectVisibleBtn.addEventListener("click", () => {
-            getFilteredRows().forEach(item => selectedSet.add(item.rowId));
+            getFilteredRows().forEach(item => {
+              const rowId = Number(item?.rowId);
+              if (Number.isFinite(rowId)) selectedSet.add(rowId);
+            });
             pushSelectionToOpener();
             render();
           });
@@ -12749,26 +19698,45 @@ function openStreetAttributeTablePopout() {
           });
           zoomSelectedBtn.addEventListener("click", () => {
             pullSelectionFromOpener();
-            const selectedIds = [...selectedSet];
-            if (!selectedIds.length) return;
-            if (window.opener && typeof window.opener.zoomToStreetSegmentsOnMap === "function") {
-              const ok = window.opener.zoomToStreetSegmentsOnMap(selectedIds);
-              if (ok) return;
-            }
-            if (window.opener && typeof window.opener.focusStreetSegmentOnMap === "function") {
-              window.opener.focusStreetSegmentOnMap(selectedIds[0]);
-            }
+            const ids = [...selectedSet];
+            if (!ids.length) return;
+            const ok = callOpener(seed.zoomName, ids);
+            if (!ok && ids.length) callOpener(seed.focusRowName, ids[0]);
           });
           exportCsvBtn.addEventListener("click", () => exportCsv(getFilteredRows()));
+          prevBtn.addEventListener("click", () => {
+            state.page = Math.max(1, state.page - 1);
+            render();
+          });
+          nextBtn.addEventListener("click", () => {
+            state.page += 1;
+            render();
+          });
+
+          addFieldBtn.addEventListener("click", () => {
+            if (!seed.allowRecordTools) return;
+            callOpener(seed.addFieldActionName);
+            setTimeout(() => {
+              refreshDatasetFromOpener("Field list refreshed after Add Field.");
+            }, 150);
+          });
+          fieldCalcBtn.addEventListener("click", () => {
+            if (!seed.allowRecordTools) return;
+            const opened = callOpener(seed.openFieldCalcActionName);
+            if (opened === false) note.textContent = "Unable to open Field Calculator in main window.";
+            else note.textContent = "Field Calculator opened in main window.";
+          });
 
           window.addEventListener("focus", () => {
-            if (pullSelectionFromOpener()) render();
+            const changed = pullSelectionFromOpener();
+            if (changed) render();
           });
           setInterval(() => {
             const changed = pullSelectionFromOpener();
             if (changed) render();
-          }, 500);
+          }, 600);
 
+          refreshSortFieldSelect();
           pullSelectionFromOpener();
           render();
         <\/script>
@@ -12776,6 +19744,28 @@ function openStreetAttributeTablePopout() {
     </html>
   `);
   win.document.close();
+}
+
+function openStreetAttributeTablePopout() {
+  const snapshot = window.getStreetAttributePopoutSnapshot();
+  if (!snapshot.rows.length) {
+    alert("No street attributes to open.");
+    return;
+  }
+  openAttributeLikePopoutWindow({
+    title: "Street Attributes",
+    headers: snapshot.headers,
+    rows: snapshot.rows,
+    initialSelectedIds: [...streetAttributeSelectedIds],
+    snapshotGetterName: "getStreetAttributePopoutSnapshot",
+    selectionGetterName: "getStreetSelectedSegmentIds",
+    selectionSetterName: "setStreetSelectedSegmentIds",
+    focusRowName: "focusStreetSegmentOnMap",
+    zoomName: "zoomToStreetSegmentsOnMap",
+    exportFileName: "street-attributes.csv",
+    filterPlaceholder: "Filter streets by any field...",
+    allowRecordTools: false
+  });
 }
 
 function openAttributeTablePopout() {
@@ -12783,270 +19773,28 @@ function openAttributeTablePopout() {
     openStreetAttributeTablePopout();
     return;
   }
-  const headers = window._attributeHeaders || [];
-  const rows = (window._currentRows || [])
-    .map(row => ({ rowId: getAttributeRowId(row), values: row }))
-    .filter(item => Number.isFinite(item.rowId));
-  if (!headers.length || !rows.length) {
+  const snapshot = window.getRecordAttributePopoutSnapshot();
+  if (!snapshot.headers.length || !snapshot.rows.length) {
     alert("No attribute data to open.");
     return;
   }
-
-  const win = window.open("", "_blank", "width=1180,height=700,resizable=yes,scrollbars=yes");
-  if (!win) {
-    alert("Unable to open attribute table window.");
-    return;
-  }
-
-  const seed = JSON.stringify({
-    headers,
-    rows,
-    selectedIds: [...attributeState.selectedRowIds]
-  }).replace(/</g, "\\u003c");
-
-  win.document.write(`
-    <html>
-      <head>
-        <title>Attribute Table</title>
-        <style>
-          body { margin:0; font-family: Roboto, Arial, sans-serif; background:#0f1822; color:#e8f2fd; }
-          .bar { position:sticky; top:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px; background:#1a2938; border-bottom:1px solid #31495f; z-index:4; }
-          .bar button { border:1px solid #5a7ca1; background:#2a4258; color:#edf6ff; border-radius:8px; padding:6px 10px; cursor:pointer; }
-          .bar input[type=text] { min-width:220px; height:32px; border-radius:8px; border:1px solid #5a7ca1; background:#111a24; color:#eaf3fc; padding:0 10px; }
-          .bar label { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid #48647e; border-radius:8px; padding:5px 8px; background:#132130; }
-          .status { margin-left:auto; font-size:12px; color:#c8dcf1; }
-          .wrap { padding:10px; height:calc(100vh - 128px); overflow:auto; }
-          table { border-collapse:collapse; min-width:100%; width:max-content; background:#16212b; }
-          th, td { border:1px solid #31475b; padding:6px 8px; white-space:nowrap; font-size:12px; }
-          th { position:sticky; top:0; background:#26394a; text-align:left; }
-          th button { border:0; background:transparent; color:inherit; font:inherit; font-weight:700; cursor:pointer; padding:0; }
-          tbody tr { cursor:pointer; }
-          tbody tr:nth-child(even) { background:#192633; }
-          tbody tr.selected { background: rgba(84,176,255,0.22); }
-        </style>
-      </head>
-      <body>
-        <div class="bar">
-          <button onclick="window.close()">Close</button>
-          <input id="searchInput" type="text" placeholder="Filter records by any field..." />
-          <label><input id="selectedOnly" type="checkbox" /> Selected only</label>
-          <button id="selectVisibleBtn">Select Visible</button>
-          <button id="clearSelectedBtn">Clear Selection</button>
-          <button id="zoomSelectedBtn">Zoom to Selected</button>
-          <button id="exportCsvBtn">Export CSV</button>
-          <button id="prevBtn">Prev</button>
-          <button id="nextBtn">Next</button>
-          <span id="pageInfo">Page 1/1</span>
-          <span id="status" class="status">0 selected</span>
-        </div>
-        <div class="wrap">
-          <table id="table"></table>
-        </div>
-        <script>
-          const seed = ${seed};
-          const headers = seed.headers || [];
-          const rows = seed.rows || [];
-          let selectedSet = new Set(seed.selectedIds || []);
-          const state = { sortKey: null, sortDir: 1, filterText: "", selectedOnly: false, page: 1, pageSize: 300 };
-
-          const table = document.getElementById("table");
-          const pageInfo = document.getElementById("pageInfo");
-          const status = document.getElementById("status");
-          const prevBtn = document.getElementById("prevBtn");
-          const nextBtn = document.getElementById("nextBtn");
-          const searchInput = document.getElementById("searchInput");
-          const selectedOnly = document.getElementById("selectedOnly");
-          const selectVisibleBtn = document.getElementById("selectVisibleBtn");
-          const clearSelectedBtn = document.getElementById("clearSelectedBtn");
-          const zoomSelectedBtn = document.getElementById("zoomSelectedBtn");
-          const exportCsvBtn = document.getElementById("exportCsvBtn");
-
-          function setsEqual(a, b) {
-            if (a.size !== b.size) return false;
-            for (const value of a) {
-              if (!b.has(value)) return false;
-            }
-            return true;
-          }
-
-          function pullSelectionFromOpener() {
-            if (!window.opener || typeof window.opener.getAttributeSelectedRowIds !== "function") return false;
-            const ids = window.opener.getAttributeSelectedRowIds() || [];
-            const next = new Set(ids.map(v => Number(v)).filter(v => Number.isFinite(v)));
-            if (setsEqual(selectedSet, next)) return false;
-            selectedSet = next;
-            return true;
-          }
-
-          function pushSelectionToOpener() {
-            if (!window.opener || typeof window.opener.setAttributeSelectedRowIds !== "function") return;
-            window.opener.setAttributeSelectedRowIds([...selectedSet]);
-          }
-
-          function esc(v) {
-            return String(v ?? "")
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;");
-          }
-
-          function getFilteredRows() {
-            const needle = (state.filterText || "").trim().toLowerCase();
-            let data = rows.slice();
-            if (needle) {
-              data = data.filter(item => headers.some(h => String(item.values?.[h] ?? "").toLowerCase().includes(needle)));
-            }
-            if (state.selectedOnly) {
-              data = data.filter(item => selectedSet.has(item.rowId));
-            }
-            if (state.sortKey) {
-              const key = state.sortKey;
-              const dir = state.sortDir;
-              data.sort((a, b) => {
-                const av = a.values?.[key];
-                const bv = b.values?.[key];
-                const an = Number(av);
-                const bn = Number(bv);
-                if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
-                return String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true }) * dir;
-              });
-            }
-            return data;
-          }
-
-          function exportCsv(items) {
-            if (!items.length) return;
-            const csvEsc = (v) => {
-              const raw = String(v ?? "");
-              return /[",\\n]/.test(raw) ? ('"' + raw.replace(/"/g, '""') + '"') : raw;
-            };
-            const lines = [headers.map(csvEsc).join(",")];
-            items.forEach(item => lines.push(headers.map(h => csvEsc(item.values?.[h] ?? "")).join(",")));
-            const blob = new Blob([lines.join("\\n")], { type: "text/csv;charset=utf-8;" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = "attribute-table.csv";
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-          }
-
-          function render() {
-            const filtered = getFilteredRows();
-            const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
-            state.page = Math.max(1, Math.min(state.page, totalPages));
-            const start = (state.page - 1) * state.pageSize;
-            const pageRows = filtered.slice(start, start + state.pageSize);
-
-            const sortMarker = (key) => state.sortKey === key ? (state.sortDir > 0 ? " ▲" : " ▼") : "";
-            let html = "<thead><tr><th>Sel</th><th>#</th>";
-            headers.forEach(h => {
-              html += '<th><button type="button" data-sort="' + esc(h) + '">' + esc(h) + sortMarker(h) + "</button></th>";
-            });
-            html += "</tr></thead><tbody>";
-            pageRows.forEach((item, i) => {
-              const checked = selectedSet.has(item.rowId) ? " checked" : "";
-              html += '<tr data-row-id="' + item.rowId + '" class="' + (checked ? "selected" : "") + '">';
-              html += '<td><input type="checkbox" data-row-select="' + item.rowId + '"' + checked + "></td>";
-              html += "<td>" + (start + i + 1) + "</td>";
-              headers.forEach(h => {
-                html += "<td>" + esc(item.values?.[h] ?? "") + "</td>";
-              });
-              html += "</tr>";
-            });
-            html += "</tbody>";
-            table.innerHTML = html;
-
-            pageInfo.textContent = "Page " + state.page + "/" + totalPages;
-            status.textContent = selectedSet.size + " selected • " + filtered.length + " visible";
-            prevBtn.disabled = state.page <= 1;
-            nextBtn.disabled = state.page >= totalPages;
-
-            table.querySelectorAll("button[data-sort]").forEach(btn => {
-              btn.addEventListener("click", () => {
-                const key = btn.getAttribute("data-sort");
-                if (!key) return;
-                if (state.sortKey === key) state.sortDir *= -1;
-                else { state.sortKey = key; state.sortDir = 1; }
-                state.page = 1;
-                render();
-              });
-            });
-
-            table.querySelectorAll("input[data-row-select]").forEach(input => {
-              input.addEventListener("change", () => {
-                const rowId = Number(input.getAttribute("data-row-select"));
-                if (!Number.isFinite(rowId)) return;
-                if (input.checked) selectedSet.add(rowId);
-                else selectedSet.delete(rowId);
-                pushSelectionToOpener();
-                render();
-              });
-            });
-
-            table.querySelectorAll("tbody tr[data-row-id]").forEach(tr => {
-              tr.addEventListener("click", (e) => {
-                if (e.target.closest("input")) return;
-                const rowId = Number(tr.getAttribute("data-row-id"));
-                if (window.opener && Number.isFinite(rowId) && typeof window.opener.focusAttributeRowOnMap === "function") {
-                  window.opener.focusAttributeRowOnMap(rowId);
-                }
-              });
-            });
-          }
-
-          searchInput.addEventListener("input", () => { state.filterText = searchInput.value || ""; state.page = 1; render(); });
-          selectedOnly.addEventListener("change", () => {
-            pullSelectionFromOpener();
-            state.selectedOnly = !!selectedOnly.checked;
-            state.page = 1;
-            render();
-          });
-          prevBtn.addEventListener("click", () => { state.page = Math.max(1, state.page - 1); render(); });
-          nextBtn.addEventListener("click", () => { state.page += 1; render(); });
-          selectVisibleBtn.addEventListener("click", () => {
-            getFilteredRows().forEach(item => selectedSet.add(item.rowId));
-            pushSelectionToOpener();
-            render();
-          });
-          clearSelectedBtn.addEventListener("click", () => {
-            selectedSet.clear();
-            pushSelectionToOpener();
-            render();
-          });
-          zoomSelectedBtn.addEventListener("click", () => {
-            pullSelectionFromOpener();
-            const selectedIds = [...selectedSet];
-            if (!selectedIds.length) return;
-            if (window.opener && typeof window.opener.zoomToAttributeRowsOnMap === "function") {
-              const ok = window.opener.zoomToAttributeRowsOnMap(selectedIds);
-              if (ok) return;
-            }
-            if (window.opener && typeof window.opener.focusAttributeRowOnMap === "function") {
-              window.opener.focusAttributeRowOnMap(selectedIds[0]);
-            }
-          });
-          exportCsvBtn.addEventListener("click", () => exportCsv(getFilteredRows()));
-
-          window.addEventListener("focus", () => {
-            if (pullSelectionFromOpener()) render();
-          });
-          setInterval(() => {
-            const changed = pullSelectionFromOpener();
-            if (changed) render();
-          }, 500);
-
-          pullSelectionFromOpener();
-          render();
-        <\/script>
-      </body>
-    </html>
-  `);
-  win.document.close();
+  openAttributeLikePopoutWindow({
+    title: "Attribute Table",
+    headers: snapshot.headers,
+    rows: snapshot.rows,
+    initialSelectedIds: [...attributeState.selectedRowIds],
+    snapshotGetterName: "getRecordAttributePopoutSnapshot",
+    selectionGetterName: "getAttributeSelectedRowIds",
+    selectionSetterName: "setAttributeSelectedRowIds",
+    focusRowName: "focusAttributeRowOnMap",
+    zoomName: "zoomToAttributeRowsOnMap",
+    exportFileName: "attribute-table.csv",
+    filterPlaceholder: "Filter records by any field...",
+    allowRecordTools: true,
+    addFieldActionName: "promptAndAddAttributeFieldFromPopout",
+    openFieldCalcActionName: "openFieldCalculatorFromPopout"
+  });
 }
-
 async function prepareMappedWorkbookForUpload(buffer, fileName) {
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -13087,11 +19835,17 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
   const ws = wb.Sheets[wb.SheetNames[0]];
 
   const rows = preMappedRows || XLSX.utils.sheet_to_json(ws);
+  ensureCanonicalRecordFields(rows);
+  ensureServiceTimeField(rows);
+  ensureExistBackupColumns(rows);
+  syncSetSegmentMatchStatusFields(rows);
 
   // store globally for saving later
   window._currentRows = rows;
   window._currentWorkbook = wb;
   window._attributeHeaders = getAttributeHeaders(rows);
+  attributeState.sortKey = null;
+  attributeState.sortDir = 1;
   attributeState.page = 1;
   attributeState.selectedRowIds.clear();
   syncSelectedStopsHeaderCount(0);
@@ -13100,6 +19854,7 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
   rows.forEach((row, rowIndex) => attributeRowToId.set(row, rowIndex));
 
   // Clear previous map data
+  clearSequenceLayerData({ silent: true });
   Object.values(routeDayGroups).forEach(g => g.layers.forEach(l => map.removeLayer(l)));
   Object.keys(routeDayGroups).forEach(k => delete routeDayGroups[k]);
   Object.keys(symbolMap).forEach(k => delete symbolMap[k]);
@@ -13113,8 +19868,8 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
     const lon = Number(row.LONGITUDE);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
-    const route = String(row.NEWROUTE ?? "").trim() || "Unassigned";
-    const day = String(row.NEWDAY ?? "").trim() || "No Day";
+    const route = getMappedRowRoute(row) || "Unassigned";
+    const day = getMappedRowDayRaw(row) || "No Day";
 
     const key = `${route}|${day}`;
 
@@ -13156,7 +19911,7 @@ if (labelText) {
 }
 
 
-    // 🔥 CRITICAL: link marker to Excel row
+    // ðŸ”¥ CRITICAL: link marker to Excel row
     marker._rowRef = row;
     marker._rowId = rowIndex;
     attributeRowToMarker.set(row, marker);
@@ -13306,7 +20061,7 @@ async function listFiles() {
         processExcelBuffer(await r.arrayBuffer());
         await loadSummaryFor(routeName);
 
-        hideLoading("File Loaded Successfully ✅");
+        hideLoading("File Loaded Successfully âœ…");
         if (fileManagerModal) fileManagerModal.style.display = "none";
       } catch (err) {
         console.error(err);
@@ -13338,7 +20093,7 @@ async function listFiles() {
     delBtn.onclick = async () => {
       const entered = prompt("Enter password to delete this file:");
       if (entered !== DELETE_PASSWORD) {
-        alert("❌ Incorrect password. File not deleted.");
+        alert("âŒ Incorrect password. File not deleted.");
         return;
       }
 
@@ -13358,7 +20113,7 @@ async function listFiles() {
         setSummaryAttachments(map);
       }
 
-      alert("✅ File deleted successfully.");
+      alert("âœ… File deleted successfully.");
       listFiles();
     };
     actions.appendChild(delBtn);
@@ -13396,7 +20151,7 @@ async function uploadFile(file) {
     processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
     listFiles();
 
-    hideLoading("Upload Complete ✅");
+    hideLoading("Upload Complete âœ…");
 
   } catch (error) {
     console.error("UPLOAD ERROR:", error);
@@ -13735,14 +20490,14 @@ function autoCollapseSidebarsForSummary() {
   if (toggleSidebarBtn) toggleSidebarBtn.setAttribute("aria-expanded", "false");
   if (sidebar) sidebar.classList.remove("open");
   if (overlay) overlay.classList.remove("show");
-  if (mobileMenuBtn) mobileMenuBtn.textContent = "☰";
+  if (mobileMenuBtn) mobileMenuBtn.textContent = "â˜°";
 
   // Right sidebar: collapse desktop and hide mobile panel.
   if (selectionBox) {
     selectionBox.classList.add("collapsed");
     selectionBox.classList.remove("show");
   }
-  if (toggleSelectionBtn) toggleSelectionBtn.textContent = "❮";
+  if (toggleSelectionBtn) toggleSelectionBtn.textContent = "â®";
 
   setTimeout(() => map.invalidateSize(), 180);
 }
@@ -13782,7 +20537,7 @@ if (startRow === -1) {
   return;
 }
 
-// ===== DETECT MULTI-ROW HEADERS (supports 1–3+) =====
+// ===== DETECT MULTI-ROW HEADERS (supports 1â€“3+) =====
 let headerRows = [raw[startRow]];
 let nextRow = raw[startRow + 1];
 let thirdRow = raw[startRow + 2];
@@ -13829,7 +20584,7 @@ showRouteSummary(rows, headers);
 autoCollapseSidebarsForSummary();
 
 
-// 🔽 FORCE the panel open when a summary exists
+// ðŸ”½ FORCE the panel open when a summary exists
 const panel = document.getElementById("bottomSummary");
 const btn = document.getElementById("summaryToggleBtn");
 
@@ -13837,7 +20592,7 @@ const isMobile = window.innerWidth <= 900;
 
 if (panel && btn && !isMobile) {
   panel.classList.remove("collapsed");
-  btn.textContent = "▼";
+  btn.textContent = "â–¼";
 }
 
 
@@ -13855,7 +20610,7 @@ function toggleSummary() {
   panel.classList.toggle("collapsed");
 
   // flip arrow direction
-  btn.textContent = panel.classList.contains("collapsed") ? "▲" : "▼";
+  btn.textContent = panel.classList.contains("collapsed") ? "â–²" : "â–¼";
 }
 // ===== PLACE LOCATE BUTTON BASED ON SCREEN SIZE =====
 function placeLocateButton() {
@@ -13867,7 +20622,7 @@ function placeLocateButton() {
   if (!locateBtn || !headerContainer || !desktopContainer) return;
 
   if (window.innerWidth <= 900) {
-    // 📱 MOBILE
+    // ðŸ“± MOBILE
     headerContainer.appendChild(locateBtn);
 
     if (streetToggle) {
@@ -13875,7 +20630,7 @@ function placeLocateButton() {
     }
 
   } else {
-    // 🖥 DESKTOP
+    // ðŸ–¥ DESKTOP
     desktopContainer.appendChild(locateBtn);
 
     if (streetToggle) {
@@ -13923,13 +20678,13 @@ const selectionClearShapeBtn = document.getElementById("selectionClearShapeBtn")
 
 // Start with the right sidebar closed on initial page load.
 if (selectionBox) selectionBox.classList.add("collapsed");
-if (toggleSelectionBtn) toggleSelectionBtn.textContent = "❮";
+if (toggleSelectionBtn) toggleSelectionBtn.textContent = "â®";
 
 // Toggle sidebar open/closed
 if (selectionBox && toggleSelectionBtn) {
   toggleSelectionBtn.onclick = () => {
     const collapsed = selectionBox.classList.toggle("collapsed");
-    toggleSelectionBtn.textContent = collapsed ? "❮" : "❯";
+    toggleSelectionBtn.textContent = collapsed ? "â®" : "â¯";
   };
 }
 
@@ -14098,7 +20853,7 @@ if (clearBtn) {
       });
     });
 
-    // 🔥 Force counter refresh everywhere (desktop + mobile)
+    // ðŸ”¥ Force counter refresh everywhere (desktop + mobile)
     updateSelectionCount();
     renderAttributeTable();
     updateUndoButtonState();
@@ -14127,6 +20882,11 @@ const attributeSelectVisibleBtn = document.getElementById("attributeSelectVisibl
 const attributeClearSelectionBtn = document.getElementById("attributeClearSelectionBtn");
 const attributeZoomSelectedBtn = document.getElementById("attributeZoomSelectedBtn");
 const attributeExportCsvBtn = document.getElementById("attributeExportCsvBtn");
+const attributeSortFieldSelect = document.getElementById("attributeSortFieldSelect");
+const attributeSortAscBtn = document.getElementById("attributeSortAscBtn");
+const attributeSortDescBtn = document.getElementById("attributeSortDescBtn");
+const attributeClearSortBtn = document.getElementById("attributeClearSortBtn");
+const attributeAddFieldBtn = document.getElementById("attributeAddFieldBtn");
 const attributePrevPageBtn = document.getElementById("attributePrevPageBtn");
 const attributeNextPageBtn = document.getElementById("attributeNextPageBtn");
 const attributeHeaderBar = attributePanel?.querySelector(".attribute-table-header");
@@ -14376,6 +21136,29 @@ attributeZoomSelectedBtn?.addEventListener("click", () => {
   else zoomToSelectedAttributeRows();
 });
 attributeExportCsvBtn?.addEventListener("click", exportAttributeVisibleRowsToCsv);
+attributeSortFieldSelect?.addEventListener("change", () => {
+  const key = String(attributeSortFieldSelect.value || "").trim();
+  if (!key) {
+    attributeState.sortKey = null;
+    attributeState.sortDir = 1;
+    attributeState.page = 1;
+    renderAttributeTable();
+    return;
+  }
+  attributeState.sortKey = key;
+  attributeState.sortDir = 1;
+  attributeState.page = 1;
+  renderAttributeTable();
+});
+attributeSortAscBtn?.addEventListener("click", () => applyAttributeSortFromToolbar(1));
+attributeSortDescBtn?.addEventListener("click", () => applyAttributeSortFromToolbar(-1));
+attributeClearSortBtn?.addEventListener("click", () => {
+  attributeState.sortKey = null;
+  attributeState.sortDir = 1;
+  attributeState.page = 1;
+  renderAttributeTable();
+});
+attributeAddFieldBtn?.addEventListener("click", promptAndAddAttributeField);
 attributePrevPageBtn?.addEventListener("click", () => {
   attributeState.page = Math.max(1, attributeState.page - 1);
   renderAttributeTable();
@@ -14404,6 +21187,7 @@ renderAttributeTable();
 initMultiDayManagerControls();
 initServiceDayLabelLayerControls();
 initTexasLandfillsLayerControls();
+initSequenceLayerControls();
 
 const importWizardBtn = document.getElementById("importWizardBtn");
 const importWizardBtnMobile = document.getElementById("importWizardBtnMobile");
@@ -14495,8 +21279,14 @@ tryRestoreSavedStreetSourceOnStartup().catch(err => {
 });
 initStreetNetworkToggle();
 initSelectByAttributesControls();
+initFieldCalculatorControls();
+initUpdateFieldControls();
 initPrintCenterControls();
 initLayerManagerControls();
+initFacilitiesControls();
+syncRouteSequencerFacilitiesLayer();
+initRouteSequencerControls();
+initSetSegmentIdSideControls();
 
 
 
@@ -14592,7 +21382,7 @@ if (mobileMenuBtn && sidebar && overlay) {
     }
     const open = sidebar.classList.toggle("open");
 
-    mobileMenuBtn.textContent = open ? "✕" : "☰";
+    mobileMenuBtn.textContent = open ? "âœ•" : "â˜°";
     overlay.classList.toggle("show", open);
     if (open) {
       sidebar.scrollTop = 0;
@@ -14607,7 +21397,7 @@ if (mobileMenuBtn && sidebar && overlay) {
   overlay.addEventListener("click", () => {
     sidebar.classList.remove("open");
     overlay.classList.remove("show");
-    mobileMenuBtn.textContent = "☰";
+    mobileMenuBtn.textContent = "â˜°";
   });
 }
 // ===== MOBILE SELECTION TOGGLE =====
@@ -14647,7 +21437,7 @@ if (mobileSelBtn && selectionBox) {
     // Start collapsed on initial load (desktop + mobile)
     panel.classList.add("collapsed");
     panel.style.height = "40px";
-    if (toggleBtn) toggleBtn.textContent = "▲";
+    if (toggleBtn) toggleBtn.textContent = "â–²";
 
     // Drag resize (mouse + touch/pen) while preserving button clicks in header
     header.addEventListener("pointerdown", e => {
@@ -14673,7 +21463,7 @@ if (mobileSelBtn && selectionBox) {
       // If user drags upward from collapsed state, immediately reveal summary content.
       if (panel.classList.contains("collapsed") && newHeight > minHeight + 2) {
         panel.classList.remove("collapsed");
-        if (toggleBtn) toggleBtn.textContent = "â–¼";
+        if (toggleBtn) toggleBtn.textContent = "Ã¢â€“Â¼";
       }
     });
 
@@ -14685,10 +21475,10 @@ if (mobileSelBtn && selectionBox) {
       if (panel.offsetHeight <= minHeight + 2) {
         panel.classList.add("collapsed");
         panel.style.height = "40px";
-        if (toggleBtn) toggleBtn.textContent = "â–²";
+        if (toggleBtn) toggleBtn.textContent = "Ã¢â€“Â²";
       } else {
         panel.classList.remove("collapsed");
-        if (toggleBtn) toggleBtn.textContent = "â–¼";
+        if (toggleBtn) toggleBtn.textContent = "Ã¢â€“Â¼";
         storageSet("summaryHeight", panel.offsetHeight);
       }
 
@@ -14706,7 +21496,7 @@ if (toggleBtn) {
    if (isCollapsed) {
   storageSet("summaryHeight", panel.offsetHeight);
   panel.style.height = "40px";
-  toggleBtn.textContent = "▲";
+  toggleBtn.textContent = "â–²";
 } else {
   let restored = storageGet("summaryHeight");
 
@@ -14715,7 +21505,7 @@ if (toggleBtn) {
   }
 
   panel.style.height = restored + "px";
-  toggleBtn.textContent = "▼";
+  toggleBtn.textContent = "â–¼";
 }
 
   };
@@ -14740,6 +21530,7 @@ if (toggleBtn) {
       }
 
       const mapUrl = window.location.href;
+      const summaryPopoutTheme = document.body.classList.contains("sun-mode") ? "sun" : "dark";
       const win = useSameWindowForSummary
         ? window
         : window.open("", "_blank", "width=900,height=600,resizable=yes,scrollbars=yes");
@@ -14876,12 +21667,44 @@ if (toggleBtn) {
                 transform: translateY(0) scale(1);
               }
               th:first-child, td:first-child { border-left: 1px solid var(--line); }
+              body.dark-mode {
+                --bg: #0f1822;
+                --panel: #142232;
+                --line: #2c4459;
+                --head: #1b2d3e;
+                --text: #e4effa;
+                --muted: #9ab6d3;
+                --accent: #42a5f5;
+              }
+              body.dark-mode {
+                background: radial-gradient(circle at 10% 0%, #1a2c3f 0%, var(--bg) 42%);
+              }
+              body.dark-mode .summary-shell {
+                box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
+              }
+              body.dark-mode .summary-header {
+                background: linear-gradient(180deg, #21374b 0%, #1a2d3f 100%);
+              }
+              body.dark-mode .summary-back-btn {
+                border-color: #4f6f8f;
+                background: #1b3044;
+                color: #e4effa;
+              }
+              body.dark-mode .summary-back-btn:hover {
+                background: #26405a;
+              }
+              body.dark-mode tr:nth-child(even) td {
+                background: #172838;
+              }
+              body.dark-mode tr:hover td {
+                background: #20384d;
+              }
             </style>
           </head>
-          <body>
+          <body class="${summaryPopoutTheme === "sun" ? "sun-mode" : "dark-mode"}">
             <div class="summary-shell">
               <div class="summary-header">
-                <button class="summary-back-btn" onclick="returnToMap()">← Back to Map</button>
+                <button class="summary-back-btn" onclick="returnToMap()">â† Back to Map</button>
                 <h2 class="summary-title">Route Summary</h2>
                 <span class="summary-note">Scroll to view all columns and rows</span>
               </div>
@@ -15550,6 +22373,7 @@ if (toggleBtn) {
         .join("");
 
       const mapUrl = window.location.href;
+      const summaryVizPopoutTheme = document.body.classList.contains("sun-mode") ? "sun" : "dark";
       const win = useSameWindowForSummary
         ? window
         : window.open("", "_blank", "width=1080,height=760,resizable=yes,scrollbars=yes");
@@ -15619,13 +22443,55 @@ if (toggleBtn) {
                 .grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
                 .bar-row { grid-template-columns: 170px 1fr 90px; }
               }
+              body.dark-mode {
+                --bg:#0f1822;
+                --panel:#142232;
+                --line:#2c4459;
+                --text:#e4effa;
+                --muted:#9ab6d3;
+                --a:#42a5f5;
+                --b:#2bbfa9;
+              }
+              body.dark-mode {
+                background: radial-gradient(circle at 10% 0%, #1a2c3f 0%, var(--bg) 45%);
+              }
+              body.dark-mode .shell {
+                box-shadow:0 14px 30px rgba(0,0,0,.34);
+              }
+              body.dark-mode .head {
+                background:linear-gradient(180deg,#21374b 0%,#1a2d3f 100%);
+              }
+              body.dark-mode .summary-back-btn {
+                border-color:#4f6f8f;
+                background:#1b3044;
+                color:var(--text);
+              }
+              body.dark-mode .summary-back-btn:hover { background:#26405a; }
+              body.dark-mode .card { background:#1a2d3f; }
+              body.dark-mode .section-route-row:hover { background:#21384d; }
+              body.dark-mode .bar-track { background:#1f3447; }
+              body.dark-mode .bar-track.alt { background:#1a3e39; }
+              body.dark-mode .chart-wrap,
+              body.dark-mode .table-wrap,
+              body.dark-mode .section-modal-card { background:#162a3b; }
+              body.dark-mode .chart-controls select,
+              body.dark-mode .chart-controls input,
+              body.dark-mode .section-modal-close {
+                background:#1b3044;
+                color:var(--text);
+                border-color:#4f6f8f;
+              }
+              body.dark-mode .section-modal-head { background:#1e3346; }
+              body.dark-mode th { background:#1f3347; }
+              body.dark-mode tr:nth-child(even) td { background:#172a3b; }
+              body.dark-mode tr:hover td { background:#20384d; }
             </style>
           </head>
-          <body>
+          <body class="${summaryVizPopoutTheme === "sun" ? "sun-mode" : "dark-mode"}">
             <div class="shell">
               <div class="head">
                 <div class="head-left">
-                  <button class="summary-back-btn" onclick="returnToMap()">← Back to Map</button>
+                  <button class="summary-back-btn" onclick="returnToMap()">â† Back to Map</button>
                   <h2 class="title">Route Summary Visualization</h2>
                 </div>
                 <span class="meta">Rows: ${rows.length.toLocaleString()} | Columns: ${headers.length.toLocaleString()}</span>
@@ -16042,6 +22908,8 @@ if (resetBtn) {
     // 4. Clear stored marker groups & symbols
     Object.keys(routeDayGroups).forEach(k => delete routeDayGroups[k]);
     Object.keys(symbolMap).forEach(k => delete symbolMap[k]);
+    clearSequenceLayerData({ silent: true });
+    syncSequenceLayerVisibilityOnMap();
 
     // 5. Reset counters & stats
     document.getElementById("selectionCount").textContent = "0";
@@ -16065,7 +22933,7 @@ if (resetBtn) {
     if (panel && btn) {
       panel.classList.add("collapsed");
       panel.style.height = "40px";
-      btn.textContent = "▲";
+      btn.textContent = "â–²";
     }
   });
 }
@@ -16080,8 +22948,8 @@ if (locateBtn) {
   locateBtn.addEventListener("click", () => {
     if (!tracking) {
       startLiveTracking();
-      locateBtn.textContent = "■";
-      locateBtn.classList.add("tracking");   // 🔴 turns button red
+      locateBtn.textContent = "â– ";
+      locateBtn.classList.add("tracking");   // ðŸ”´ turns button red
       tracking = true;
     } else {
       if (watchId !== null) {
@@ -16096,8 +22964,8 @@ if (locateBtn) {
 window.removeEventListener("deviceorientation", updateHeading);
 
 
-      locateBtn.textContent = "📍";
-      locateBtn.classList.remove("tracking"); // 🔵 back to blue
+      locateBtn.textContent = "ðŸ“";
+      locateBtn.classList.remove("tracking"); // ðŸ”µ back to blue
       tracking = false;
     }
   });
@@ -16194,6 +23062,7 @@ if (downloadBtn && modal && confirmBtn && cancelBtn) {
 
     const newFileName = `${baseName}_Downloaded_${timestamp}.xlsx`;
 
+    syncCurrentWorkbookSheetFromRows();
     XLSX.writeFile(window._currentWorkbook, newFileName);
   });
 }
@@ -16264,7 +23133,7 @@ if (currentBase === "satellite") {
 // ---- STREET LABEL LOGIC (HARD TOGGLE CONTROL) ----
 if (layer._hasStreetLabel) {
 
-  // 🚫 If toggle is OFF, force close and skip
+  // ðŸš« If toggle is OFF, force close and skip
   if (!window.streetLabelsEnabled) {
     layer.closeTooltip();
     return;
@@ -16560,8 +23429,9 @@ function collectLocalTexasSearchResults(queryText) {
       if (seen.has(dedupeKey)) return;
       seen.add(dedupeKey);
 
-      const route = String(row?.NEWROUTE ?? "").trim() || "Unassigned";
-      const dayToken = normalizeDayToken(row?.NEWDAY) || String(row?.NEWDAY ?? "").trim();
+      const route = getMappedRowRoute(row) || "Unassigned";
+      const dayRaw = getMappedRowDayRaw(row);
+      const dayToken = normalizeDayToken(dayRaw) || dayRaw;
       const dayLabel = dayName(Number(dayToken)) || dayToken || "No Day";
 
       matches.push({
@@ -16744,13 +23614,12 @@ if (clearSearchBtn) {
 }
 ////////////////central save function
 async function saveWorkbookToCloud() {
+  if (!window._currentWorkbook || !Array.isArray(window._currentRows)) return false;
+  const filePath = String(window._currentFilePath || "").trim();
+  if (!filePath) return false;
+  syncCurrentWorkbookSheetFromRows();
 
-  const newSheet = XLSX.utils.json_to_sheet(window._currentRows);
-  window._currentWorkbook.Sheets[
-    window._currentWorkbook.SheetNames[0]
-  ] = newSheet;
-
-  const bookType = window._currentFilePath.toLowerCase().endsWith(".xlsm")
+  const bookType = filePath.toLowerCase().endsWith(".xlsm")
     ? "xlsm"
     : "xlsx";
 
@@ -16761,10 +23630,11 @@ async function saveWorkbookToCloud() {
 
   const { error } = await sb.storage
     .from(BUCKET)
-    .upload(window._currentFilePath, wbArray, {
+    .upload(filePath, wbArray, {
       upsert: true,
-      contentType:
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      contentType: bookType === "xlsm"
+        ? "application/vnd.ms-excel.sheet.macroEnabled.12"
+        : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     });
 
   if (error) {
@@ -16887,6 +23757,8 @@ if (routesToggle && routesContent) {
 
   listFiles();
 }
+
+
 
 
 

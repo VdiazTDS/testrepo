@@ -11,7 +11,7 @@ param(
   [switch]$SkipManagerInstall,
   [switch]$OpenBackendManagerAfterSetup,
   [switch]$OpenTdsPakAfterSetup,
-  [string]$TdsPakUrl = "http://127.0.0.1:5500/tds-pak.html"
+  [string]$TdsPakUrl = "https://vdiaztds.github.io/"
 )
 
 $ErrorActionPreference = "Stop"
