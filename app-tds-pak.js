@@ -8565,6 +8565,27 @@ function queueWorkbookCloudSave(reason = "update") {
   }, WORKBOOK_AUTO_SAVE_DEBOUNCE_MS);
 }
 
+function flushWorkbookCloudSaveOnLifecycle() {
+  if (!hasWorkbookCloudSaveContext()) return;
+  if (!workbookAutoSavePendingReasons.length && !workbookAutoSaveTimer) return;
+  if (workbookAutoSaveTimer) {
+    clearTimeout(workbookAutoSaveTimer);
+    workbookAutoSaveTimer = null;
+  }
+  if (!workbookAutoSavePendingReasons.length) {
+    workbookAutoSavePendingReasons.push("lifecycle");
+  }
+  flushQueuedWorkbookCloudSave();
+}
+
+window.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    flushWorkbookCloudSaveOnLifecycle();
+  }
+});
+window.addEventListener("pagehide", flushWorkbookCloudSaveOnLifecycle);
+window.addEventListener("beforeunload", flushWorkbookCloudSaveOnLifecycle);
+
 function getActiveAttributeSortOptions() {
   if (attributeTableMode === "streets") {
     return STREET_ATTRIBUTE_TABLE_HEADERS.map(key => ({
@@ -12940,15 +12961,17 @@ const ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS = 13.5;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_MPH = 35;
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH = 30;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD = "speed_cat";
+const ROUTE_SEQUENCER_SPEED_DEFAULTS_VERSION = 2;
+const ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION = 2;
 const ROUTE_SEQUENCER_SPEED_CAT_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 const ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP = Object.freeze({
   1: 65,
   2: 65,
-  3: 50,
-  4: 40,
-  5: 30,
-  6: 20,
-  7: 10,
+  3: 55,
+  4: 45,
+  5: 35,
+  6: 25,
+  7: 15,
   8: 5
 });
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP = Object.freeze({
@@ -12956,14 +12979,38 @@ const ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP = Object.freeze({
   2: 50,
   3: 40,
   4: 30,
-  5: 20,
-  6: 10,
-  7: 5,
+  5: 15,
+  6: 7,
+  7: 7,
   8: 5
 });
 const ROUTE_SEQUENCER_DEFAULT_CLASS_SPEEDS = {
   ...ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
 }; // Legacy alias.
+const ROUTE_SEQUENCER_STREET_CLASS_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
+const ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP = Object.freeze({
+  1: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Same", crossPenaltyMinutes: 5, uTurnsRestricted: true }),
+  2: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Same", crossPenaltyMinutes: 2.5, uTurnsRestricted: true }),
+  3: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Same", crossPenaltyMinutes: 0.25, uTurnsRestricted: true }),
+  4: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Both", crossPenaltyMinutes: 0, uTurnsRestricted: false }),
+  5: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Both", crossPenaltyMinutes: 0, uTurnsRestricted: false }),
+  6: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Both", crossPenaltyMinutes: 0, uTurnsRestricted: false }),
+  7: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Both", crossPenaltyMinutes: 0, uTurnsRestricted: false }),
+  8: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Both", crossPenaltyMinutes: 0, uTurnsRestricted: false })
+});
+const ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS = Object.freeze({
+  streetClassField: "func_class",
+  allowUTurnsOnlyInCuldesacs: false,
+  discourageUTurnsOutsideIntersections: true,
+  meanderServiceMinutes: 0.5,
+  sameSideServiceMinutes: 1,
+  uTurnProrateDriving: "none",
+  uTurnProrateWalking: "none",
+  classAttrMap: ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP
+});
+const ROUTE_SEQUENCER_UTURN_RESTRICTED_PENALTY_MINUTES = 6;
+const ROUTE_SEQUENCER_UTURN_CULDESAC_ONLY_PENALTY_MINUTES = 8;
+const ROUTE_SEQUENCER_UTURN_PRORATE_DRIVING_FACTOR = 0.15;
 const ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS = Object.freeze({
   sequence: "SEQNO",
   trip: "TRIP",
@@ -13030,7 +13077,7 @@ function buildRouteSequencerFormatHintText(demandField, serviceField, outputFiel
     mapped.totalMinutes,
     mapped.dumpVisits
   ].join(", ");
-  return `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75). ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying capacity, dump, depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
+  return `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75). ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Street Attribute Defaults apply class-based U-turn restrictions, meander/same-side penalties, and cross-penalty time. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying capacity, dump, depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
 }
 
 function normalizeRouteSequencerText(value) {
@@ -13404,6 +13451,249 @@ function formatRouteSequencerBreakMinutesList(value) {
   const list = parseRouteSequencerBreakMinutesList(value);
   if (!list.length) return "";
   return list.map(minutes => formatRouteSequencerMinutesClock(minutes)).join(", ");
+}
+
+function parseRouteSequencerClassId(value, fallback = null) {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const rounded = Math.round(value);
+    if (rounded >= 1 && rounded <= 99) return Math.max(1, Math.min(8, rounded));
+    return fallback;
+  }
+  const text = String(value).trim();
+  if (!text) return fallback;
+  const match = text.match(/\d+/);
+  if (!match) return fallback;
+  const parsed = Number(match[0]);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 99) return fallback;
+  return Math.max(1, Math.min(8, Math.round(parsed)));
+}
+
+function normalizeRouteSequencerTravelTypesAllowed(value) {
+  const token = normalizeRouteSequencerFieldToken(value);
+  if (token === "driving" || token === "vehicle" || token === "car" || token === "truck") return "Driving";
+  if (token === "walking" || token === "walk" || token === "pedestrian") return "Walking";
+  return "Any";
+}
+
+function normalizeRouteSequencerServiceSideMode(value) {
+  const token = normalizeRouteSequencerFieldToken(value);
+  return token === "same" || token === "sameside" ? "Same" : "Both";
+}
+
+function normalizeRouteSequencerUTurnProrateMode(value) {
+  const token = normalizeRouteSequencerFieldToken(value);
+  if (token === "distance" || token === "prorate" || token === "yes" || token === "true") return "distance";
+  return "none";
+}
+
+function normalizeRouteSequencerStreetClassAttrEntry(rawEntry, fallbackEntry = {}) {
+  const fallback = fallbackEntry && typeof fallbackEntry === "object" ? fallbackEntry : {};
+  const source = rawEntry && typeof rawEntry === "object" ? rawEntry : {};
+  return {
+    travelTypesAllowed: normalizeRouteSequencerTravelTypesAllowed(
+      source.travelTypesAllowed ?? source.travelType ?? fallback.travelTypesAllowed
+    ),
+    serviceSide: normalizeRouteSequencerServiceSideMode(
+      source.serviceSide ?? source.serviceSideMode ?? fallback.serviceSide
+    ),
+    crossPenaltyMinutes: Math.max(
+      0,
+      parseRouteSequencerMinutesValue(
+        source.crossPenaltyMinutes ?? source.crossPenalty ?? fallback.crossPenaltyMinutes,
+        Math.max(0, Number(fallback.crossPenaltyMinutes) || 0)
+      )
+    ),
+    uTurnsRestricted: source.uTurnsRestricted == null
+      ? !!fallback.uTurnsRestricted
+      : !!source.uTurnsRestricted
+  };
+}
+
+function normalizeRouteSequencerStreetClassAttrMap(rawMap) {
+  const source = rawMap && typeof rawMap === "object" ? rawMap : {};
+  const out = {};
+  ROUTE_SEQUENCER_STREET_CLASS_IDS.forEach(classId => {
+    const fallbackEntry = ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP[classId]
+      || ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP[5];
+    out[classId] = normalizeRouteSequencerStreetClassAttrEntry(
+      source[classId] || source[String(classId)],
+      fallbackEntry
+    );
+  });
+  return out;
+}
+
+function normalizeRouteSequencerStreetAttributeDefaults(rawValue) {
+  const source = rawValue && typeof rawValue === "object" ? rawValue : {};
+  const classAttrSource = source.classAttrMap || source.streetClassAttributes || source.classAttributes || {};
+  const defaults = ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS;
+  return {
+    streetClassField: String(source.streetClassField || defaults.streetClassField || "func_class").trim() || "func_class",
+    allowUTurnsOnlyInCuldesacs: !!source.allowUTurnsOnlyInCuldesacs,
+    discourageUTurnsOutsideIntersections: source.discourageUTurnsOutsideIntersections !== false,
+    meanderServiceMinutes: Math.max(
+      0,
+      parseRouteSequencerMinutesValue(source.meanderServiceMinutes, Number(defaults.meanderServiceMinutes) || 0)
+    ),
+    sameSideServiceMinutes: Math.max(
+      0,
+      parseRouteSequencerMinutesValue(source.sameSideServiceMinutes, Number(defaults.sameSideServiceMinutes) || 0)
+    ),
+    uTurnProrateDriving: normalizeRouteSequencerUTurnProrateMode(source.uTurnProrateDriving),
+    uTurnProrateWalking: normalizeRouteSequencerUTurnProrateMode(source.uTurnProrateWalking),
+    classAttrMap: normalizeRouteSequencerStreetClassAttrMap(classAttrSource)
+  };
+}
+
+function getRouteSequencerStreetClassAttr(streetAttributeDefaults, classIdValue) {
+  const normalized = normalizeRouteSequencerStreetAttributeDefaults(streetAttributeDefaults);
+  const classId = parseRouteSequencerClassId(classIdValue, 5) || 5;
+  return normalized.classAttrMap[classId] || normalized.classAttrMap[5] || ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP[5];
+}
+
+function normalizeRouteSequencerStopSide(value) {
+  const token = normalizeRouteSequencerFieldToken(value);
+  if (!token) return "";
+  if (token.startsWith("left")) return "left";
+  if (token.startsWith("right")) return "right";
+  if (token.startsWith("center")) return "center";
+  return "";
+}
+
+function resolveRouteSequencerStreetClassIdFromRow(row, streetClassField = "func_class") {
+  const fieldName = String(streetClassField || "func_class").trim() || "func_class";
+  const candidates = [
+    getRouteSequencerRowFieldValue(row, fieldName),
+    row?.func_class,
+    row?.FUNC_CLASS,
+    row?.speed_cat,
+    row?.SPEED_CAT
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseRouteSequencerClassId(candidate, null);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function resolveRouteSequencerStopStreetMetadata(row, streetClassField = "func_class") {
+  const directSegmentId = String(
+    getSetSegmentSegmentIdString?.(row, "")
+      || row?.SEGMENT_ID
+      || row?.Segment_ID
+      || row?.segment_id
+      || ""
+  ).trim();
+  const numericSegmentId = parseRouteSequencerNumeric(directSegmentId, NaN);
+  const streetEntry = Number.isFinite(numericSegmentId)
+    ? streetAttributeById.get(Math.round(numericSegmentId))
+    : null;
+  const streetRow = streetEntry?.row || null;
+  const streetClassId = resolveRouteSequencerStreetClassIdFromRow(streetRow || row, streetClassField);
+  const sideRaw = String(
+    getSetSegmentSegmentSideString?.(row, "")
+      || row?.SEGMENT_SIDE
+      || row?.Segment_Side
+      || row?.segment_side
+      || ""
+  ).trim();
+  return {
+    segmentId: directSegmentId,
+    segmentIdNumeric: Number.isFinite(numericSegmentId) ? Math.round(numericSegmentId) : NaN,
+    segmentSide: sideRaw,
+    streetClassId: Number.isFinite(streetClassId) ? streetClassId : null
+  };
+}
+
+function normalizeRouteSequencerCandidateAdjustment(rawValue) {
+  const source = rawValue && typeof rawValue === "object" ? rawValue : {};
+  const notes = Array.isArray(source.notes)
+    ? source.notes.map(value => String(value || "").trim()).filter(Boolean)
+    : [];
+  return {
+    scoreMinutesDelta: Math.max(0, Number(source.scoreMinutesDelta) || 0),
+    driveMinutesDelta: Math.max(0, Number(source.driveMinutesDelta) || 0),
+    serviceMinutesDelta: Math.max(0, Number(source.serviceMinutesDelta) || 0),
+    otherMinutesDelta: Math.max(0, Number(source.otherMinutesDelta) || 0),
+    notes
+  };
+}
+
+function buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, baseMinutes, streetAttributeDefaults) {
+  const defaults = normalizeRouteSequencerStreetAttributeDefaults(streetAttributeDefaults);
+  const adjustment = {
+    scoreMinutesDelta: 0,
+    driveMinutesDelta: 0,
+    serviceMinutesDelta: 0,
+    otherMinutesDelta: 0,
+    notes: []
+  };
+  if (String(candidate?.type || "") !== "stop") return adjustment;
+
+  const classAttr = getRouteSequencerStreetClassAttr(defaults, candidate?.streetClassId);
+  const travelTypesAllowed = normalizeRouteSequencerTravelTypesAllowed(classAttr?.travelTypesAllowed);
+  if (travelTypesAllowed === "Walking") {
+    adjustment.otherMinutesDelta += 30;
+    adjustment.scoreMinutesDelta += 30;
+    adjustment.notes.push("Travel type penalty (walking-only class)");
+  }
+
+  const fromSide = normalizeRouteSequencerStopSide(fromPoint?.segmentSide);
+  const toSide = normalizeRouteSequencerStopSide(candidate?.segmentSide);
+  const hasSidePair = !!fromSide && !!toSide && fromSide !== "center" && toSide !== "center";
+  const oppositeServiceSide = hasSidePair && fromSide !== toSide;
+  const fromSegmentId = String(fromPoint?.segmentId || "").trim();
+  const toSegmentId = String(candidate?.segmentId || "").trim();
+  const sameSegment = !!fromSegmentId && !!toSegmentId && fromSegmentId === toSegmentId;
+  const likelyUTurn = oppositeServiceSide || sameSegment;
+
+  if (oppositeServiceSide && normalizeRouteSequencerServiceSideMode(classAttr?.serviceSide) === "Same") {
+    const sameSidePenalty = Math.max(0, Number(defaults.sameSideServiceMinutes) || 0);
+    if (sameSidePenalty > 0) {
+      adjustment.serviceMinutesDelta += sameSidePenalty;
+      adjustment.scoreMinutesDelta += sameSidePenalty;
+      adjustment.notes.push("Same-side service penalty");
+    }
+  }
+
+  const crossPenaltyMinutes = Math.max(0, Number(classAttr?.crossPenaltyMinutes) || 0);
+  if (oppositeServiceSide && crossPenaltyMinutes > 0) {
+    adjustment.otherMinutesDelta += crossPenaltyMinutes;
+    adjustment.scoreMinutesDelta += crossPenaltyMinutes;
+    adjustment.notes.push("Cross penalty");
+  }
+
+  if (likelyUTurn) {
+    if (classAttr?.uTurnsRestricted) {
+      adjustment.otherMinutesDelta += ROUTE_SEQUENCER_UTURN_RESTRICTED_PENALTY_MINUTES;
+      adjustment.scoreMinutesDelta += ROUTE_SEQUENCER_UTURN_RESTRICTED_PENALTY_MINUTES;
+      adjustment.notes.push("U-turn restricted penalty");
+    } else if (defaults.allowUTurnsOnlyInCuldesacs) {
+      adjustment.otherMinutesDelta += ROUTE_SEQUENCER_UTURN_CULDESAC_ONLY_PENALTY_MINUTES;
+      adjustment.scoreMinutesDelta += ROUTE_SEQUENCER_UTURN_CULDESAC_ONLY_PENALTY_MINUTES;
+      adjustment.notes.push("U-turn cul-de-sac-only penalty");
+    } else if (defaults.discourageUTurnsOutsideIntersections) {
+      const meanderPenalty = Math.max(0, Number(defaults.meanderServiceMinutes) || 0);
+      if (meanderPenalty > 0) {
+        adjustment.serviceMinutesDelta += meanderPenalty;
+        adjustment.scoreMinutesDelta += meanderPenalty;
+        adjustment.notes.push("Meander service penalty");
+      }
+    }
+
+    if (defaults.uTurnProrateDriving === "distance") {
+      const base = Math.max(0, Number(baseMinutes) || 0);
+      const prorateDelta = base * ROUTE_SEQUENCER_UTURN_PRORATE_DRIVING_FACTOR;
+      if (prorateDelta > 0) {
+        adjustment.driveMinutesDelta += prorateDelta;
+        adjustment.scoreMinutesDelta += prorateDelta;
+        adjustment.notes.push("U-turn driving prorate");
+      }
+    }
+  }
+
+  return adjustment;
 }
 
 function normalizeRouteSequencerFacilityRole(value) {
@@ -13977,6 +14267,9 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
   const candidateList = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
   if (!candidateList.length) return null;
   const travelMode = normalizeRouteSequencerTravelMode(travelOptions?.travelMode);
+  const candidateAdjustmentFn = typeof travelOptions?.candidateAdjustmentFn === "function"
+    ? travelOptions.candidateAdjustmentFn
+    : null;
   const fallbackServiceSpeedMph = clampRouteSequencerNumber(
     travelOptions?.fallbackServiceSpeedMph,
     5,
@@ -13988,7 +14281,15 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
   );
 
   if (!currentPoint) {
-    return { point: candidateList[0], minutes: 0, miles: 0, usedNetwork: false, travelMode };
+    return {
+      point: candidateList[0],
+      minutes: 0,
+      scoreMinutes: 0,
+      miles: 0,
+      usedNetwork: false,
+      travelMode,
+      adjustment: normalizeRouteSequencerCandidateAdjustment(null)
+    };
   }
 
   let networkDistances = null;
@@ -14031,15 +14332,33 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
     }
     if (!Number.isFinite(minutes) || !Number.isFinite(miles)) return;
 
-    if (!best || minutes < best.minutes - 1e-9 || (Math.abs(minutes - best.minutes) <= 1e-9 && miles < best.miles - 1e-9)) {
-      best = { point: candidate, minutes, miles, usedNetwork, travelMode };
+    let rawAdjustment = null;
+    if (candidateAdjustmentFn) {
+      try {
+        rawAdjustment = candidateAdjustmentFn({
+          fromPoint: currentPoint,
+          candidate,
+          minutes,
+          miles,
+          usedNetwork,
+          travelMode
+        });
+      } catch {
+        rawAdjustment = null;
+      }
+    }
+    const adjustment = normalizeRouteSequencerCandidateAdjustment(rawAdjustment);
+    const scoreMinutes = Math.max(0, minutes + adjustment.scoreMinutesDelta);
+
+    if (!best || scoreMinutes < best.scoreMinutes - 1e-9 || (Math.abs(scoreMinutes - best.scoreMinutes) <= 1e-9 && miles < best.miles - 1e-9)) {
+      best = { point: candidate, minutes, scoreMinutes, miles, usedNetwork, travelMode, adjustment };
       return;
     }
-    if (Math.abs(minutes - best.minutes) <= 1e-9 && Math.abs(miles - best.miles) <= 1e-9) {
+    if (Math.abs(scoreMinutes - best.scoreMinutes) <= 1e-9 && Math.abs(miles - best.miles) <= 1e-9) {
       const candidateOrder = Number(candidate?.order ?? Number.MAX_SAFE_INTEGER);
       const bestOrder = Number(best?.point?.order ?? Number.MAX_SAFE_INTEGER);
       if (candidateOrder < bestOrder) {
-        best = { point: candidate, minutes, miles, usedNetwork, travelMode };
+        best = { point: candidate, minutes, scoreMinutes, miles, usedNetwork, travelMode, adjustment };
       }
     }
   });
@@ -14095,8 +14414,10 @@ function buildRouteSequencerStopLabel(row) {
   return "Unnamed stop";
 }
 
-function buildRouteSequencerStopPoints(routeDayKey, group, demandField, serviceTimeField, graph) {
+function buildRouteSequencerStopPoints(routeDayKey, group, demandField, serviceTimeField, graph, streetAttributeDefaults = null) {
   const layers = Array.isArray(group?.layers) ? group.layers : [];
+  const normalizedStreetDefaults = normalizeRouteSequencerStreetAttributeDefaults(streetAttributeDefaults);
+  const streetClassField = normalizedStreetDefaults.streetClassField;
   const out = [];
   layers.forEach(layer => {
     const rowId = Number(layer?._rowId);
@@ -14108,6 +14429,7 @@ function buildRouteSequencerStopPoints(routeDayKey, group, demandField, serviceT
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     const demand = Math.max(0, parseRouteSequencerNumeric(demandField ? row?.[demandField] : 0, 0));
     const serviceMinutes = Math.max(0, parseRouteSequencerMinutesValue(serviceTimeField ? row?.[serviceTimeField] : 0, 0));
+    const streetMeta = resolveRouteSequencerStopStreetMetadata(row, streetClassField);
     const snap = graph ? findNearestRouteSequencerGraphNode(graph, lat, lon) : null;
 
     out.push({
@@ -14124,6 +14446,9 @@ function buildRouteSequencerStopPoints(routeDayKey, group, demandField, serviceT
       snapMiles: snap?.distanceMiles || NaN,
       demand,
       serviceMinutes,
+      segmentId: streetMeta.segmentId,
+      segmentSide: streetMeta.segmentSide,
+      streetClassId: streetMeta.streetClassId,
       order: rowId
     });
   });
@@ -14132,8 +14457,10 @@ function buildRouteSequencerStopPoints(routeDayKey, group, demandField, serviceT
   return out;
 }
 
-function buildRouteSequencerStopPointsFromExistingSequence(routeDayKey, group, demandField, serviceTimeField, sequenceField, graph) {
+function buildRouteSequencerStopPointsFromExistingSequence(routeDayKey, group, demandField, serviceTimeField, sequenceField, graph, streetAttributeDefaults = null) {
   const layers = Array.isArray(group?.layers) ? group.layers : [];
+  const normalizedStreetDefaults = normalizeRouteSequencerStreetAttributeDefaults(streetAttributeDefaults);
+  const streetClassField = normalizedStreetDefaults.streetClassField;
   const out = [];
   let validSequenceCount = 0;
   let missingSequenceCount = 0;
@@ -14149,6 +14476,7 @@ function buildRouteSequencerStopPointsFromExistingSequence(routeDayKey, group, d
     const demand = Math.max(0, parseRouteSequencerNumeric(demandField ? row?.[demandField] : 0, 0));
     const serviceMinutes = Math.max(0, parseRouteSequencerMinutesValue(serviceTimeField ? row?.[serviceTimeField] : 0, 0));
     const sequenceValue = parseRouteSequencerNumeric(sequenceField ? row?.[sequenceField] : "", NaN);
+    const streetMeta = resolveRouteSequencerStopStreetMetadata(row, streetClassField);
     const hasSequence = Number.isFinite(sequenceValue) && sequenceValue > 0;
     if (hasSequence) validSequenceCount += 1;
     else missingSequenceCount += 1;
@@ -14169,6 +14497,9 @@ function buildRouteSequencerStopPointsFromExistingSequence(routeDayKey, group, d
       snapMiles: snap?.distanceMiles || NaN,
       demand,
       serviceMinutes,
+      segmentId: streetMeta.segmentId,
+      segmentSide: streetMeta.segmentSide,
+      streetClassId: streetMeta.streetClassId,
       sequenceOrder: hasSequence ? Number(sequenceValue) : NaN,
       hasSequence,
       order: rowId
@@ -14268,6 +14599,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
   const timeAtStartMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtStartMinutes, 0));
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
+  const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
 
   let fixedFirstStop = null;
   let fixedLastStop = null;
@@ -14301,22 +14633,32 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   let fallbackLegs = 0;
 
   const applyDriveLeg = pickResult => {
-    const driveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
+    const adjustment = normalizeRouteSequencerCandidateAdjustment(pickResult?.adjustment);
+    const baseDriveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
+    const drivePenaltyMinutes = Math.max(0, Number(adjustment.driveMinutesDelta) || 0);
+    const driveMinutes = baseDriveMinutes + drivePenaltyMinutes;
     const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
     totalDriveMinutes += driveMinutes;
     totalDriveMiles += driveMiles;
     if (pickResult?.usedNetwork) networkLegs += 1;
     else fallbackLegs += 1;
-    return { driveMinutes, driveMiles };
+    return { driveMinutes, driveMiles, baseDriveMinutes, drivePenaltyMinutes, adjustment };
   };
 
   const appendStopVisit = (stopPoint, pickResult) => {
-    const { driveMinutes, driveMiles } = applyDriveLeg(pickResult);
+    const { driveMinutes, driveMiles, adjustment } = applyDriveLeg(pickResult);
     const demand = Math.max(0, Number(stopPoint?.demand) || 0);
-    const serviceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
+    const baseServiceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
+    const servicePenaltyMinutes = Math.max(0, Number(adjustment?.serviceMinutesDelta) || 0);
+    const otherPenaltyMinutes = Math.max(0, Number(adjustment?.otherMinutesDelta) || 0);
+    const serviceMinutes = baseServiceMinutes + servicePenaltyMinutes;
+    if (otherPenaltyMinutes > 0) totalOtherMinutes += otherPenaltyMinutes;
     currentLoad += demand;
     totalServiceMinutes += serviceMinutes;
     const sequence = stopVisits.length + 1;
+    const penaltyNotes = Array.isArray(adjustment?.notes)
+      ? adjustment.notes.map(note => String(note || "").trim()).filter(Boolean).join("; ")
+      : "";
     const visit = {
       sequence,
       rowId: Number(stopPoint.rowId),
@@ -14327,7 +14669,9 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
-      totalMinutes: driveMinutes + serviceMinutes
+      otherMinutes: otherPenaltyMinutes,
+      penaltyNotes,
+      totalMinutes: driveMinutes + serviceMinutes + otherPenaltyMinutes
     };
     stopVisits.push(visit);
     events.push({
@@ -14340,6 +14684,8 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
+      otherMinutes: otherPenaltyMinutes,
+      penaltyNotes,
       cumulativeLoad: visit.cumulativeLoad,
       lat: Number(stopPoint?.lat),
       lon: Number(stopPoint?.lon)
@@ -14430,7 +14776,12 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       candidates,
       graph,
       fallbackSpeedMph,
-      { travelMode: "service", fallbackServiceSpeedMph }
+      {
+        travelMode: "service",
+        fallbackServiceSpeedMph,
+        candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
+          buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, minutes, streetAttributeDefaults)
+      }
     );
     if (!nextStopPick?.point) break;
     const nextStop = nextStopPick.point;
@@ -14499,7 +14850,12 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       [fixedLastStop],
       graph,
       fallbackSpeedMph,
-      { travelMode: "service", fallbackServiceSpeedMph }
+      {
+        travelMode: "service",
+        fallbackServiceSpeedMph,
+        candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
+          buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, minutes, streetAttributeDefaults)
+      }
     )
       || {
         point: fixedLastStop,
@@ -14508,7 +14864,18 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
           fallbackServiceSpeedMph
         }),
         miles: estimateRouteSequencerTravelMiles(currentPoint, fixedLastStop),
-        usedNetwork: false
+        usedNetwork: false,
+        adjustment: normalizeRouteSequencerCandidateAdjustment(
+          buildRouteSequencerServiceCandidateAdjustment(
+            currentPoint,
+            fixedLastStop,
+            estimateRouteSequencerTravelMinutes(currentPoint, fixedLastStop, fallbackSpeedMph, {
+              travelMode: "service",
+              fallbackServiceSpeedMph
+            }),
+            streetAttributeDefaults
+          )
+        )
       };
     appendStopVisit(fixedLastStop, pick);
   }
@@ -14619,6 +14986,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
   const timeAtStartMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtStartMinutes, 0));
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
+  const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
 
   const stopVisits = [];
   const events = [];
@@ -14644,13 +15012,16 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   let fallbackSequenceCursor = maxExistingSequence;
 
   const applyDriveLeg = pickResult => {
-    const driveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
+    const adjustment = normalizeRouteSequencerCandidateAdjustment(pickResult?.adjustment);
+    const baseDriveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
+    const drivePenaltyMinutes = Math.max(0, Number(adjustment?.driveMinutesDelta) || 0);
+    const driveMinutes = baseDriveMinutes + drivePenaltyMinutes;
     const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
     totalDriveMinutes += driveMinutes;
     totalDriveMiles += driveMiles;
     if (pickResult?.usedNetwork) networkLegs += 1;
     else fallbackLegs += 1;
-    return { driveMinutes, driveMiles };
+    return { driveMinutes, driveMiles, baseDriveMinutes, drivePenaltyMinutes, adjustment };
   };
 
   const appendDumpVisit = (pickResult, reason = "capacity") => {
@@ -14745,7 +15116,12 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
             [stopPoint],
             graph,
             fallbackSpeedMph,
-            { travelMode: "service", fallbackServiceSpeedMph }
+            {
+              travelMode: "service",
+              fallbackServiceSpeedMph,
+              candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
+                buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, minutes, streetAttributeDefaults)
+            }
           )
           || {
             point: stopPoint,
@@ -14754,14 +15130,29 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
               fallbackServiceSpeedMph
             }),
             miles: estimateRouteSequencerTravelMiles(currentPoint, stopPoint),
-            usedNetwork: false
+            usedNetwork: false,
+            adjustment: normalizeRouteSequencerCandidateAdjustment(
+              buildRouteSequencerServiceCandidateAdjustment(
+                currentPoint,
+                stopPoint,
+                estimateRouteSequencerTravelMinutes(currentPoint, stopPoint, fallbackSpeedMph, {
+                  travelMode: "service",
+                  fallbackServiceSpeedMph
+                }),
+                streetAttributeDefaults
+              )
+            )
           }
         )
       : { point: stopPoint, minutes: 0, miles: 0, usedNetwork: false };
 
-    const { driveMinutes, driveMiles } = applyDriveLeg(pick);
+    const { driveMinutes, driveMiles, adjustment } = applyDriveLeg(pick);
     const demand = Math.max(0, Number(stopPoint?.demand) || 0);
-    const serviceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
+    const baseServiceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
+    const servicePenaltyMinutes = Math.max(0, Number(adjustment?.serviceMinutesDelta) || 0);
+    const otherPenaltyMinutes = Math.max(0, Number(adjustment?.otherMinutesDelta) || 0);
+    const serviceMinutes = baseServiceMinutes + servicePenaltyMinutes;
+    if (otherPenaltyMinutes > 0) totalOtherMinutes += otherPenaltyMinutes;
     currentLoad += demand;
     totalServiceMinutes += serviceMinutes;
 
@@ -14781,7 +15172,11 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
-      totalMinutes: driveMinutes + serviceMinutes
+      otherMinutes: otherPenaltyMinutes,
+      penaltyNotes: Array.isArray(adjustment?.notes)
+        ? adjustment.notes.map(note => String(note || "").trim()).filter(Boolean).join("; ")
+        : "",
+      totalMinutes: driveMinutes + serviceMinutes + otherPenaltyMinutes
     };
     stopVisits.push(visit);
     events.push({
@@ -14794,6 +15189,8 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
+      otherMinutes: otherPenaltyMinutes,
+      penaltyNotes: visit.penaltyNotes,
       cumulativeLoad: visit.cumulativeLoad,
       lat: Number(stopPoint?.lat),
       lon: Number(stopPoint?.lon)
@@ -15019,9 +15416,14 @@ function renderRouteSequencerResultsList(node, plans) {
     const breakMinutesFromEvents = events
       .filter(event => String(event?.type || "") === "break")
       .reduce((sum, event) => sum + Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0), 0);
-    const otherMinutes = events
-      .filter(event => String(event?.type || "") === "otherTime")
-      .reduce((sum, event) => sum + Math.max(0, Number(event?.minutes) || 0), 0);
+    const otherMinutesFromEvents = events.reduce((sum, event) => {
+      const type = String(event?.type || "");
+      if (type === "break") return sum;
+      if (type === "otherTime") {
+        return sum + Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0);
+      }
+      return sum + Math.max(0, Number(event?.otherMinutes) || 0);
+    }, 0);
 
     const serviceFromStops = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.serviceMinutes) || 0), 0);
     const demandTons = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0);
@@ -15037,6 +15439,12 @@ function renderRouteSequencerResultsList(node, plans) {
     const breakMinutes = Number.isFinite(Number(plan?.totalBreakMinutes))
       ? Math.max(0, Number(plan.totalBreakMinutes))
       : breakMinutesFromEvents;
+    const otherMinutesFromPlanTotal = Number.isFinite(Number(plan?.totalOtherMinutes))
+      ? Math.max(0, Number(plan.totalOtherMinutes))
+      : NaN;
+    const otherMinutes = Number.isFinite(otherMinutesFromPlanTotal)
+      ? Math.max(0, otherMinutesFromPlanTotal - breakMinutes)
+      : otherMinutesFromEvents;
     const startMinutes = startMinutesFromEvents;
     const endMinutes = endMinutesFromEvents;
     const facilityMinutesFromPlan = Number.isFinite(Number(plan?.totalFacilityMinutes))
@@ -15087,7 +15495,10 @@ function renderRouteSequencerResultsList(node, plans) {
       const loadText = Number.isFinite(beforeLoad) ? `Load ${beforeLoad.toFixed(2)} tons` : "";
       return [name, reasonLabel, loadText].filter(Boolean).join(" | ") || "Capacity dump";
     }
-    if (type === "stop") return name || "Stop";
+    if (type === "stop") {
+      const penaltyNotes = String(event?.penaltyNotes || "").trim();
+      return [name || "Stop", penaltyNotes].filter(Boolean).join(" | ");
+    }
     if (type === "startDepot" || type === "endDepot") return name || "Facility";
     if (type === "break") {
       const breakMinutes = Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0);
@@ -15169,7 +15580,7 @@ function renderRouteSequencerResultsList(node, plans) {
           <tbody>${summaryRowsHtml}</tbody>
         </table>
       </div>
-      <div class="route-sequencer-report-truncated">Time fields are shown as HH:MM:SS. Total = Drive + Service + Dump Facility + Break + Start + End + Other. Dump Facility time is counted on every dump visit (for example, 00:25:00 x 2 dumps = 00:50:00). Break time is route-level idle time. Drive includes travel between stops, to/from dump locations, from start facility to first stop, and from last stop to end facility.</div>
+      <div class="route-sequencer-report-truncated">Time fields are shown as HH:MM:SS. Total = Drive + Service + Dump Facility + Break + Start + End + Other. Dump Facility time is counted on every dump visit (for example, 00:25:00 x 2 dumps = 00:50:00). Break time is route-level idle time. Drive includes travel between stops, to/from dump locations, from start facility to first stop, and from last stop to end facility. Other includes class-based penalties such as cross-penalty and U-turn penalties.</div>
     </section>
   `;
 
@@ -15309,6 +15720,40 @@ function loadRouteSequencerSettings() {
   try {
     const parsed = JSON.parse(raw);
     const settings = parsed && typeof parsed === "object" ? parsed : {};
+    const speedDefaultsVersion = Number(settings.speedDefaultsVersion || 0);
+    if (speedDefaultsVersion < ROUTE_SEQUENCER_SPEED_DEFAULTS_VERSION) {
+      settings.drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+        ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+        ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+      );
+      settings.serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+        ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+        ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+      );
+    } else {
+      settings.drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+        settings.drivingSpeedCatMap || settings.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+        ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+      );
+      settings.serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+        settings.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+        ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+      );
+    }
+    settings.classSpeedMap = { ...settings.drivingSpeedCatMap };
+    settings.speedDefaultsVersion = ROUTE_SEQUENCER_SPEED_DEFAULTS_VERSION;
+
+    const streetDefaultsVersion = Number(settings.streetAttributeDefaultsVersion || 0);
+    if (streetDefaultsVersion < ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION) {
+      settings.streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(
+        ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS
+      );
+    } else {
+      settings.streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(
+        settings.streetAttributeDefaults || settings
+      );
+    }
+    settings.streetAttributeDefaultsVersion = ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION;
     setRouteSequencerActiveOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
     return settings;
   } catch {
@@ -15319,7 +15764,19 @@ function loadRouteSequencerSettings() {
 
 function saveRouteSequencerSettings(settings) {
   const payload = settings && typeof settings === "object" ? settings : {};
+  payload.drivingSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+    payload.drivingSpeedCatMap || payload.classSpeedMap || ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP,
+    ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
+  );
+  payload.serviceSpeedCatMap = normalizeRouteSequencerSpeedCatMap(
+    payload.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
+    ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
+  );
+  payload.classSpeedMap = { ...payload.drivingSpeedCatMap };
+  payload.speedDefaultsVersion = ROUTE_SEQUENCER_SPEED_DEFAULTS_VERSION;
   payload.outputFields = normalizeRouteSequencerOutputFields(payload.outputFields);
+  payload.streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(payload.streetAttributeDefaults || payload);
+  payload.streetAttributeDefaultsVersion = ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION;
   storageSet(ROUTE_SEQUENCER_SETTINGS_KEY, JSON.stringify(payload));
   setRouteSequencerActiveOutputFields(payload.outputFields);
 }
@@ -15610,6 +16067,13 @@ function initRouteSequencerControls() {
   const defaultSpeedInput = document.getElementById("routeSequencerDefaultSpeedInput");
   const sequenceIncrementInput = document.getElementById("routeSequencerSequenceIncrementInput");
   const speedClassFieldInput = document.getElementById("routeSequencerSpeedClassField");
+  const streetClassFieldInput = document.getElementById("routeSequencerStreetClassField");
+  const allowUTurnsOnlyInCuldesacsToggle = document.getElementById("routeSequencerAllowUTurnsCuldesacs");
+  const discourageUTurnsToggle = document.getElementById("routeSequencerDiscourageUTurnsOutsideIntersections");
+  const meanderServiceInput = document.getElementById("routeSequencerMeanderServiceInput");
+  const sameSideServiceInput = document.getElementById("routeSequencerSameSideServiceInput");
+  const uTurnProrateDrivingInput = document.getElementById("routeSequencerUTurnProrateDriving");
+  const uTurnProrateWalkingInput = document.getElementById("routeSequencerUTurnProrateWalking");
   const dumpSourceSelect = document.getElementById("routeSequencerDumpSource");
   const startDepotSelect = document.getElementById("routeSequencerStartDepotSelect");
   const endDepotSelect = document.getElementById("routeSequencerEndDepotSelect");
@@ -15646,6 +16110,56 @@ function initRouteSequencerControls() {
     7: document.getElementById("routeSequencerServiceSpeedCat7"),
     8: document.getElementById("routeSequencerServiceSpeedCat8")
   };
+  const classAttrInputs = {
+    1: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass1TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass1ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass1CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass1UTurnRestricted")
+    },
+    2: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass2TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass2ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass2CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass2UTurnRestricted")
+    },
+    3: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass3TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass3ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass3CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass3UTurnRestricted")
+    },
+    4: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass4TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass4ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass4CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass4UTurnRestricted")
+    },
+    5: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass5TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass5ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass5CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass5UTurnRestricted")
+    },
+    6: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass6TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass6ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass6CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass6UTurnRestricted")
+    },
+    7: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass7TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass7ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass7CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass7UTurnRestricted")
+    },
+    8: {
+      travelTypesAllowed: document.getElementById("routeSequencerClass8TravelTypes"),
+      serviceSide: document.getElementById("routeSequencerClass8ServiceSide"),
+      crossPenalty: document.getElementById("routeSequencerClass8CrossPenalty"),
+      uTurnsRestricted: document.getElementById("routeSequencerClass8UTurnRestricted")
+    }
+  };
   const outputFieldSelectMap = {
     sequence: sequenceOutputSelect,
     trip: tripOutputSelect,
@@ -15662,13 +16176,21 @@ function initRouteSequencerControls() {
     !serviceOutputSelect || !totalOutputSelect || !dumpVisitsOutputSelect || !formatHintNode ||
     !scopeListSelect || !scopeAllBtn || !scopeNoneBtn || !scopeVisibleBtn ||
     !capacityInput || !defaultSpeedInput || !sequenceIncrementInput || !speedClassFieldInput ||
+    !streetClassFieldInput || !allowUTurnsOnlyInCuldesacsToggle || !discourageUTurnsToggle ||
+    !meanderServiceInput || !sameSideServiceInput || !uTurnProrateDrivingInput || !uTurnProrateWalkingInput ||
     !dumpSourceSelect || !startDepotSelect || !endDepotSelect ||
     !timeAtStartInput || !timeAtEndInput || !breaksInput ||
     !dumpBeforeEndToggle || !depotNameInput || !addDepotBtn || !removeDepotBtn ||
     !dumpNameInput || !customDumpSelect || !addDumpBtn || !removeDumpBtn ||
     !statusNode || !resultsNode ||
     Object.values(drivingSpeedCatInputs).some(node => !node) ||
-    Object.values(serviceSpeedCatInputs).some(node => !node)
+    Object.values(serviceSpeedCatInputs).some(node => !node) ||
+    Object.values(classAttrInputs).some(group => !group
+      || !group.travelTypesAllowed
+      || !group.serviceSide
+      || !group.crossPenalty
+      || !group.uTurnsRestricted
+    )
   ) {
     return;
   }
@@ -15791,6 +16313,53 @@ function initRouteSequencerControls() {
       const input = inputMap?.[id];
       if (!input) return;
       input.value = String(normalized[id]);
+    });
+  };
+
+  const parseStreetClassAttrMapFromInputs = defaultMap => {
+    const normalizedDefaultMap = normalizeRouteSequencerStreetClassAttrMap(defaultMap);
+    const map = {};
+    ROUTE_SEQUENCER_STREET_CLASS_IDS.forEach(id => {
+      const inputGroup = classAttrInputs?.[id];
+      const fallbackEntry = normalizedDefaultMap[id] || ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP[id];
+      if (!inputGroup) {
+        map[id] = normalizeRouteSequencerStreetClassAttrEntry(null, fallbackEntry);
+        return;
+      }
+      const travelTypesAllowed = normalizeRouteSequencerTravelTypesAllowed(inputGroup.travelTypesAllowed?.value);
+      const serviceSide = normalizeRouteSequencerServiceSideMode(inputGroup.serviceSide?.value);
+      const crossPenaltyMinutes = Math.max(
+        0,
+        parseRouteSequencerMinutesValue(inputGroup.crossPenalty?.value, Number(fallbackEntry?.crossPenaltyMinutes) || 0)
+      );
+      const uTurnsRestricted = String(inputGroup.uTurnsRestricted?.value || "").trim().toLowerCase() === "yes";
+      if (inputGroup.crossPenalty) {
+        inputGroup.crossPenalty.value = formatRouteSequencerMinutesClock(crossPenaltyMinutes);
+      }
+      map[id] = normalizeRouteSequencerStreetClassAttrEntry({
+        travelTypesAllowed,
+        serviceSide,
+        crossPenaltyMinutes,
+        uTurnsRestricted
+      }, fallbackEntry);
+    });
+    return normalizeRouteSequencerStreetClassAttrMap(map);
+  };
+
+  const applyStreetClassAttrMapToInputs = (inputMap, classAttrMap) => {
+    const normalized = normalizeRouteSequencerStreetClassAttrMap(classAttrMap);
+    ROUTE_SEQUENCER_STREET_CLASS_IDS.forEach(id => {
+      const inputGroup = inputMap?.[id];
+      if (!inputGroup) return;
+      const entry = normalized[id] || ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP[id];
+      if (inputGroup.travelTypesAllowed) inputGroup.travelTypesAllowed.value = normalizeRouteSequencerTravelTypesAllowed(entry?.travelTypesAllowed);
+      if (inputGroup.serviceSide) inputGroup.serviceSide.value = normalizeRouteSequencerServiceSideMode(entry?.serviceSide);
+      if (inputGroup.crossPenalty) {
+        inputGroup.crossPenalty.value = formatRouteSequencerMinutesClock(
+          Math.max(0, Number(entry?.crossPenaltyMinutes) || 0)
+        );
+      }
+      if (inputGroup.uTurnsRestricted) inputGroup.uTurnsRestricted.value = entry?.uTurnsRestricted ? "yes" : "no";
     });
   };
 
@@ -15947,6 +16516,7 @@ function initRouteSequencerControls() {
 
   const applySettingsToUi = () => {
     const settings = loadRouteSequencerSettings();
+    const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults || settings);
     capacityInput.value = String(
       clampRouteSequencerNumber(
         settings.capacityTons,
@@ -15990,6 +16560,14 @@ function initRouteSequencerControls() {
       settings.serviceSpeedCatMap || ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP,
       ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
     );
+    streetClassFieldInput.value = String(streetAttributeDefaults.streetClassField || "func_class");
+    allowUTurnsOnlyInCuldesacsToggle.checked = !!streetAttributeDefaults.allowUTurnsOnlyInCuldesacs;
+    discourageUTurnsToggle.checked = streetAttributeDefaults.discourageUTurnsOutsideIntersections !== false;
+    meanderServiceInput.value = formatRouteSequencerMinutesClock(streetAttributeDefaults.meanderServiceMinutes);
+    sameSideServiceInput.value = formatRouteSequencerMinutesClock(streetAttributeDefaults.sameSideServiceMinutes);
+    uTurnProrateDrivingInput.value = normalizeRouteSequencerUTurnProrateMode(streetAttributeDefaults.uTurnProrateDriving);
+    uTurnProrateWalkingInput.value = normalizeRouteSequencerUTurnProrateMode(streetAttributeDefaults.uTurnProrateWalking);
+    applyStreetClassAttrMapToInputs(classAttrInputs, streetAttributeDefaults.classAttrMap);
     return settings;
   };
 
@@ -16090,6 +16668,8 @@ function initRouteSequencerControls() {
     const breakMinutesList = parseRouteSequencerBreakMinutesList(breaksInput.value);
     const speedClassField = normalizeRouteSequencerSpeedClassField(speedClassFieldInput.value);
     speedClassFieldInput.value = speedClassField;
+    const streetClassField = String(streetClassFieldInput.value || "").trim() || "func_class";
+    streetClassFieldInput.value = streetClassField;
     const drivingSpeedCatMap = parseSpeedCatMapFromInputs(
       drivingSpeedCatInputs,
       ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
@@ -16098,6 +16678,28 @@ function initRouteSequencerControls() {
       serviceSpeedCatInputs,
       ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP
     );
+    const meanderServiceMinutes = Math.max(0, parseRouteSequencerMinutesValue(
+      meanderServiceInput.value,
+      ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS.meanderServiceMinutes
+    ));
+    const sameSideServiceMinutes = Math.max(0, parseRouteSequencerMinutesValue(
+      sameSideServiceInput.value,
+      ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS.sameSideServiceMinutes
+    ));
+    meanderServiceInput.value = formatRouteSequencerMinutesClock(meanderServiceMinutes);
+    sameSideServiceInput.value = formatRouteSequencerMinutesClock(sameSideServiceMinutes);
+    const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults({
+      streetClassField,
+      allowUTurnsOnlyInCuldesacs: !!allowUTurnsOnlyInCuldesacsToggle.checked,
+      discourageUTurnsOutsideIntersections: !!discourageUTurnsToggle.checked,
+      meanderServiceMinutes,
+      sameSideServiceMinutes,
+      uTurnProrateDriving: normalizeRouteSequencerUTurnProrateMode(uTurnProrateDrivingInput.value),
+      uTurnProrateWalking: normalizeRouteSequencerUTurnProrateMode(uTurnProrateWalkingInput.value),
+      classAttrMap: parseStreetClassAttrMapFromInputs(ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP)
+    });
+    uTurnProrateDrivingInput.value = streetAttributeDefaults.uTurnProrateDriving;
+    uTurnProrateWalkingInput.value = streetAttributeDefaults.uTurnProrateWalking;
     sequenceIncrementInput.value = String(sequenceIncrement);
     timeAtStartInput.value = formatRouteSequencerMinutesClock(timeAtStartMinutes);
     timeAtEndInput.value = formatRouteSequencerMinutesClock(timeAtEndMinutes);
@@ -16122,6 +16724,7 @@ function initRouteSequencerControls() {
       drivingSpeedCatMap,
       serviceSpeedCatMap,
       classSpeedMap: drivingSpeedCatMap,
+      streetAttributeDefaults,
       selectedDumpId: String(customDumpSelect.value || ""),
       outputFields
     };
@@ -16258,6 +16861,7 @@ function initRouteSequencerControls() {
     const demandField = String(settings.demandField || "");
     const serviceField = String(settings.serviceField || "");
     const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults);
     const dumpSource = String(settings.dumpSource || "both");
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
     const sequenceField = String(outputFields.sequence || "").trim();
@@ -16320,7 +16924,8 @@ function initRouteSequencerControls() {
         demandField,
         serviceField,
         sequenceField,
-        graph
+        graph,
+        streetAttributeDefaults
       );
       const stops = Array.isArray(built?.stops) ? built.stops : [];
       if (!stops.length) {
@@ -16345,7 +16950,8 @@ function initRouteSequencerControls() {
         timeAtStartMinutes: settings.timeAtStartMinutes,
         timeAtEndMinutes: settings.timeAtEndMinutes,
         breakMinutesList,
-        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd
+        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
+        streetAttributeDefaults
       });
       if (plan) plans.push(plan);
 
@@ -16429,6 +17035,7 @@ function initRouteSequencerControls() {
     const demandField = String(settings.demandField || "");
     const serviceField = String(settings.serviceField || "");
     const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults);
     const dumpSource = String(settings.dumpSource || "both");
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
 
@@ -16487,7 +17094,7 @@ function initRouteSequencerControls() {
     for (let i = 0; i < routeDayKeys.length; i += 1) {
       const key = routeDayKeys[i];
       const group = routeDayGroups[key];
-      const stops = buildRouteSequencerStopPoints(key, group, demandField, serviceField, graph);
+      const stops = buildRouteSequencerStopPoints(key, group, demandField, serviceField, graph, streetAttributeDefaults);
       if (!stops.length) {
         skippedRouteDayCount += 1;
         continue;
@@ -16503,7 +17110,8 @@ function initRouteSequencerControls() {
         capacityTons,
         fallbackSpeedMph,
         fallbackServiceSpeedMph,
-        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd
+        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
+        streetAttributeDefaults
       });
       if (plan) plans.push(plan);
       setStatus(`Sequencing Route+Day unit ${i + 1} of ${routeDayKeys.length}...`);
@@ -16622,6 +17230,13 @@ function initRouteSequencerControls() {
     capacityInput,
     defaultSpeedInput,
     sequenceIncrementInput,
+    streetClassFieldInput,
+    allowUTurnsOnlyInCuldesacsToggle,
+    discourageUTurnsToggle,
+    meanderServiceInput,
+    sameSideServiceInput,
+    uTurnProrateDrivingInput,
+    uTurnProrateWalkingInput,
     dumpSourceSelect,
     startDepotSelect,
     endDepotSelect,
@@ -16638,8 +17253,15 @@ function initRouteSequencerControls() {
     });
   [
     speedClassFieldInput,
+    streetClassFieldInput,
     ...Object.values(drivingSpeedCatInputs),
-    ...Object.values(serviceSpeedCatInputs)
+    ...Object.values(serviceSpeedCatInputs),
+    ...Object.values(classAttrInputs).flatMap(group => [
+      group.travelTypesAllowed,
+      group.serviceSide,
+      group.crossPenalty,
+      group.uTurnsRestricted
+    ])
   ].forEach(input => {
     input?.addEventListener("change", () => saveCurrentUiSettings());
   });
@@ -19973,6 +20595,53 @@ function getSavedFileAddedTimestamp(file) {
   return 0;
 }
 
+async function openRouteFileFromCloud(routeName, options = {}) {
+  const name = String(routeName || "").trim();
+  if (!name) return false;
+
+  const loadingMessage = String(options.loadingMessage || "Loading Excel file...");
+  const successMessage = String(options.successMessage || "File loaded successfully.");
+  const errorMessage = String(options.errorMessage || "Error loading file.");
+  const closeManager = options.closeManager !== false;
+  const loadSummary = options.loadSummary !== false;
+
+  try {
+    showLoading(loadingMessage);
+
+    const { data } = sb.storage.from(BUCKET).getPublicUrl(name);
+    const urlWithBypass = data.publicUrl + "?v=" + Date.now();
+    const response = await fetch(urlWithBypass, { cache: "no-store" });
+    if (!response.ok) throw new Error(`File fetch failed (${response.status}).`);
+
+    window._currentFilePath = name;
+    setCurrentFileDisplay(window._currentFilePath);
+    processExcelBuffer(await response.arrayBuffer());
+
+    if (loadSummary) {
+      await loadSummaryFor(name);
+    }
+
+    hideLoading(successMessage);
+    if (closeManager && fileManagerModal) {
+      fileManagerModal.style.display = "none";
+    }
+    return true;
+  } catch (error) {
+    console.error(error);
+    hideLoading();
+    alert(errorMessage);
+    return false;
+  }
+}
+
+async function routeFileExistsInCloud(routeName) {
+  const name = String(routeName || "").trim();
+  if (!name) return false;
+  const { data, error } = await sb.storage.from(BUCKET).list();
+  if (error) throw error;
+  return (data || []).some(file => String(file?.name || "") === name);
+}
+
 async function listFiles() {
   const { data, error } = await sb.storage.from(BUCKET).list();
   if (error) return console.error(error);
@@ -20046,28 +20715,13 @@ async function listFiles() {
     openBtn.className = "saved-file-btn open-btn";
     openBtn.textContent = "Open Map";
     openBtn.onclick = async () => {
-      try {
-        showLoading("Loading Excel file...");
-
-        const { data } = sb.storage.from(BUCKET).getPublicUrl(routeName);
-        const urlWithBypass = data.publicUrl + "?v=" + Date.now();
-        const r = await fetch(urlWithBypass, {
-          cache: "no-store"
-        });
-
-        window._currentFilePath = routeName;
-        setCurrentFileDisplay(window._currentFilePath);
-
-        processExcelBuffer(await r.arrayBuffer());
-        await loadSummaryFor(routeName);
-
-        hideLoading("File Loaded Successfully âœ…");
-        if (fileManagerModal) fileManagerModal.style.display = "none";
-      } catch (err) {
-        console.error(err);
-        hideLoading();
-        alert("Error loading file.");
-      }
+      await openRouteFileFromCloud(routeName, {
+        loadingMessage: "Loading Excel file...",
+        successMessage: "File loaded successfully.",
+        errorMessage: "Error loading file.",
+        closeManager: true,
+        loadSummary: true
+      });
     };
     actions.appendChild(openBtn);
 
@@ -20129,6 +20783,30 @@ async function uploadFile(file) {
   if (!file) return;
 
   try {
+    let existingInCloud = false;
+    try {
+      existingInCloud = await routeFileExistsInCloud(file.name);
+    } catch (listError) {
+      console.warn("Unable to verify existing cloud file before upload:", listError);
+    }
+
+    if (existingInCloud) {
+      const openSavedCopy = window.confirm(
+        `"${file.name}" is already in Saved Files.\n\n` +
+        "OK: Open saved cloud copy (keeps your previous TDS-Pak edits).\n" +
+        "Cancel: Replace cloud file with this local file."
+      );
+      if (openSavedCopy) {
+        await openRouteFileFromCloud(file.name, {
+          loadingMessage: "Opening saved file...",
+          successMessage: "Saved file opened.",
+          errorMessage: "Could not open saved file.",
+          closeManager: false,
+          loadSummary: true
+        });
+        return;
+      }
+    }
 
     const fileBuffer = await file.arrayBuffer();
     const mappedWorkbook = await prepareMappedWorkbookForUpload(fileBuffer, file.name);

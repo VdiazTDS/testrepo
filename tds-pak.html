@@ -1170,34 +1170,146 @@
         </article>
         <article class="route-sequencer-speed-cat-card">
           <div class="route-sequencer-speed-cat-title">Class 3</div>
-          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat3" type="number" min="5" max="85" step="1" value="50" /></label>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat3" type="number" min="5" max="85" step="1" value="55" /></label>
           <label><span>Service</span><input id="routeSequencerServiceSpeedCat3" type="number" min="5" max="85" step="1" value="40" /></label>
         </article>
         <article class="route-sequencer-speed-cat-card">
           <div class="route-sequencer-speed-cat-title">Class 4</div>
-          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat4" type="number" min="5" max="85" step="1" value="40" /></label>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat4" type="number" min="5" max="85" step="1" value="45" /></label>
           <label><span>Service</span><input id="routeSequencerServiceSpeedCat4" type="number" min="5" max="85" step="1" value="30" /></label>
         </article>
         <article class="route-sequencer-speed-cat-card">
           <div class="route-sequencer-speed-cat-title">Class 5</div>
-          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat5" type="number" min="5" max="85" step="1" value="30" /></label>
-          <label><span>Service</span><input id="routeSequencerServiceSpeedCat5" type="number" min="5" max="85" step="1" value="20" /></label>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat5" type="number" min="5" max="85" step="1" value="35" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat5" type="number" min="5" max="85" step="1" value="15" /></label>
         </article>
         <article class="route-sequencer-speed-cat-card">
           <div class="route-sequencer-speed-cat-title">Class 6</div>
-          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat6" type="number" min="5" max="85" step="1" value="20" /></label>
-          <label><span>Service</span><input id="routeSequencerServiceSpeedCat6" type="number" min="5" max="85" step="1" value="10" /></label>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat6" type="number" min="5" max="85" step="1" value="25" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat6" type="number" min="5" max="85" step="1" value="7" /></label>
         </article>
         <article class="route-sequencer-speed-cat-card">
           <div class="route-sequencer-speed-cat-title">Class 7</div>
-          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat7" type="number" min="5" max="85" step="1" value="10" /></label>
-          <label><span>Service</span><input id="routeSequencerServiceSpeedCat7" type="number" min="5" max="85" step="1" value="5" /></label>
+          <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat7" type="number" min="5" max="85" step="1" value="15" /></label>
+          <label><span>Service</span><input id="routeSequencerServiceSpeedCat7" type="number" min="5" max="85" step="1" value="7" /></label>
         </article>
         <article class="route-sequencer-speed-cat-card">
           <div class="route-sequencer-speed-cat-title">Class 8</div>
           <label><span>Driving</span><input id="routeSequencerDrivingSpeedCat8" type="number" min="5" max="85" step="1" value="5" /></label>
           <label><span>Service</span><input id="routeSequencerServiceSpeedCat8" type="number" min="5" max="85" step="1" value="5" /></label>
         </article>
+      </div>
+    </section>
+
+    <section class="route-sequencer-card route-sequencer-street-attr-card">
+      <h4>Street Attribute Defaults (RouteSmart-style)</h4>
+      <p>Configure U-turn and street-class behavior for service legs. Defaults match your RouteSmart screenshots.</p>
+      <div class="route-sequencer-grid route-sequencer-street-attr-header-grid">
+        <label class="route-sequencer-field route-sequencer-speed-class-field">
+          <span>Street Class Field</span>
+          <input id="routeSequencerStreetClassField" type="text" value="func_class" placeholder="func_class" />
+        </label>
+        <label class="route-sequencer-field route-sequencer-field-check">
+          <input id="routeSequencerAllowUTurnsCuldesacs" type="checkbox" />
+          <span>Allow U-turns only in cul-de-sacs</span>
+        </label>
+        <label class="route-sequencer-field route-sequencer-field-check">
+          <input id="routeSequencerDiscourageUTurnsOutsideIntersections" type="checkbox" checked />
+          <span>Discourage U-turns outside intersections</span>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Meander Service (HH:MM:SS)</span>
+          <input id="routeSequencerMeanderServiceInput" type="text" value="00:00:30" placeholder="00:00:30" />
+        </label>
+        <label class="route-sequencer-field">
+          <span>Same Side Service (HH:MM:SS)</span>
+          <input id="routeSequencerSameSideServiceInput" type="text" value="00:01:00" placeholder="00:01:00" />
+        </label>
+        <label class="route-sequencer-field">
+          <span>Prorate for U-turns (Driving)</span>
+          <select id="routeSequencerUTurnProrateDriving">
+            <option value="none" selected>Do not prorate</option>
+            <option value="distance">Prorate by distance</option>
+          </select>
+        </label>
+        <label class="route-sequencer-field">
+          <span>Prorate for U-turns (Walking)</span>
+          <select id="routeSequencerUTurnProrateWalking" disabled>
+            <option value="none" selected>Do not prorate</option>
+            <option value="distance">Prorate by distance</option>
+          </select>
+        </label>
+      </div>
+      <div class="route-sequencer-class-attr-table-wrap">
+        <table class="route-sequencer-class-attr-table">
+          <thead>
+            <tr>
+              <th>Class</th>
+              <th>Travel Types Allowed</th>
+              <th>Service Side</th>
+              <th>Cross Penalty (HH:MM:SS)</th>
+              <th>U-turns Restricted</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td><select id="routeSequencerClass1TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass1ServiceSide"><option value="Same" selected>Same</option><option value="Both">Both</option></select></td>
+              <td><input id="routeSequencerClass1CrossPenalty" type="text" value="00:05:00" /></td>
+              <td><select id="routeSequencerClass1UTurnRestricted"><option value="yes" selected>Yes</option><option value="no">No</option></select></td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td><select id="routeSequencerClass2TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass2ServiceSide"><option value="Same" selected>Same</option><option value="Both">Both</option></select></td>
+              <td><input id="routeSequencerClass2CrossPenalty" type="text" value="00:02:30" /></td>
+              <td><select id="routeSequencerClass2UTurnRestricted"><option value="yes" selected>Yes</option><option value="no">No</option></select></td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td><select id="routeSequencerClass3TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass3ServiceSide"><option value="Same" selected>Same</option><option value="Both">Both</option></select></td>
+              <td><input id="routeSequencerClass3CrossPenalty" type="text" value="00:00:15" /></td>
+              <td><select id="routeSequencerClass3UTurnRestricted"><option value="yes" selected>Yes</option><option value="no">No</option></select></td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td><select id="routeSequencerClass4TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass4ServiceSide"><option value="Same">Same</option><option value="Both" selected>Both</option></select></td>
+              <td><input id="routeSequencerClass4CrossPenalty" type="text" value="00:00:00" /></td>
+              <td><select id="routeSequencerClass4UTurnRestricted"><option value="yes">Yes</option><option value="no" selected>No</option></select></td>
+            </tr>
+            <tr>
+              <td>5</td>
+              <td><select id="routeSequencerClass5TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass5ServiceSide"><option value="Same">Same</option><option value="Both" selected>Both</option></select></td>
+              <td><input id="routeSequencerClass5CrossPenalty" type="text" value="00:00:00" /></td>
+              <td><select id="routeSequencerClass5UTurnRestricted"><option value="yes">Yes</option><option value="no" selected>No</option></select></td>
+            </tr>
+            <tr>
+              <td>6</td>
+              <td><select id="routeSequencerClass6TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass6ServiceSide"><option value="Same">Same</option><option value="Both" selected>Both</option></select></td>
+              <td><input id="routeSequencerClass6CrossPenalty" type="text" value="00:00:00" /></td>
+              <td><select id="routeSequencerClass6UTurnRestricted"><option value="yes">Yes</option><option value="no" selected>No</option></select></td>
+            </tr>
+            <tr>
+              <td>7</td>
+              <td><select id="routeSequencerClass7TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass7ServiceSide"><option value="Same">Same</option><option value="Both" selected>Both</option></select></td>
+              <td><input id="routeSequencerClass7CrossPenalty" type="text" value="00:00:00" /></td>
+              <td><select id="routeSequencerClass7UTurnRestricted"><option value="yes">Yes</option><option value="no" selected>No</option></select></td>
+            </tr>
+            <tr>
+              <td>8</td>
+              <td><select id="routeSequencerClass8TravelTypes"><option value="Any" selected>Any</option><option value="Driving">Driving</option><option value="Walking">Walking</option></select></td>
+              <td><select id="routeSequencerClass8ServiceSide"><option value="Same">Same</option><option value="Both" selected>Both</option></select></td>
+              <td><input id="routeSequencerClass8CrossPenalty" type="text" value="00:00:00" /></td>
+              <td><select id="routeSequencerClass8UTurnRestricted"><option value="yes">Yes</option><option value="no" selected>No</option></select></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -1530,7 +1642,7 @@
   </div>
 </div>
 <script src="https://unpkg.com/shpjs@6.2.0/dist/shp.min.js" defer></script>
-<script src="app-tds-pak.js?v=20260311-23" defer></script>
+<script src="app-tds-pak.js?v=20260311-25" defer></script>
 <!-- MOBILE Selected Stops Button -->
 <button id="mobileSelectionBtn">Selected: 0</button>
 
