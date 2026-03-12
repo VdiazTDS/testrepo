@@ -1,4 +1,16 @@
 window.addEventListener("error", e => {
+  try {
+    const location = [
+      String(e?.filename || "").trim(),
+      Number.isFinite(Number(e?.lineno)) ? `line ${Number(e.lineno)}` : "",
+      Number.isFinite(Number(e?.colno)) ? `col ${Number(e.colno)}` : ""
+    ].filter(Boolean).join(", ");
+    const stack = String(e?.error?.stack || "").trim();
+    const detail = [location, stack].filter(Boolean).join("\n");
+    recordAppDiagnosticEvent("error", "window.error", String(e?.message || "Unknown JS error"), detail);
+  } catch {
+    // Keep base error logging active even if diagnostics capture is not ready.
+  }
   console.error("JS ERROR:", e.message, "at line", e.lineno);
 });
 
@@ -90,6 +102,201 @@ const RIGHT_SIDEBAR_ARROW_COLLAPSED = "\u276E";
 const RIGHT_SIDEBAR_ARROW_EXPANDED = "\u276F";
 const SUMMARY_ARROW_COLLAPSED = "\u25B2";
 const SUMMARY_ARROW_EXPANDED = "\u25BC";
+const APP_DIAGNOSTICS_MAX_EVENTS = 250;
+const APP_DIAGNOSTICS_COPY_LIMIT = 80;
+const appDiagnosticsSessionStartedAt = new Date().toISOString();
+const appDiagnosticsEvents = [];
+
+function stringifyAppDiagnosticValue(value) {
+  if (value == null) return "";
+  if (value instanceof Error) {
+    const stack = String(value.stack || "").trim();
+    if (stack) return stack;
+    return `${value.name || "Error"}: ${value.message || ""}`.trim();
+  }
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    try {
+      return String(value);
+    } catch {
+      return "[unserializable]";
+    }
+  }
+}
+
+function formatAppDiagnosticArgs(args) {
+  if (!Array.isArray(args) || !args.length) return "";
+  return args
+    .map(value => stringifyAppDiagnosticValue(value))
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function recordAppDiagnosticEvent(level, source, message, detail = "") {
+  const entry = {
+    at: new Date().toISOString(),
+    level: String(level || "info").toUpperCase(),
+    source: String(source || "app").trim() || "app",
+    message: String(message || "").trim() || "(no message)",
+    detail: String(detail || "").trim()
+  };
+  appDiagnosticsEvents.push(entry);
+  if (appDiagnosticsEvents.length > APP_DIAGNOSTICS_MAX_EVENTS) {
+    appDiagnosticsEvents.splice(0, appDiagnosticsEvents.length - APP_DIAGNOSTICS_MAX_EVENTS);
+  }
+}
+
+function getAppDiagnosticStatusText(nodeId) {
+  const node = document.getElementById(nodeId);
+  if (!node) return "";
+  return String(node.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function getRouteDayGroupCountForDiagnostics() {
+  try {
+    return routeDayGroups && typeof routeDayGroups === "object"
+      ? Object.keys(routeDayGroups).length
+      : 0;
+  } catch {
+    return "n/a";
+  }
+}
+
+function getStreetSegmentCountForDiagnostics() {
+  try {
+    return streetAttributeById && typeof streetAttributeById.size === "number"
+      ? streetAttributeById.size
+      : 0;
+  } catch {
+    return "n/a";
+  }
+}
+
+function getSelectedStopCountForDiagnostics() {
+  try {
+    return selectedIds && typeof selectedIds.size === "number"
+      ? selectedIds.size
+      : 0;
+  } catch {
+    return "n/a";
+  }
+}
+
+function buildAppDiagnosticsReport() {
+  const nowIso = new Date().toISOString();
+  const rowsLoaded = Array.isArray(window._currentRows) ? window._currentRows.length : 0;
+  const recentEvents = appDiagnosticsEvents.slice(-APP_DIAGNOSTICS_COPY_LIMIT);
+  const lines = [
+    "=== TDS-PAK Diagnostics ===",
+    `Generated: ${nowIso}`,
+    `Session started: ${appDiagnosticsSessionStartedAt}`,
+    `URL: ${window.location.href}`,
+    `User agent: ${navigator.userAgent}`,
+    `Online: ${navigator.onLine}`,
+    `Viewport: ${window.innerWidth}x${window.innerHeight}`,
+    `Screen: ${window.screen?.width || "?"}x${window.screen?.height || "?"}`,
+    `Current file: ${String(window._currentFilePath || "(none)")}`,
+    `Rows loaded: ${rowsLoaded}`,
+    `Route+Day groups: ${getRouteDayGroupCountForDiagnostics()}`,
+    `Selected stops: ${getSelectedStopCountForDiagnostics()}`,
+    `Street segments loaded: ${getStreetSegmentCountForDiagnostics()}`,
+    "",
+    "Status Snapshot:",
+    `- Street Load: ${getAppDiagnosticStatusText("streetLoadStatus") || "(blank)"}`,
+    `- Route Sequencer: ${getAppDiagnosticStatusText("routeSequencerStatus") || "(blank)"}`,
+    `- Set Segment ID + Side: ${getAppDiagnosticStatusText("setSegmentIdSideStatus") || "(blank)"}`,
+    `- Update Field: ${getAppDiagnosticStatusText("updateFieldStatus") || "(blank)"}`,
+    `- Select By Attributes: ${getAppDiagnosticStatusText("selectAttributesStatus") || "(blank)"}`,
+    "",
+    `Recent diagnostics (last ${recentEvents.length} of ${appDiagnosticsEvents.length} captured):`
+  ];
+
+  if (!recentEvents.length) {
+    lines.push("(No warnings/errors captured in this tab session.)");
+  } else {
+    recentEvents.forEach((entry, index) => {
+      lines.push(`${index + 1}. [${entry.at}] ${entry.level} ${entry.source}: ${entry.message}`);
+      if (entry.detail) {
+        lines.push(`   detail: ${entry.detail}`);
+      }
+    });
+  }
+
+  return lines.join("\n");
+}
+
+async function copyAppDiagnosticsToClipboard() {
+  const report = buildAppDiagnosticsReport();
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(report);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+
+  if (!copied) {
+    try {
+      const node = document.createElement("textarea");
+      node.value = report;
+      node.setAttribute("readonly", "readonly");
+      node.style.position = "fixed";
+      node.style.opacity = "0";
+      node.style.left = "-9999px";
+      document.body.appendChild(node);
+      node.focus();
+      node.select();
+      copied = !!document.execCommand("copy");
+      node.remove();
+    } catch {
+      copied = false;
+    }
+  }
+
+  if (copied) {
+    alert("Diagnostics copied. Paste and send this text.");
+    return true;
+  }
+
+  window.prompt("Copy diagnostics text below:", report);
+  return false;
+}
+
+(function patchConsoleForDiagnostics() {
+  if (window.__tdsPakConsoleDiagnosticsPatched) return;
+  window.__tdsPakConsoleDiagnosticsPatched = true;
+
+  const patch = (methodName, level) => {
+    const original = console[methodName];
+    if (typeof original !== "function") return;
+    const bound = original.bind(console);
+    console[methodName] = (...args) => {
+      try {
+        recordAppDiagnosticEvent(level, `console.${methodName}`, formatAppDiagnosticArgs(args));
+      } catch {
+        // Keep console behavior even if diagnostics capture fails.
+      }
+      return bound(...args);
+    };
+  };
+
+  patch("error", "error");
+  patch("warn", "warn");
+})();
+
+window.addEventListener("unhandledrejection", event => {
+  const reason = stringifyAppDiagnosticValue(event?.reason);
+  recordAppDiagnosticEvent("error", "window.unhandledrejection", reason || "Unhandled promise rejection");
+});
+
+window.getTdsPakDiagnosticsReport = buildAppDiagnosticsReport;
 
 // Header tools menu links (shared by all app pages).
 const HEADER_TOOL_LINKS = [
@@ -355,6 +562,7 @@ function updateHeading(event) {
 
 // ===== HARD REFRESH BUTTON (SAFE + NO CACHE) =====
 const hardRefreshBtn = document.getElementById("hardRefreshBtn");
+const copyDiagnosticsBtn = document.getElementById("copyDiagnosticsBtn");
 
 if (hardRefreshBtn) {
   let refreshArmed = false;
@@ -403,6 +611,22 @@ if (hardRefreshBtn) {
   });
 }
 
+if (copyDiagnosticsBtn) {
+  copyDiagnosticsBtn.addEventListener("click", async () => {
+    try {
+      await copyAppDiagnosticsToClipboard();
+    } catch (error) {
+      recordAppDiagnosticEvent(
+        "error",
+        "copy.diagnostics",
+        "Copy Diagnostics failed",
+        stringifyAppDiagnosticValue(error)
+      );
+      alert("Could not copy diagnostics automatically. Please try again.");
+    }
+  });
+}
+
 function placeRefreshButton() {
   const refreshBtn = document.getElementById("hardRefreshBtn");
   const desktopTools = document.querySelector(".header-tools-desktop");
@@ -414,6 +638,26 @@ function placeRefreshButton() {
     desktopTools.appendChild(refreshBtn);
   } else {
     mobileButtons.insertBefore(refreshBtn, mobileButtons.firstChild);
+  }
+}
+
+function placeCopyDiagnosticsButton() {
+  const diagnosticsBtn = document.getElementById("copyDiagnosticsBtn");
+  const refreshBtn = document.getElementById("hardRefreshBtn");
+  const desktopTools = document.querySelector(".header-tools-desktop");
+  const mobileButtons = document.querySelector(".mobile-header-buttons");
+
+  if (!diagnosticsBtn || !desktopTools || !mobileButtons) return;
+
+  if (window.innerWidth > 900) {
+    desktopTools.appendChild(diagnosticsBtn);
+    return;
+  }
+
+  if (refreshBtn && refreshBtn.parentElement === mobileButtons) {
+    mobileButtons.insertBefore(diagnosticsBtn, refreshBtn.nextSibling);
+  } else {
+    mobileButtons.insertBefore(diagnosticsBtn, mobileButtons.firstChild);
   }
 }
 
@@ -538,8 +782,10 @@ function initHeaderActionOverflowMenu() {
 }
 
 placeRefreshButton();
+placeCopyDiagnosticsButton();
 initHeaderActionOverflowMenu();
 window.addEventListener("resize", placeRefreshButton);
+window.addEventListener("resize", placeCopyDiagnosticsButton);
 
 //======
 

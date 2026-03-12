@@ -5187,6 +5187,50 @@ body.sun-mode #hardRefreshBtn {
   color: #ffffff !important;
 }
 
+#copyDiagnosticsBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: linear-gradient(160deg, #3ea780 0%, #2b8666 100%);
+  color: #f4fffb;
+  border: 1px solid #62c9a2;
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  z-index: 5000;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+#copyDiagnosticsBtn:hover {
+  background: linear-gradient(160deg, #49b18a 0%, #329172 100%);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.34);
+}
+
+#copyDiagnosticsBtn:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+body.sun-mode #copyDiagnosticsBtn {
+  background: linear-gradient(160deg, #1f765a 0%, #175743 100%) !important;
+  border-color: #238568 !important;
+  color: #ffffff !important;
+}
+
+.header-tools-desktop #copyDiagnosticsBtn {
+  width: auto !important;
+  min-width: 108px !important;
+  padding: 5px 9px !important;
+  font-size: 11px !important;
+  line-height: 1.15 !important;
+  border-radius: 8px !important;
+  margin: 0 !important;
+}
+
 /* ===== MOBILE MENU BUTTON ===== */
 #mobileMenuBtn {
   background: #2a2a2a;
