@@ -332,6 +332,24 @@
       </div>
     </div>
 
+    <div class="filter-group city-limits-group">
+      <div class="filter-header collapsible-header" id="cityLimitsLayerToggleHeader">
+        <div class="days-title">
+          <span class="arrow">&#9654;</span>
+          <strong>City Limits Layer</strong>
+        </div>
+      </div>
+      <div id="cityLimitsLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master city-limits-master">
+          <input type="checkbox" id="cityLimitsLayerEnabled" />
+          Show City Limits
+        </label>
+        <div id="cityLimitsLayerStatus" class="service-day-label-empty city-limits-status">
+          Layer is off.
+        </div>
+      </div>
+    </div>
+
 <button id="resetMapBtn" class="primary-btn" aria-label="Reset map and clear selections">
       <span class="reset-map-icon" aria-hidden="true"></span>
       <span class="reset-map-copy">
@@ -1006,7 +1024,7 @@
       <p>Build stop order by drive time, enforce truck capacity, and insert dump visits when loads reach threshold.</p>
     </div>
     <div class="route-sequencer-network-note" role="note">
-      Solver compute runs 100% locally on this machine. Network access is only used when dump source includes Texas Landfills, and then only to fetch that single landfill layer.
+      Solver compute runs 100% locally on this machine. Network access is only used for optional map layers (Texas Landfills, City Limits) and cloud file save/open.
     </div>
 
     <div class="route-sequencer-grid">

@@ -1155,6 +1155,7 @@ initWheelZoomInputControls();
 const ROUTE_DAY_PANE = "routeDayPane";
 const STREET_NETWORK_PANE = "streetNetworkPane";
 const SEQUENCE_PANE = "sequencePane";
+const CITY_LIMITS_PANE = "cityLimitsPane";
 const routeDayPane = map.createPane(ROUTE_DAY_PANE);
 if (routeDayPane) routeDayPane.style.zIndex = "380";
 const streetNetworkPane = map.createPane(STREET_NETWORK_PANE);
@@ -1163,6 +1164,11 @@ const sequencePane = map.createPane(SEQUENCE_PANE);
 if (sequencePane) {
   sequencePane.style.zIndex = "379";
   sequencePane.style.pointerEvents = "none";
+}
+const cityLimitsPane = map.createPane(CITY_LIMITS_PANE);
+if (cityLimitsPane) {
+  cityLimitsPane.style.zIndex = "365";
+  cityLimitsPane.style.pointerEvents = "none";
 }
 // Shared Canvas renderer for high-performance drawing
 const canvasRenderer = L.canvas({ padding: 0.5, pane: ROUTE_DAY_PANE });
@@ -1239,6 +1245,7 @@ let multiDayServiceEnabled = false;
 let multiDayToggleButtonRef = null;
 let multiDayManagerUiRenderer = null;
 let multiDaySidebarUiRenderer = null;
+const cityLimitsLayerGroup = L.layerGroup();
 const streetAttributeLayerGroup = L.layerGroup();
 const texasLandfillsLayerGroup = L.layerGroup();
 const routeSequencerFacilitiesLayerGroup = L.layerGroup().addTo(map);
@@ -1387,6 +1394,15 @@ const TEXAS_LANDFILLS_LAYER_VISIBLE_KEY = "texasLandfillsLayerVisible";
 const TEXAS_LANDFILLS_FEATURE_LAYER_URL = "https://services6.arcgis.com/MhhE5pgCPypps4To/ArcGIS/rest/services/Texas_Landfills_Web_Map/FeatureServer/0";
 const TEXAS_LANDFILLS_QUERY_URL = `${TEXAS_LANDFILLS_FEATURE_LAYER_URL}/query`;
 const TEXAS_LANDFILLS_FETCH_BATCH_SIZE = 180;
+const CITY_LIMITS_LAYER_VISIBLE_KEY = "cityLimitsLayerVisible";
+const CITY_LIMITS_FEATURE_LAYER_URL = "https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/USA_Census_Populated_Places/FeatureServer/0";
+const CITY_LIMITS_QUERY_URL = `${CITY_LIMITS_FEATURE_LAYER_URL}/query`;
+const CITY_LIMITS_FETCH_RECORD_LIMIT = 900;
+const CITY_LIMITS_QUERY_WHERE = "ST = 'TX'";
+const CITY_LIMITS_MOVE_REFRESH_DEBOUNCE_MS = 320;
+const CITY_LIMITS_MIN_ZOOM = 8;
+const CITY_LIMITS_LABEL_MIN_ZOOM = 10;
+const CITY_LIMITS_BOUNDS_PAD = 0.04;
 const TEXAS_LANDFILL_MAJOR_TYPE_ALLOWLIST = new Set(["1", "1AE", "1 AE & 4 AE", "1AE & 4AE", "2"]);
 const TEXAS_LANDFILL_EXCLUDED_SITE_STATUSES = new Set(["INACTIVE", "CLOSED", "POST CLOSURE", "NOT CONSTRUCTED", "MISSING"]);
 const TEXAS_LANDFILL_EXCLUDED_CEC_STATUSES = new Set(["INACTIVE"]);
@@ -1400,6 +1416,18 @@ const texasLandfillsState = {
   filteredOutCount: 0,
   lastError: "",
   sourceName: "Texas Landfills Web Map"
+};
+const cityLimitsState = {
+  loaded: false,
+  loading: false,
+  loadPromise: null,
+  featureCount: 0,
+  lastError: "",
+  lastBoundsKey: "",
+  refreshTimer: null,
+  moveListenerBound: false,
+  zoomListenerBound: false,
+  sourceName: "USA Census Populated Places"
 };
 const localStreetBackendState = {
   baseUrl: LOCAL_STREET_BACKEND_URL_DEFAULT,
@@ -20166,6 +20194,413 @@ function initTexasLandfillsLayerControls() {
   }
 }
 
+function getCityLimitsBoundsKey(bounds) {
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) return "";
+  const southWest = bounds.getSouthWest();
+  const northEast = bounds.getNorthEast();
+  return [
+    Number(southWest?.lat || 0).toFixed(3),
+    Number(southWest?.lng || 0).toFixed(3),
+    Number(northEast?.lat || 0).toFixed(3),
+    Number(northEast?.lng || 0).toFixed(3)
+  ].join("|");
+}
+
+function getCityLimitsZoomHintText() {
+  const zoom = Number(map.getZoom?.()) || 0;
+  return `Zoom in to level ${CITY_LIMITS_MIN_ZOOM}+ to load city limits (current: ${zoom.toFixed(1)}).`;
+}
+
+function updateCityLimitsLayerStatus(message = "") {
+  const statusNode = document.getElementById("cityLimitsLayerStatus");
+  if (!statusNode) return;
+
+  if (message) {
+    statusNode.textContent = String(message);
+    return;
+  }
+
+  const requested = !!document.getElementById("cityLimitsLayerEnabled")?.checked;
+  const visible = map.hasLayer(cityLimitsLayerGroup);
+  const count = Number(cityLimitsState.featureCount) || 0;
+  const zoom = Number(map.getZoom?.()) || 0;
+
+  if (requested && zoom < CITY_LIMITS_MIN_ZOOM) {
+    statusNode.textContent = getCityLimitsZoomHintText();
+    return;
+  }
+
+  if (cityLimitsState.loading) {
+    statusNode.textContent = "Loading city limits...";
+    return;
+  }
+  if (cityLimitsState.lastError) {
+    statusNode.textContent = `Unable to load city limits: ${cityLimitsState.lastError}`;
+    return;
+  }
+  if (visible) {
+    statusNode.textContent = count > 0
+      ? `Layer is on (${count.toLocaleString()} city limits shown for this map view).`
+      : "Layer is on (no city limits in this map view).";
+    return;
+  }
+  if (cityLimitsState.loaded) {
+    statusNode.textContent = count > 0
+      ? `Layer is off (${count.toLocaleString()} city limits ready for this map view).`
+      : "Layer is off (no city limits in this map view).";
+    return;
+  }
+  statusNode.textContent = "Layer is off.";
+}
+
+function getCityLimitsQueryEnvelope(bounds) {
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) return null;
+  const southWest = bounds.getSouthWest();
+  const northEast = bounds.getNorthEast();
+  return {
+    xmin: Number(southWest.lng),
+    ymin: Number(southWest.lat),
+    xmax: Number(northEast.lng),
+    ymax: Number(northEast.lat),
+    spatialReference: { wkid: 4326 }
+  };
+}
+
+function buildCityLimitsLayerStyle(feature) {
+  const props = feature?.properties && typeof feature.properties === "object"
+    ? feature.properties
+    : {};
+  const population = Number(props.POPULATION);
+  const isMajorPlace = Number.isFinite(population) && population >= 50000;
+  return {
+    color: isMajorPlace ? "#f6b347" : "#6fb8ff",
+    weight: isMajorPlace ? 2.0 : 1.4,
+    opacity: 0.9,
+    fillColor: isMajorPlace ? "#f6b347" : "#6fb8ff",
+    fillOpacity: 0.06,
+    dashArray: isMajorPlace ? "" : "5 4",
+    pane: CITY_LIMITS_PANE,
+    interactive: false
+  };
+}
+
+function buildCityLimitsPointStyle(feature) {
+  const props = feature?.properties && typeof feature.properties === "object"
+    ? feature.properties
+    : {};
+  const population = Number(props.POPULATION);
+  const isMajorPlace = Number.isFinite(population) && population >= 50000;
+  return {
+    pane: CITY_LIMITS_PANE,
+    radius: isMajorPlace ? 4.8 : 3.8,
+    color: isMajorPlace ? "#f6b347" : "#6fb8ff",
+    weight: 1.2,
+    opacity: 0.95,
+    fillColor: isMajorPlace ? "#f6b347" : "#6fb8ff",
+    fillOpacity: 0.75,
+    interactive: false
+  };
+}
+
+function getCityLimitsFeatureLabel(feature) {
+  const props = feature?.properties && typeof feature.properties === "object"
+    ? feature.properties
+    : {};
+  const value = String(props.NAME || props.CITY || props.PLACE || "").trim();
+  return value || "";
+}
+
+function shouldShowCityLimitsLabels() {
+  return (Number(map.getZoom?.()) || 0) >= CITY_LIMITS_LABEL_MIN_ZOOM;
+}
+
+function bindCityLimitsFeatureLabel(feature, layer) {
+  if (!layer || typeof layer.bindTooltip !== "function") return;
+  if (!shouldShowCityLimitsLabels()) return;
+  const label = getCityLimitsFeatureLabel(feature);
+  if (!label) return;
+
+  const hasPointLocation = typeof layer.getLatLng === "function";
+  layer.bindTooltip(label, {
+    permanent: true,
+    direction: hasPointLocation ? "top" : "center",
+    offset: hasPointLocation ? [0, -8] : [0, 0],
+    className: "city-limits-label",
+    interactive: false,
+    opacity: 0.95
+  });
+}
+
+async function fetchCityLimitsGeoJsonForBounds(bounds) {
+  const envelope = getCityLimitsQueryEnvelope(bounds);
+  if (!envelope) {
+    return { type: "FeatureCollection", features: [] };
+  }
+  const requestCityLimits = async params => {
+    const response = await fetch(`${CITY_LIMITS_QUERY_URL}?${params.toString()}`, {
+      cache: "no-store",
+      headers: { Accept: "application/geo+json, application/json" }
+    });
+    if (!response.ok) {
+      let extra = "";
+      try {
+        const text = await response.text();
+        const parsed = text ? JSON.parse(text) : null;
+        const serviceError = getTexasLandfillsArcGisErrorMessage(parsed);
+        if (serviceError) extra = `: ${serviceError}`;
+      } catch (_) {
+        // Ignore non-JSON response bodies.
+      }
+      throw new Error(`City limits query failed (${response.status})${extra}`);
+    }
+
+    const payload = await response.json();
+    const serviceError = getTexasLandfillsArcGisErrorMessage(payload);
+    if (serviceError) throw new Error(serviceError);
+    if (!Array.isArray(payload?.features)) {
+      return { type: "FeatureCollection", features: [] };
+    }
+    return payload;
+  };
+
+  const params = new URLSearchParams({
+    where: CITY_LIMITS_QUERY_WHERE,
+    outFields: "*",
+    returnGeometry: "true",
+    outSR: "4326",
+    resultRecordCount: String(CITY_LIMITS_FETCH_RECORD_LIMIT),
+    orderByFields: "POPULATION DESC, NAME ASC",
+    f: "geojson"
+  });
+  params.set("inSR", "4326");
+  params.set("geometryType", "esriGeometryEnvelope");
+  params.set("spatialRel", "esriSpatialRelIntersects");
+  params.set("geometry", JSON.stringify(envelope));
+
+  return requestCityLimits(params);
+}
+
+function loadCityLimitsIntoLayerGroup(collection) {
+  cityLimitsLayerGroup.clearLayers();
+  const features = Array.isArray(collection?.features) ? collection.features : [];
+  if (!features.length) return 0;
+
+  const layer = L.geoJSON(
+    { type: "FeatureCollection", features },
+    {
+      style: buildCityLimitsLayerStyle,
+      pointToLayer: (feature, latlng) => L.circleMarker(latlng, buildCityLimitsPointStyle(feature)),
+      onEachFeature: bindCityLimitsFeatureLabel,
+      pane: CITY_LIMITS_PANE,
+      interactive: false
+    }
+  );
+  cityLimitsLayerGroup.addLayer(layer);
+  return features.length;
+}
+
+function scheduleCityLimitsLayerRefresh(options = {}) {
+  if (!document.getElementById("cityLimitsLayerEnabled")?.checked) return;
+  if (cityLimitsState.refreshTimer) clearTimeout(cityLimitsState.refreshTimer);
+  const force = !!options.force;
+  cityLimitsState.refreshTimer = setTimeout(() => {
+    cityLimitsState.refreshTimer = null;
+    refreshCityLimitsLayerForCurrentView({ force }).catch(error => {
+      console.warn("Unable to refresh city limits layer:", error);
+      updateCityLimitsLayerStatus("Unable to refresh city limits.");
+    });
+  }, CITY_LIMITS_MOVE_REFRESH_DEBOUNCE_MS);
+}
+
+function handleCityLimitsMapMoveEnd() {
+  scheduleCityLimitsLayerRefresh();
+}
+
+function handleCityLimitsMapZoomEnd() {
+  scheduleCityLimitsLayerRefresh({ force: true });
+}
+
+function setCityLimitsMoveListenerBound(enabled) {
+  const shouldBind = !!enabled;
+  if (shouldBind && !cityLimitsState.moveListenerBound) {
+    map.on("moveend", handleCityLimitsMapMoveEnd);
+    cityLimitsState.moveListenerBound = true;
+  }
+  if (shouldBind && !cityLimitsState.zoomListenerBound) {
+    map.on("zoomend", handleCityLimitsMapZoomEnd);
+    cityLimitsState.zoomListenerBound = true;
+  }
+  if (!shouldBind && cityLimitsState.moveListenerBound) {
+    map.off("moveend", handleCityLimitsMapMoveEnd);
+    cityLimitsState.moveListenerBound = false;
+  }
+  if (!shouldBind && cityLimitsState.zoomListenerBound) {
+    map.off("zoomend", handleCityLimitsMapZoomEnd);
+    cityLimitsState.zoomListenerBound = false;
+  }
+}
+
+async function refreshCityLimitsLayerForCurrentView(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const force = !!opts.force;
+  const requested = !!document.getElementById("cityLimitsLayerEnabled")?.checked;
+
+  if (!requested) {
+    map.removeLayer(cityLimitsLayerGroup);
+    updateCityLimitsLayerStatus();
+    return false;
+  }
+
+  const bounds = map.getBounds?.();
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) {
+    updateCityLimitsLayerStatus("Layer is on (waiting for map view).");
+    return false;
+  }
+
+  const zoom = Number(map.getZoom?.()) || 0;
+  if (zoom < CITY_LIMITS_MIN_ZOOM) {
+    cityLimitsLayerGroup.clearLayers();
+    cityLimitsState.featureCount = 0;
+    cityLimitsState.loaded = false;
+    cityLimitsState.lastBoundsKey = "";
+    updateCityLimitsLayerStatus(getCityLimitsZoomHintText());
+    return true;
+  }
+
+  const expandedBounds = bounds.pad(CITY_LIMITS_BOUNDS_PAD);
+  const boundsKey = getCityLimitsBoundsKey(expandedBounds);
+  if (!force && cityLimitsState.loaded && boundsKey && boundsKey === cityLimitsState.lastBoundsKey) {
+    if (!map.hasLayer(cityLimitsLayerGroup)) cityLimitsLayerGroup.addTo(map);
+    updateCityLimitsLayerStatus();
+    return true;
+  }
+
+  if (cityLimitsState.loadPromise) {
+    const pendingResult = await cityLimitsState.loadPromise;
+    const latestBounds = map.getBounds?.();
+    const latestKey = latestBounds ? getCityLimitsBoundsKey(latestBounds.pad(0.08)) : "";
+    if (latestKey && latestKey !== cityLimitsState.lastBoundsKey) {
+      scheduleCityLimitsLayerRefresh();
+    }
+    return pendingResult;
+  }
+
+  cityLimitsState.loading = true;
+  cityLimitsState.lastError = "";
+  updateCityLimitsLayerStatus("Loading city limits...");
+
+  cityLimitsState.loadPromise = (async () => {
+    try {
+      const collection = await fetchCityLimitsGeoJsonForBounds(expandedBounds);
+      const count = loadCityLimitsIntoLayerGroup(collection);
+      cityLimitsState.featureCount = count;
+      cityLimitsState.loaded = true;
+      cityLimitsState.lastBoundsKey = boundsKey;
+      return true;
+    } catch (error) {
+      cityLimitsLayerGroup.clearLayers();
+      cityLimitsState.loaded = false;
+      cityLimitsState.featureCount = 0;
+      cityLimitsState.lastBoundsKey = "";
+      cityLimitsState.lastError = error?.message || "Request failed.";
+      return false;
+    } finally {
+      cityLimitsState.loading = false;
+      cityLimitsState.loadPromise = null;
+    }
+  })();
+
+  const ok = await cityLimitsState.loadPromise;
+  const stillRequested = !!document.getElementById("cityLimitsLayerEnabled")?.checked;
+  if (!stillRequested) {
+    map.removeLayer(cityLimitsLayerGroup);
+    updateCityLimitsLayerStatus();
+    return false;
+  }
+
+  if (ok) {
+    if (!map.hasLayer(cityLimitsLayerGroup)) {
+      cityLimitsLayerGroup.addTo(map);
+    }
+  } else {
+    map.removeLayer(cityLimitsLayerGroup);
+  }
+  updateCityLimitsLayerStatus();
+  return ok;
+}
+
+async function setCityLimitsLayerEnabled(enabled, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const persist = opts.persist !== false;
+  const shouldShow = !!enabled;
+  const toggleNode = document.getElementById("cityLimitsLayerEnabled");
+
+  if (toggleNode && toggleNode.checked !== shouldShow) {
+    toggleNode.checked = shouldShow;
+  }
+  if (persist) {
+    storageSet(CITY_LIMITS_LAYER_VISIBLE_KEY, shouldShow ? "on" : "off");
+  }
+
+  if (!shouldShow) {
+    if (cityLimitsState.refreshTimer) {
+      clearTimeout(cityLimitsState.refreshTimer);
+      cityLimitsState.refreshTimer = null;
+    }
+    setCityLimitsMoveListenerBound(false);
+    map.removeLayer(cityLimitsLayerGroup);
+    updateCityLimitsLayerStatus();
+    return;
+  }
+
+  setCityLimitsMoveListenerBound(true);
+  const loaded = await refreshCityLimitsLayerForCurrentView({ force: true });
+  if (!loaded && cityLimitsState.lastError) {
+    if (toggleNode) toggleNode.checked = false;
+    storageSet(CITY_LIMITS_LAYER_VISIBLE_KEY, "off");
+    setCityLimitsMoveListenerBound(false);
+    map.removeLayer(cityLimitsLayerGroup);
+  }
+  updateCityLimitsLayerStatus();
+}
+
+function initCityLimitsLayerControls() {
+  const toggleHeader = document.getElementById("cityLimitsLayerToggleHeader");
+  const content = document.getElementById("cityLimitsLayerContent");
+  const masterToggle = document.getElementById("cityLimitsLayerEnabled");
+  const statusNode = document.getElementById("cityLimitsLayerStatus");
+  if (!toggleHeader || !content || !masterToggle || !statusNode) return;
+  if (toggleHeader.dataset.cityLimitsBound === "1") return;
+  toggleHeader.dataset.cityLimitsBound = "1";
+
+  content.classList.add("collapsed");
+  toggleHeader.classList.remove("open");
+
+  toggleHeader.addEventListener("click", () => {
+    const collapsed = content.classList.toggle("collapsed");
+    toggleHeader.classList.toggle("open", !collapsed);
+  });
+
+  masterToggle.addEventListener("change", () => {
+    setCityLimitsLayerEnabled(masterToggle.checked).catch(error => {
+      console.warn("Unable to toggle city limits layer:", error);
+      updateCityLimitsLayerStatus("Unable to update layer visibility.");
+    });
+  });
+
+  const stored = storageGet(CITY_LIMITS_LAYER_VISIBLE_KEY);
+  const shouldShow = stored === "on";
+  masterToggle.checked = shouldShow;
+  updateCityLimitsLayerStatus();
+
+  if (shouldShow) {
+    setCityLimitsLayerEnabled(true, { persist: false }).catch(error => {
+      console.warn("Unable to restore city limits layer visibility:", error);
+      updateCityLimitsLayerStatus("Unable to restore city limits layer.");
+    });
+  }
+}
+
 function getFilteredAttributeRows() {
   const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
   const headers = window._attributeHeaders || [];
@@ -22940,6 +23375,7 @@ renderAttributeTable();
 initMultiDayManagerControls();
 initServiceDayLabelLayerControls();
 initTexasLandfillsLayerControls();
+initCityLimitsLayerControls();
 initSequenceLayerControls();
 
 const importWizardBtn = document.getElementById("importWizardBtn");

@@ -3060,12 +3060,41 @@ body.sun-mode .road-attributes-table-wrap td {
   margin-top: 8px;
 }
 
+.city-limits-group {
+  margin-top: 8px;
+}
+
 .texas-landfills-master {
+  margin-bottom: 6px;
+}
+
+.city-limits-master {
   margin-bottom: 6px;
 }
 
 .texas-landfills-status {
   margin-top: 4px;
+}
+
+.city-limits-status {
+  margin-top: 4px;
+}
+
+.city-limits-label {
+  border: 1px solid rgba(111, 184, 255, 0.78);
+  background: rgba(18, 35, 52, 0.86);
+  color: #eaf6ff;
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+
+.city-limits-label.leaflet-tooltip-top::before {
+  border-top-color: rgba(111, 184, 255, 0.78);
 }
 
 .service-day-label-master {
@@ -4120,6 +4149,23 @@ body.sun-mode .texas-landfills-status {
   color: #4d6883;
   border-color: #c8d8e8;
   background: #f6faff;
+}
+
+body.sun-mode .city-limits-status {
+  color: #4d6883;
+  border-color: #c8d8e8;
+  background: #f6faff;
+}
+
+body.sun-mode .city-limits-label {
+  border-color: rgba(122, 170, 209, 0.86);
+  background: rgba(255, 255, 255, 0.94);
+  color: #1d4465;
+  box-shadow: 0 1px 3px rgba(29, 68, 101, 0.2);
+}
+
+body.sun-mode .city-limits-label.leaflet-tooltip-top::before {
+  border-top-color: rgba(122, 170, 209, 0.86);
 }
 
 body.sun-mode .modal-content,
