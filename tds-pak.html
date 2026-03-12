@@ -111,9 +111,11 @@
       <span>Select By Attributes</span>
     </button>
     <button id="setSegmentIdSideBtn" class="primary-btn set-segment-id-side-btn" type="button" title="Set Segment ID and Side">
+      <span class="set-segment-id-side-icon" aria-hidden="true"></span>
       <span>Set Segment ID and Side</span>
     </button>
     <button id="updateFieldBtn" class="primary-btn update-field-btn" type="button" title="Update values in a target field">
+      <span class="update-field-icon" aria-hidden="true"></span>
       <span>Update Field</span>
     </button>
     <div id="headerActionsOverflow" class="header-actions-overflow" hidden>
@@ -1005,6 +1007,9 @@
       <h3>Route Sequencer</h3>
       <p>Build stop order by drive time, enforce truck capacity, and insert dump visits when loads reach threshold.</p>
     </div>
+    <div class="route-sequencer-network-note" role="note">
+      Solver compute runs 100% locally on this machine. Network access is only used when dump source includes Texas Landfills, and then only to fetch that single landfill layer.
+    </div>
 
     <div class="route-sequencer-grid">
       <label class="route-sequencer-field">
@@ -1210,6 +1215,10 @@
           <input id="routeSequencerStreetClassField" type="text" value="func_class" placeholder="func_class" />
         </label>
         <label class="route-sequencer-field route-sequencer-field-check">
+          <input id="routeSequencerServiceStopsBeforeDeadhead" type="checkbox" checked />
+          <span>Service stops before deadhead</span>
+        </label>
+        <label class="route-sequencer-field route-sequencer-field-check">
           <input id="routeSequencerAllowUTurnsCuldesacs" type="checkbox" />
           <span>Allow U-turns only in cul-de-sacs</span>
         </label>
@@ -1239,6 +1248,25 @@
             <option value="distance">Prorate by distance</option>
           </select>
         </label>
+        <div class="route-sequencer-meander-override-defaults">
+          <h5>Meander Override Defaults</h5>
+          <div class="route-sequencer-grid route-sequencer-meander-override-grid">
+            <label class="route-sequencer-field">
+              <span>Driving</span>
+              <select id="routeSequencerMeanderOverrideDriving">
+                <option value="keep_meander" selected>Keep as Meander</option>
+                <option value="same_side">Same Side</option>
+              </select>
+            </label>
+            <label class="route-sequencer-field">
+              <span>Walking</span>
+              <select id="routeSequencerMeanderOverrideWalking">
+                <option value="keep_meander" selected>Keep as Meander</option>
+                <option value="same_side">Same Side</option>
+              </select>
+            </label>
+          </div>
+        </div>
       </div>
       <div class="route-sequencer-class-attr-table-wrap">
         <table class="route-sequencer-class-attr-table">

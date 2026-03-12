@@ -21,6 +21,9 @@ let selectedLayerKey = null;
 const SUPABASE_URL = "https://lffazhbwvorwxineklsy.supabase.co";
 const SUPABASE_KEY = "sb_publishable_Lfh2zlIiTSMB0U-Fe5o6Jg_mJ1qkznh";
 const BUCKET = "excel-files";
+const SHARED_FACILITIES_CLOUD_FILE = "__tds_pak_shared_facilities.xlsx";
+const SHARED_FACILITIES_SHEET_NAME = "Facilities";
+const SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS = 1200;
 // ===== CURRENT EXCEL STATE =====
 window._currentRows = null;
 window._currentWorkbook = null;
@@ -32,6 +35,10 @@ const WORKBOOK_AUTO_SAVE_DEBOUNCE_MS = 1200;
 let workbookAutoSaveTimer = null;
 let workbookAutoSaveInFlight = null;
 let workbookAutoSavePendingReasons = [];
+let sharedFacilitiesAutoSaveTimer = null;
+let sharedFacilitiesAutoSaveInFlight = null;
+let sharedFacilitiesAutoSavePendingReasons = [];
+let sharedFacilitiesCloudInitPromise = null;
 
 window.streetLabelsEnabled = false;
 const attributeRowToId = new WeakMap();
@@ -135,6 +142,9 @@ function setupHeaderToolsMenu() {
 //======
 // ðŸ” Delete protection password I know this is not secure, I just wanted to make it harder for ppl to accidentally delete files. You can change or remove this as needed.
 const DELETE_PASSWORD = "Austin1";  // â† change to whatever you want
+// NOTE: This Street Network Manager password check is intentionally not secure.
+// It is a temporary placeholder to reduce casual access for now.
+const STREET_NETWORK_MANAGER_PASSWORD = "Austin1";
 
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -406,11 +416,11 @@ function placeRefreshButton() {
 function initHeaderActionOverflowMenu() {
   const row = document.querySelector(".header-import-selection-row");
   const wrapper = document.getElementById("headerActionsOverflow");
-  const menuBtn = document.getElementById("headerActionsMenuBtn");
-  const dropdown = document.getElementById("headerActionsMenuDropdown");
-  if (!row || !wrapper || !menuBtn || !dropdown) return;
-  if (menuBtn.dataset.bound === "1") return;
-  menuBtn.dataset.bound = "1";
+  const titleWrap = document.querySelector(".title-with-tools");
+  const titleNode = titleWrap ? titleWrap.querySelector("h1") : null;
+  if (!row || !titleWrap || !titleNode) return;
+  if (row.dataset.inlineOverflowBound === "1") return;
+  row.dataset.inlineOverflowBound = "1";
 
   const groups = [
     {
@@ -430,90 +440,96 @@ function initHeaderActionOverflowMenu() {
   ];
 
   const sourceButtons = [];
-  const closeMenu = () => {
-    dropdown.classList.remove("open");
-    menuBtn.setAttribute("aria-expanded", "false");
+  const rails = {
+    left: document.getElementById("headerOverflowRailLeft"),
+    right: document.getElementById("headerOverflowRailRight")
   };
 
-  const buildMenu = () => {
-    dropdown.innerHTML = "";
+  if (!rails.left) {
+    rails.left = document.createElement("div");
+    rails.left.id = "headerOverflowRailLeft";
+    rails.left.className = "header-overflow-rail header-overflow-rail-left";
+  }
+  if (!rails.right) {
+    rails.right = document.createElement("div");
+    rails.right.id = "headerOverflowRailRight";
+    rails.right.className = "header-overflow-rail header-overflow-rail-right";
+  }
+
+  if (titleNode.previousElementSibling !== rails.left) {
+    titleWrap.insertBefore(rails.left, titleNode);
+  }
+  if (titleNode.nextElementSibling !== rails.right) {
+    titleWrap.insertBefore(rails.right, titleNode.nextSibling);
+  }
+
+  const buildInlineRails = () => {
+    rails.left.innerHTML = "";
+    rails.right.innerHTML = "";
     sourceButtons.length = 0;
     let entryCount = 0;
+    let placementIndex = 0;
 
     groups.forEach(group => {
-      const sectionItems = [];
       group.items.forEach(item => {
         const sourceBtn = document.getElementById(item.id);
         if (!sourceBtn) return;
         sourceButtons.push(sourceBtn);
+        const sourceClassName = sourceBtn.className
+          .split(/\s+/)
+          .filter(cls => cls && cls !== "header-overflow-source" && cls !== "header-overflow-source-active")
+          .join(" ");
         sourceBtn.classList.add("header-overflow-source");
-        sectionItems.push({ sourceBtn, label: item.label });
+
+        const proxyBtn = document.createElement("button");
+        proxyBtn.type = "button";
+        proxyBtn.className = `${sourceClassName} header-overflow-inline-btn`;
+        proxyBtn.innerHTML = sourceBtn.innerHTML;
+        if (sourceBtn.title) proxyBtn.title = sourceBtn.title;
+        proxyBtn.setAttribute(
+          "aria-label",
+          sourceBtn.getAttribute("aria-label") || item.label
+        );
+        proxyBtn.addEventListener("click", () => sourceBtn.click());
+
+        if (placementIndex % 2 === 0) {
+          rails.left.appendChild(proxyBtn);
+        } else {
+          rails.right.appendChild(proxyBtn);
+        }
+        placementIndex += 1;
+        entryCount += 1;
       });
-
-      if (!sectionItems.length) return;
-      entryCount += sectionItems.length;
-      const section = document.createElement("div");
-      section.className = "header-actions-menu-section";
-      const heading = document.createElement("div");
-      heading.className = "header-actions-menu-heading";
-      heading.textContent = group.label;
-      section.appendChild(heading);
-
-      sectionItems.forEach(({ sourceBtn, label }) => {
-        const actionBtn = document.createElement("button");
-        actionBtn.type = "button";
-        actionBtn.className = "header-actions-menu-item";
-        actionBtn.textContent = label;
-        actionBtn.addEventListener("click", () => {
-          closeMenu();
-          sourceBtn.click();
-        });
-        section.appendChild(actionBtn);
-      });
-
-      dropdown.appendChild(section);
     });
 
     if (!entryCount) {
       wrapper.hidden = true;
-      row.classList.remove("header-overflow-enabled");
-      sourceButtons.forEach(btn => btn.classList.remove("header-overflow-source"));
+      rails.left.hidden = true;
+      rails.right.hidden = true;
+      sourceButtons.forEach(btn => {
+        btn.classList.remove("header-overflow-source");
+        btn.classList.remove("header-overflow-source-active");
+      });
       return;
     }
 
-    wrapper.hidden = false;
+    wrapper.hidden = true;
   };
 
   const syncDesktopState = () => {
     const desktop = window.innerWidth > 900;
-    closeMenu();
-    if (!desktop || wrapper.hidden) {
-      row.classList.remove("header-overflow-enabled");
-      sourceButtons.forEach(btn => btn.classList.remove("header-overflow-source"));
+    const showInline = desktop && sourceButtons.length > 0;
+    rails.left.hidden = !showInline;
+    rails.right.hidden = !showInline;
+    if (!showInline) {
+      sourceButtons.forEach(btn => btn.classList.remove("header-overflow-source-active"));
       return;
     }
-    row.classList.add("header-overflow-enabled");
-    sourceButtons.forEach(btn => btn.classList.add("header-overflow-source"));
+    sourceButtons.forEach(btn => btn.classList.add("header-overflow-source-active"));
   };
 
-  buildMenu();
+  buildInlineRails();
   syncDesktopState();
-
-  menuBtn.addEventListener("click", event => {
-    event.stopPropagation();
-    const opening = !dropdown.classList.contains("open");
-    if (opening) {
-      dropdown.classList.add("open");
-      menuBtn.setAttribute("aria-expanded", "true");
-    } else {
-      closeMenu();
-    }
-  });
-  dropdown.addEventListener("click", event => event.stopPropagation());
-  document.addEventListener("click", closeMenu);
-  window.addEventListener("keydown", event => {
-    if (event.key === "Escape") closeMenu();
-  });
   window.addEventListener("resize", syncDesktopState);
 }
 
@@ -544,6 +560,11 @@ function normalizeName(name) {
 function isRouteSummaryFileName(fileName) {
   const lower = String(fileName || "").toLowerCase();
   return lower.includes("routesummary") || lower.includes("route summary");
+}
+
+function isSystemCloudFileName(fileName) {
+  const lower = String(fileName || "").trim().toLowerCase();
+  return lower === SHARED_FACILITIES_CLOUD_FILE.toLowerCase();
 }
 
 const SUMMARY_ATTACH_STORAGE_KEY = storageKey("summaryAttachments");
@@ -3379,6 +3400,12 @@ function closeStreetSetupWizardModal() {
 function openStreetNetworkManagerModal() {
   const modal = document.getElementById("streetNetworkManagerModal");
   if (!modal) return;
+  const entered = window.prompt("Enter password to open Street Network Manager:");
+  if (entered === null) return;
+  if (String(entered) !== STREET_NETWORK_MANAGER_PASSWORD) {
+    alert("Incorrect password.");
+    return;
+  }
   updateLocalStreetSourceStatus();
   if (typeof window.__refreshStreetNetworkManagerUi === "function") {
     window.__refreshStreetNetworkManagerUi();
@@ -8046,20 +8073,27 @@ function isRouteDayFieldName(fieldName) {
 
 function hydrateCanonicalRecordFieldsFromLegacy(row) {
   if (!row || typeof row !== "object") return;
+  let changed = false;
   RECORD_FIELD_MIRROR_GROUPS.forEach(group => {
     const primaryValue = row[group.primary];
     const mirrorValue = row[group.mirror];
     if (isBlankRecordFieldValue(primaryValue) && !isBlankRecordFieldValue(mirrorValue)) {
       row[group.primary] = mirrorValue;
+      changed = true;
     }
   });
+  return changed;
 }
 
 function ensureCanonicalRecordFields(rows) {
   const list = Array.isArray(rows) ? rows : [];
+  let changed = false;
   list.forEach(row => {
-    hydrateCanonicalRecordFieldsFromLegacy(row);
+    if (hydrateCanonicalRecordFieldsFromLegacy(row)) {
+      changed = true;
+    }
   });
+  return changed;
 }
 
 function ensureExistBackupColumns(rows) {
@@ -8565,9 +8599,9 @@ function queueWorkbookCloudSave(reason = "update") {
   }, WORKBOOK_AUTO_SAVE_DEBOUNCE_MS);
 }
 
-function flushWorkbookCloudSaveOnLifecycle() {
+function flushWorkbookCloudSaveOnLifecycle(force = false) {
   if (!hasWorkbookCloudSaveContext()) return;
-  if (!workbookAutoSavePendingReasons.length && !workbookAutoSaveTimer) return;
+  if (!force && !workbookAutoSavePendingReasons.length && !workbookAutoSaveTimer) return;
   if (workbookAutoSaveTimer) {
     clearTimeout(workbookAutoSaveTimer);
     workbookAutoSaveTimer = null;
@@ -8580,11 +8614,18 @@ function flushWorkbookCloudSaveOnLifecycle() {
 
 window.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
-    flushWorkbookCloudSaveOnLifecycle();
+    flushWorkbookCloudSaveOnLifecycle(true);
+    flushSharedFacilitiesCloudSaveOnLifecycle(true);
   }
 });
-window.addEventListener("pagehide", flushWorkbookCloudSaveOnLifecycle);
-window.addEventListener("beforeunload", flushWorkbookCloudSaveOnLifecycle);
+window.addEventListener("pagehide", () => {
+  flushWorkbookCloudSaveOnLifecycle(true);
+  flushSharedFacilitiesCloudSaveOnLifecycle(true);
+});
+window.addEventListener("beforeunload", () => {
+  flushWorkbookCloudSaveOnLifecycle(true);
+  flushSharedFacilitiesCloudSaveOnLifecycle(true);
+});
 
 function getActiveAttributeSortOptions() {
   if (attributeTableMode === "streets") {
@@ -12961,6 +13002,13 @@ const ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS = 13.5;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_MPH = 35;
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH = 30;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD = "speed_cat";
+const ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD = true;
+const ROUTE_SEQUENCER_MEANDER_OVERRIDE_KEEP = "keep_meander";
+const ROUTE_SEQUENCER_MEANDER_OVERRIDE_SAME_SIDE = "same_side";
+const ROUTE_SEQUENCER_DEFAULT_MEANDER_OVERRIDE_DEFAULTS = Object.freeze({
+  driving: ROUTE_SEQUENCER_MEANDER_OVERRIDE_KEEP,
+  walking: ROUTE_SEQUENCER_MEANDER_OVERRIDE_KEEP
+});
 const ROUTE_SEQUENCER_SPEED_DEFAULTS_VERSION = 2;
 const ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION = 2;
 const ROUTE_SEQUENCER_SPEED_CAT_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -13077,7 +13125,7 @@ function buildRouteSequencerFormatHintText(demandField, serviceField, outputFiel
     mapped.totalMinutes,
     mapped.dumpVisits
   ].join(", ");
-  return `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75). ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Street Attribute Defaults apply class-based U-turn restrictions, meander/same-side penalties, and cross-penalty time. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying capacity, dump, depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
+  return `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75). ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Service Stops Before Deadhead can prioritize servicing additional stops before deadheading to dump when capacity allows. Street Attribute Defaults apply class-based U-turn restrictions, meander/same-side penalties, and cross-penalty time. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying capacity, dump, depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
 }
 
 function normalizeRouteSequencerText(value) {
@@ -13204,12 +13252,300 @@ function syncRouteSequencerFacilitiesLayer() {
   }
 }
 
-function setRouteSequencerFacilities(list) {
-  const cleaned = (Array.isArray(list) ? list : [])
+function normalizeRouteSequencerFacilitiesList(list) {
+  return (Array.isArray(list) ? list : [])
     .map(item => normalizeRouteSequencerFacilityEntry(item, "Facility"))
     .filter(Boolean);
+}
+
+function getRouteSequencerFacilityCloudSignature(item) {
+  const normalized = normalizeRouteSequencerFacilityEntry(item, "Facility");
+  if (!normalized) return "";
+  const role = normalizeRouteSequencerFacilityRole(normalized.role);
+  const lat = Number(normalized.lat);
+  const lon = Number(normalized.lon);
+  const latToken = Number.isFinite(lat) ? lat.toFixed(6) : "";
+  const lonToken = Number.isFinite(lon) ? lon.toFixed(6) : "";
+  const nameToken = String(normalized.name || "").trim().toLowerCase();
+  return `${role}|${nameToken}|${latToken}|${lonToken}`;
+}
+
+function areRouteSequencerFacilityListsEquivalent(listA, listB) {
+  const a = normalizeRouteSequencerFacilitiesList(listA);
+  const b = normalizeRouteSequencerFacilitiesList(listB);
+  if (a.length !== b.length) return false;
+  const normalizeForCompare = list =>
+    list
+      .map(item => ({
+        id: String(item.id || ""),
+        signature: getRouteSequencerFacilityCloudSignature(item),
+        facilityMinutes: Number(item.facilityMinutes) || 0
+      }))
+      .sort((left, right) => {
+        const sigDelta = String(left.signature).localeCompare(String(right.signature), undefined, { sensitivity: "base", numeric: true });
+        if (sigDelta !== 0) return sigDelta;
+        const idDelta = String(left.id).localeCompare(String(right.id), undefined, { sensitivity: "base", numeric: true });
+        if (idDelta !== 0) return idDelta;
+        return left.facilityMinutes - right.facilityMinutes;
+      });
+  const left = normalizeForCompare(a);
+  const right = normalizeForCompare(b);
+  return left.every((item, index) =>
+    item.id === right[index].id &&
+    item.signature === right[index].signature &&
+    item.facilityMinutes === right[index].facilityMinutes
+  );
+}
+
+function mergeRouteSequencerFacilityLists(baseList, incomingList) {
+  const merged = [];
+  const indexById = new Map();
+  const indexBySignature = new Map();
+
+  const upsert = rawItem => {
+    const item = normalizeRouteSequencerFacilityEntry(rawItem, "Facility");
+    if (!item) return;
+    const id = String(item.id || "").trim();
+    const signature = getRouteSequencerFacilityCloudSignature(item);
+    if (!signature) return;
+
+    if (id && indexById.has(id)) {
+      const idx = indexById.get(id);
+      merged[idx] = item;
+      indexBySignature.set(signature, idx);
+      return;
+    }
+
+    if (indexBySignature.has(signature)) {
+      const idx = indexBySignature.get(signature);
+      const previous = merged[idx];
+      const preservedId = String(previous?.id || id || "");
+      const next = normalizeRouteSequencerFacilityEntry({
+        ...previous,
+        ...item,
+        id: preservedId || item.id
+      }, "Facility");
+      if (!next) return;
+      merged[idx] = next;
+      if (preservedId) indexById.set(preservedId, idx);
+      indexBySignature.set(signature, idx);
+      return;
+    }
+
+    const idx = merged.length;
+    merged.push(item);
+    if (id) indexById.set(id, idx);
+    indexBySignature.set(signature, idx);
+  };
+
+  normalizeRouteSequencerFacilitiesList(baseList).forEach(upsert);
+  normalizeRouteSequencerFacilitiesList(incomingList).forEach(upsert);
+
+  return merged.sort((a, b) =>
+    String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { sensitivity: "base", numeric: true })
+  );
+}
+
+function buildSharedFacilitiesWorkbookArray(facilities) {
+  const workbook = XLSX.utils.book_new();
+  const rows = normalizeRouteSequencerFacilitiesList(facilities).map(item => ({
+    id: String(item.id || ""),
+    name: String(item.name || ""),
+    role: normalizeRouteSequencerFacilityRole(item.role),
+    facilityMinutes: Number(item.facilityMinutes) || 0,
+    lat: Number(item.lat),
+    lon: Number(item.lon)
+  }));
+  const worksheet = XLSX.utils.json_to_sheet(rows, {
+    header: ["id", "name", "role", "facilityMinutes", "lat", "lon"]
+  });
+  XLSX.utils.book_append_sheet(workbook, worksheet, SHARED_FACILITIES_SHEET_NAME);
+  return XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+}
+
+function parseSharedFacilitiesWorkbookArrayBuffer(buffer) {
+  const workbook = XLSX.read(new Uint8Array(buffer), { type: "array" });
+  const preferredSheetName = workbook.SheetNames.includes(SHARED_FACILITIES_SHEET_NAME)
+    ? SHARED_FACILITIES_SHEET_NAME
+    : workbook.SheetNames[0];
+  if (!preferredSheetName) return [];
+  const worksheet = workbook.Sheets[preferredSheetName];
+  if (!worksheet) return [];
+  const rows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+  return rows
+    .map(row => normalizeRouteSequencerFacilityEntry({
+      id: row?.id,
+      name: row?.name,
+      role: row?.role,
+      facilityMinutes: row?.facilityMinutes ?? row?.serviceMinutes,
+      lat: row?.lat ?? row?.latitude,
+      lon: row?.lon ?? row?.longitude
+    }, "Facility"))
+    .filter(Boolean);
+}
+
+async function fetchSharedFacilitiesFromCloud() {
+  const { data } = sb.storage.from(BUCKET).getPublicUrl(SHARED_FACILITIES_CLOUD_FILE);
+  const publicUrl = String(data?.publicUrl || "").trim();
+  if (!publicUrl) {
+    throw new Error("Missing public URL for shared facilities file.");
+  }
+  const response = await fetch(`${publicUrl}?v=${Date.now()}`, { cache: "no-store" });
+  if (!response.ok) {
+    const responseText = await response.text().catch(() => "");
+    const looksMissing = response.status === 404 ||
+      ((response.status === 400 || response.status === 403) && /not found|does not exist|no such object|not authorized/i.test(responseText));
+    if (looksMissing) {
+      return { exists: false, facilities: [] };
+    }
+    throw new Error(`Shared facilities fetch failed (${response.status}).`);
+  }
+  const buffer = await response.arrayBuffer();
+  return {
+    exists: true,
+    facilities: parseSharedFacilitiesWorkbookArrayBuffer(buffer)
+  };
+}
+
+async function saveSharedFacilitiesToCloud(options = {}) {
+  const mergeRemote = options.mergeRemote !== false;
+  const syncLocalFromSaved = options.syncLocalFromSaved !== false;
+  const facilitiesOverride = options.facilitiesOverride;
+  let facilitiesToSave = normalizeRouteSequencerFacilitiesList(
+    facilitiesOverride == null ? getRouteSequencerFacilities() : facilitiesOverride
+  );
+
+  if (mergeRemote) {
+    try {
+      const remoteState = await fetchSharedFacilitiesFromCloud();
+      if (remoteState.exists) {
+        facilitiesToSave = mergeRouteSequencerFacilityLists(remoteState.facilities, facilitiesToSave);
+      }
+    } catch (error) {
+      console.warn("Unable to merge remote shared facilities before save:", error);
+    }
+  }
+
+  const workbookArray = buildSharedFacilitiesWorkbookArray(facilitiesToSave);
+  const { error } = await sb.storage
+    .from(BUCKET)
+    .upload(SHARED_FACILITIES_CLOUD_FILE, workbookArray, {
+      upsert: true,
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    });
+  if (error) throw error;
+
+  if (syncLocalFromSaved) {
+    const localFacilities = getRouteSequencerFacilities();
+    if (!areRouteSequencerFacilityListsEquivalent(localFacilities, facilitiesToSave)) {
+      setRouteSequencerFacilities(facilitiesToSave, { queueCloudSync: false });
+    }
+  }
+
+  return facilitiesToSave;
+}
+
+async function flushQueuedSharedFacilitiesCloudSave() {
+  if (!sharedFacilitiesAutoSavePendingReasons.length) return false;
+  if (sharedFacilitiesAutoSaveInFlight) return sharedFacilitiesAutoSaveInFlight;
+
+  const reasons = [...sharedFacilitiesAutoSavePendingReasons];
+  sharedFacilitiesAutoSavePendingReasons = [];
+  const reasonLabel = reasons.join(", ");
+
+  sharedFacilitiesAutoSaveInFlight = (async () => {
+    try {
+      await initSharedFacilitiesCloudSync();
+      await saveSharedFacilitiesToCloud({ mergeRemote: true });
+      console.info(
+        `[Shared Facilities Auto Save] Saved "${SHARED_FACILITIES_CLOUD_FILE}"${reasonLabel ? ` (${reasonLabel})` : ""}.`
+      );
+      return true;
+    } catch (error) {
+      console.error(
+        `[Shared Facilities Auto Save] Error saving "${SHARED_FACILITIES_CLOUD_FILE}"${reasonLabel ? ` (${reasonLabel})` : ""}:`,
+        error
+      );
+      return false;
+    } finally {
+      sharedFacilitiesAutoSaveInFlight = null;
+      if (sharedFacilitiesAutoSavePendingReasons.length) {
+        if (sharedFacilitiesAutoSaveTimer) clearTimeout(sharedFacilitiesAutoSaveTimer);
+        sharedFacilitiesAutoSaveTimer = setTimeout(() => {
+          sharedFacilitiesAutoSaveTimer = null;
+          flushQueuedSharedFacilitiesCloudSave();
+        }, 300);
+      }
+    }
+  })();
+
+  return sharedFacilitiesAutoSaveInFlight;
+}
+
+function queueSharedFacilitiesCloudSave(reason = "facilities-update") {
+  const reasonText = String(reason || "").trim();
+  if (reasonText) sharedFacilitiesAutoSavePendingReasons.push(reasonText);
+  if (sharedFacilitiesAutoSaveTimer) clearTimeout(sharedFacilitiesAutoSaveTimer);
+  sharedFacilitiesAutoSaveTimer = setTimeout(() => {
+    sharedFacilitiesAutoSaveTimer = null;
+    flushQueuedSharedFacilitiesCloudSave();
+  }, SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS);
+}
+
+function flushSharedFacilitiesCloudSaveOnLifecycle(force = false) {
+  if (!force && !sharedFacilitiesAutoSavePendingReasons.length && !sharedFacilitiesAutoSaveTimer) return;
+  if (sharedFacilitiesAutoSaveTimer) {
+    clearTimeout(sharedFacilitiesAutoSaveTimer);
+    sharedFacilitiesAutoSaveTimer = null;
+  }
+  if (!sharedFacilitiesAutoSavePendingReasons.length) {
+    sharedFacilitiesAutoSavePendingReasons.push("lifecycle");
+  }
+  flushQueuedSharedFacilitiesCloudSave();
+}
+
+async function initSharedFacilitiesCloudSync() {
+  if (sharedFacilitiesCloudInitPromise) return sharedFacilitiesCloudInitPromise;
+  sharedFacilitiesCloudInitPromise = (async () => {
+    try {
+      const localFacilities = getRouteSequencerFacilities();
+      const remoteState = await fetchSharedFacilitiesFromCloud();
+
+      if (!remoteState.exists) {
+        await saveSharedFacilitiesToCloud({
+          mergeRemote: false,
+          syncLocalFromSaved: false,
+          facilitiesOverride: localFacilities
+        });
+        return;
+      }
+
+      const remoteFacilities = normalizeRouteSequencerFacilitiesList(remoteState.facilities);
+      const mergedFacilities = mergeRouteSequencerFacilityLists(remoteFacilities, localFacilities);
+      if (!areRouteSequencerFacilityListsEquivalent(localFacilities, mergedFacilities)) {
+        setRouteSequencerFacilities(mergedFacilities, { queueCloudSync: false });
+      }
+      if (!areRouteSequencerFacilityListsEquivalent(remoteFacilities, mergedFacilities)) {
+        await saveSharedFacilitiesToCloud({
+          mergeRemote: false,
+          syncLocalFromSaved: false,
+          facilitiesOverride: mergedFacilities
+        });
+      }
+    } catch (error) {
+      console.warn("Shared facilities cloud sync init failed:", error);
+    }
+  })();
+  return sharedFacilitiesCloudInitPromise;
+}
+
+function setRouteSequencerFacilities(list, options = {}) {
+  const cleaned = normalizeRouteSequencerFacilitiesList(list);
   storageSet(ROUTE_SEQUENCER_FACILITIES_KEY, JSON.stringify(cleaned));
   syncRouteSequencerFacilitiesLayer();
+  if (options?.queueCloudSync !== false) {
+    queueSharedFacilitiesCloudSave(String(options?.reason || "Facilities Update"));
+  }
   return cleaned;
 }
 
@@ -13254,7 +13590,7 @@ function loadRouteSequencerFacilities() {
   });
 
   const migrated = [...byId.values()];
-  if (migrated.length) setRouteSequencerFacilities(migrated);
+  if (migrated.length) setRouteSequencerFacilities(migrated, { queueCloudSync: false });
   return migrated;
 }
 
@@ -13487,6 +13823,29 @@ function normalizeRouteSequencerUTurnProrateMode(value) {
   return "none";
 }
 
+function normalizeRouteSequencerMeanderOverrideMode(value) {
+  const token = normalizeRouteSequencerFieldToken(value);
+  if (
+    token === "same" ||
+    token === "sameside" ||
+    token === "same_side" ||
+    token === "forcesameside" ||
+    token === "override"
+  ) {
+    return ROUTE_SEQUENCER_MEANDER_OVERRIDE_SAME_SIDE;
+  }
+  return ROUTE_SEQUENCER_MEANDER_OVERRIDE_KEEP;
+}
+
+function normalizeRouteSequencerMeanderOverrideDefaults(rawValue) {
+  const source = rawValue && typeof rawValue === "object" ? rawValue : {};
+  const defaults = ROUTE_SEQUENCER_DEFAULT_MEANDER_OVERRIDE_DEFAULTS;
+  return {
+    driving: normalizeRouteSequencerMeanderOverrideMode(source.driving ?? source.vehicle ?? defaults.driving),
+    walking: normalizeRouteSequencerMeanderOverrideMode(source.walking ?? source.pedestrian ?? defaults.walking)
+  };
+}
+
 function normalizeRouteSequencerStreetClassAttrEntry(rawEntry, fallbackEntry = {}) {
   const fallback = fallbackEntry && typeof fallbackEntry === "object" ? fallbackEntry : {};
   const source = rawEntry && typeof rawEntry === "object" ? rawEntry : {};
@@ -13620,8 +13979,9 @@ function normalizeRouteSequencerCandidateAdjustment(rawValue) {
   };
 }
 
-function buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, baseMinutes, streetAttributeDefaults) {
+function buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, baseMinutes, streetAttributeDefaults, meanderOverrideDefaults = null) {
   const defaults = normalizeRouteSequencerStreetAttributeDefaults(streetAttributeDefaults);
+  const meanderOverrides = normalizeRouteSequencerMeanderOverrideDefaults(meanderOverrideDefaults);
   const adjustment = {
     scoreMinutesDelta: 0,
     driveMinutesDelta: 0,
@@ -13633,6 +13993,12 @@ function buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, bas
 
   const classAttr = getRouteSequencerStreetClassAttr(defaults, candidate?.streetClassId);
   const travelTypesAllowed = normalizeRouteSequencerTravelTypesAllowed(classAttr?.travelTypesAllowed);
+  const activeMeanderOverride = travelTypesAllowed === "Walking"
+    ? meanderOverrides.walking
+    : meanderOverrides.driving;
+  const effectiveServiceSide = activeMeanderOverride === ROUTE_SEQUENCER_MEANDER_OVERRIDE_SAME_SIDE
+    ? "Same"
+    : normalizeRouteSequencerServiceSideMode(classAttr?.serviceSide);
   if (travelTypesAllowed === "Walking") {
     adjustment.otherMinutesDelta += 30;
     adjustment.scoreMinutesDelta += 30;
@@ -13648,12 +14014,16 @@ function buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, bas
   const sameSegment = !!fromSegmentId && !!toSegmentId && fromSegmentId === toSegmentId;
   const likelyUTurn = oppositeServiceSide || sameSegment;
 
-  if (oppositeServiceSide && normalizeRouteSequencerServiceSideMode(classAttr?.serviceSide) === "Same") {
+  if (oppositeServiceSide && effectiveServiceSide === "Same") {
     const sameSidePenalty = Math.max(0, Number(defaults.sameSideServiceMinutes) || 0);
     if (sameSidePenalty > 0) {
       adjustment.serviceMinutesDelta += sameSidePenalty;
       adjustment.scoreMinutesDelta += sameSidePenalty;
-      adjustment.notes.push("Same-side service penalty");
+      adjustment.notes.push(
+        activeMeanderOverride === ROUTE_SEQUENCER_MEANDER_OVERRIDE_SAME_SIDE
+          ? "Same-side service penalty (meander override)"
+          : "Same-side service penalty"
+      );
     }
   }
 
@@ -14597,9 +14967,13 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   const startDepot = options.startDepot || null;
   const endDepot = options.endDepot || null;
   const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
+  const serviceStopsBeforeDeadhead = options.serviceStopsBeforeDeadhead == null
+    ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+    : options.serviceStopsBeforeDeadhead !== false;
   const timeAtStartMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtStartMinutes, 0));
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
   const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
+  const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(options.meanderOverrideDefaults);
 
   let fixedFirstStop = null;
   let fixedLastStop = null;
@@ -14738,6 +15112,25 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     return true;
   };
 
+  const pickServiceStopCandidate = candidateList => pickNearestRouteSequencerCandidate(
+    currentPoint,
+    candidateList,
+    graph,
+    fallbackSpeedMph,
+    {
+      travelMode: "service",
+      fallbackServiceSpeedMph,
+      candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
+        buildRouteSequencerServiceCandidateAdjustment(
+          fromPoint,
+          candidate,
+          minutes,
+          streetAttributeDefaults,
+          meanderOverrideDefaults
+        )
+    }
+  );
+
   if (timeAtStartMinutes > 0) {
     totalStartEndFacilityMinutes += timeAtStartMinutes;
     totalFacilityMinutes += timeAtStartMinutes;
@@ -14771,26 +15164,34 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     const candidates = [...unserved.values()];
     if (!candidates.length) break;
 
-    const nextStopPick = pickNearestRouteSequencerCandidate(
-      currentPoint,
-      candidates,
-      graph,
-      fallbackSpeedMph,
-      {
-        travelMode: "service",
-        fallbackServiceSpeedMph,
-        candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
-          buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, minutes, streetAttributeDefaults)
-      }
-    );
+    let nextStopPick = pickServiceStopCandidate(candidates);
     if (!nextStopPick?.point) break;
-    const nextStop = nextStopPick.point;
-    const nextDemand = Math.max(0, Number(nextStop?.demand) || 0);
-
-    const wouldExceedCapacity = Number.isFinite(capacityTons)
+    let nextStop = nextStopPick.point;
+    let nextDemand = Math.max(0, Number(nextStop?.demand) || 0);
+    const enforceCapacity = Number.isFinite(capacityTons) && capacityTons > 0;
+    let wouldExceedCapacity = enforceCapacity
       && capacityTons > 0
       && currentLoad > 0
       && (currentLoad + nextDemand) > capacityTons;
+
+    if (serviceStopsBeforeDeadhead && enforceCapacity && wouldExceedCapacity) {
+      const remainingCapacity = Math.max(0, capacityTons - currentLoad);
+      const fitCandidates = candidates.filter(candidate => {
+        const demand = Math.max(0, Number(candidate?.demand) || 0);
+        return demand <= (remainingCapacity + 1e-9);
+      });
+      if (fitCandidates.length) {
+        const fitPick = pickServiceStopCandidate(fitCandidates);
+        if (fitPick?.point) {
+          nextStopPick = fitPick;
+          nextStop = fitPick.point;
+          nextDemand = Math.max(0, Number(nextStop?.demand) || 0);
+          wouldExceedCapacity = enforceCapacity
+            && currentLoad > 0
+            && (currentLoad + nextDemand) > capacityTons;
+        }
+      }
+    }
 
     if (wouldExceedCapacity && dumpPoints.length) {
       const dumpPick = pickNearestRouteSequencerCandidate(
@@ -14832,7 +15233,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       && currentLoad > 0
       && (currentLoad + nextDemand) > capacityTons;
 
-    if (wouldExceedCapacity && dumpPoints.length) {
+    if (!serviceStopsBeforeDeadhead && wouldExceedCapacity && dumpPoints.length) {
       const dumpPick = pickNearestRouteSequencerCandidate(
         currentPoint,
         dumpPoints,
@@ -14854,7 +15255,13 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
         travelMode: "service",
         fallbackServiceSpeedMph,
         candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
-          buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, minutes, streetAttributeDefaults)
+          buildRouteSequencerServiceCandidateAdjustment(
+            fromPoint,
+            candidate,
+            minutes,
+            streetAttributeDefaults,
+            meanderOverrideDefaults
+          )
       }
     )
       || {
@@ -14873,7 +15280,8 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
               travelMode: "service",
               fallbackServiceSpeedMph
             }),
-            streetAttributeDefaults
+            streetAttributeDefaults,
+            meanderOverrideDefaults
           )
         )
       };
@@ -14984,9 +15392,13 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   const startDepot = options.startDepot || null;
   const endDepot = options.endDepot || null;
   const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
+  const serviceStopsBeforeDeadhead = options.serviceStopsBeforeDeadhead == null
+    ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+    : options.serviceStopsBeforeDeadhead !== false;
   const timeAtStartMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtStartMinutes, 0));
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
   const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
+  const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(options.meanderOverrideDefaults);
 
   const stopVisits = [];
   const events = [];
@@ -15068,6 +15480,15 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
     return true;
   };
 
+  const buildServiceCandidateAdjustment = (fromPoint, candidate, minutes) =>
+    buildRouteSequencerServiceCandidateAdjustment(
+      fromPoint,
+      candidate,
+      minutes,
+      streetAttributeDefaults,
+      meanderOverrideDefaults
+    );
+
   if (timeAtStartMinutes > 0) {
     totalStartEndFacilityMinutes += timeAtStartMinutes;
     totalFacilityMinutes += timeAtStartMinutes;
@@ -15098,7 +15519,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
       && currentLoad > 0
       && (currentLoad + nextDemand) > capacityTons;
 
-    if (wouldExceedCapacity && dumpPoints.length && currentPoint) {
+    if (!serviceStopsBeforeDeadhead && wouldExceedCapacity && dumpPoints.length && currentPoint) {
       const dumpPick = pickNearestRouteSequencerCandidate(
         currentPoint,
         dumpPoints,
@@ -15120,7 +15541,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
               travelMode: "service",
               fallbackServiceSpeedMph,
               candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
-                buildRouteSequencerServiceCandidateAdjustment(fromPoint, candidate, minutes, streetAttributeDefaults)
+                buildServiceCandidateAdjustment(fromPoint, candidate, minutes)
             }
           )
           || {
@@ -15132,14 +15553,13 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
             miles: estimateRouteSequencerTravelMiles(currentPoint, stopPoint),
             usedNetwork: false,
             adjustment: normalizeRouteSequencerCandidateAdjustment(
-              buildRouteSequencerServiceCandidateAdjustment(
+              buildServiceCandidateAdjustment(
                 currentPoint,
                 stopPoint,
                 estimateRouteSequencerTravelMinutes(currentPoint, stopPoint, fallbackSpeedMph, {
                   travelMode: "service",
                   fallbackServiceSpeedMph
-                }),
-                streetAttributeDefaults
+                })
               )
             )
           }
@@ -15754,6 +16174,12 @@ function loadRouteSequencerSettings() {
       );
     }
     settings.streetAttributeDefaultsVersion = ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION;
+    settings.serviceStopsBeforeDeadhead = settings.serviceStopsBeforeDeadhead == null
+      ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+      : settings.serviceStopsBeforeDeadhead !== false;
+    settings.meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(
+      settings.meanderOverrideDefaults
+    );
     setRouteSequencerActiveOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
     return settings;
   } catch {
@@ -15777,6 +16203,12 @@ function saveRouteSequencerSettings(settings) {
   payload.outputFields = normalizeRouteSequencerOutputFields(payload.outputFields);
   payload.streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(payload.streetAttributeDefaults || payload);
   payload.streetAttributeDefaultsVersion = ROUTE_SEQUENCER_STREET_ATTR_DEFAULTS_VERSION;
+  payload.serviceStopsBeforeDeadhead = payload.serviceStopsBeforeDeadhead == null
+    ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+    : payload.serviceStopsBeforeDeadhead !== false;
+  payload.meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(
+    payload.meanderOverrideDefaults
+  );
   storageSet(ROUTE_SEQUENCER_SETTINGS_KEY, JSON.stringify(payload));
   setRouteSequencerActiveOutputFields(payload.outputFields);
 }
@@ -16068,10 +16500,13 @@ function initRouteSequencerControls() {
   const sequenceIncrementInput = document.getElementById("routeSequencerSequenceIncrementInput");
   const speedClassFieldInput = document.getElementById("routeSequencerSpeedClassField");
   const streetClassFieldInput = document.getElementById("routeSequencerStreetClassField");
+  const serviceStopsBeforeDeadheadToggle = document.getElementById("routeSequencerServiceStopsBeforeDeadhead");
   const allowUTurnsOnlyInCuldesacsToggle = document.getElementById("routeSequencerAllowUTurnsCuldesacs");
   const discourageUTurnsToggle = document.getElementById("routeSequencerDiscourageUTurnsOutsideIntersections");
   const meanderServiceInput = document.getElementById("routeSequencerMeanderServiceInput");
   const sameSideServiceInput = document.getElementById("routeSequencerSameSideServiceInput");
+  const meanderOverrideDrivingInput = document.getElementById("routeSequencerMeanderOverrideDriving");
+  const meanderOverrideWalkingInput = document.getElementById("routeSequencerMeanderOverrideWalking");
   const uTurnProrateDrivingInput = document.getElementById("routeSequencerUTurnProrateDriving");
   const uTurnProrateWalkingInput = document.getElementById("routeSequencerUTurnProrateWalking");
   const dumpSourceSelect = document.getElementById("routeSequencerDumpSource");
@@ -16176,8 +16611,11 @@ function initRouteSequencerControls() {
     !serviceOutputSelect || !totalOutputSelect || !dumpVisitsOutputSelect || !formatHintNode ||
     !scopeListSelect || !scopeAllBtn || !scopeNoneBtn || !scopeVisibleBtn ||
     !capacityInput || !defaultSpeedInput || !sequenceIncrementInput || !speedClassFieldInput ||
-    !streetClassFieldInput || !allowUTurnsOnlyInCuldesacsToggle || !discourageUTurnsToggle ||
-    !meanderServiceInput || !sameSideServiceInput || !uTurnProrateDrivingInput || !uTurnProrateWalkingInput ||
+    !streetClassFieldInput || !serviceStopsBeforeDeadheadToggle ||
+    !allowUTurnsOnlyInCuldesacsToggle || !discourageUTurnsToggle ||
+    !meanderServiceInput || !sameSideServiceInput ||
+    !meanderOverrideDrivingInput || !meanderOverrideWalkingInput ||
+    !uTurnProrateDrivingInput || !uTurnProrateWalkingInput ||
     !dumpSourceSelect || !startDepotSelect || !endDepotSelect ||
     !timeAtStartInput || !timeAtEndInput || !breaksInput ||
     !dumpBeforeEndToggle || !depotNameInput || !addDepotBtn || !removeDepotBtn ||
@@ -16517,6 +16955,7 @@ function initRouteSequencerControls() {
   const applySettingsToUi = () => {
     const settings = loadRouteSequencerSettings();
     const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults || settings);
+    const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(settings.meanderOverrideDefaults);
     capacityInput.value = String(
       clampRouteSequencerNumber(
         settings.capacityTons,
@@ -16536,6 +16975,9 @@ function initRouteSequencerControls() {
     sequenceIncrementInput.value = String(
       normalizeRouteSequencerSequenceIncrement(settings.sequenceIncrement, 1)
     );
+    serviceStopsBeforeDeadheadToggle.checked = settings.serviceStopsBeforeDeadhead == null
+      ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+      : settings.serviceStopsBeforeDeadhead !== false;
     dumpSourceSelect.value = ["both", "landfills", "custom", "none"].includes(String(settings.dumpSource))
       ? String(settings.dumpSource)
       : "both";
@@ -16565,6 +17007,8 @@ function initRouteSequencerControls() {
     discourageUTurnsToggle.checked = streetAttributeDefaults.discourageUTurnsOutsideIntersections !== false;
     meanderServiceInput.value = formatRouteSequencerMinutesClock(streetAttributeDefaults.meanderServiceMinutes);
     sameSideServiceInput.value = formatRouteSequencerMinutesClock(streetAttributeDefaults.sameSideServiceMinutes);
+    meanderOverrideDrivingInput.value = normalizeRouteSequencerMeanderOverrideMode(meanderOverrideDefaults.driving);
+    meanderOverrideWalkingInput.value = normalizeRouteSequencerMeanderOverrideMode(meanderOverrideDefaults.walking);
     uTurnProrateDrivingInput.value = normalizeRouteSequencerUTurnProrateMode(streetAttributeDefaults.uTurnProrateDriving);
     uTurnProrateWalkingInput.value = normalizeRouteSequencerUTurnProrateMode(streetAttributeDefaults.uTurnProrateWalking);
     applyStreetClassAttrMapToInputs(classAttrInputs, streetAttributeDefaults.classAttrMap);
@@ -16686,8 +17130,14 @@ function initRouteSequencerControls() {
       sameSideServiceInput.value,
       ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS.sameSideServiceMinutes
     ));
+    const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults({
+      driving: meanderOverrideDrivingInput.value,
+      walking: meanderOverrideWalkingInput.value
+    });
     meanderServiceInput.value = formatRouteSequencerMinutesClock(meanderServiceMinutes);
     sameSideServiceInput.value = formatRouteSequencerMinutesClock(sameSideServiceMinutes);
+    meanderOverrideDrivingInput.value = meanderOverrideDefaults.driving;
+    meanderOverrideWalkingInput.value = meanderOverrideDefaults.walking;
     const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults({
       streetClassField,
       allowUTurnsOnlyInCuldesacs: !!allowUTurnsOnlyInCuldesacsToggle.checked,
@@ -16720,10 +17170,12 @@ function initRouteSequencerControls() {
       timeAtEndMinutes,
       breakMinutesList,
       forceDumpBeforeEnd: !!dumpBeforeEndToggle.checked,
+      serviceStopsBeforeDeadhead: !!serviceStopsBeforeDeadheadToggle.checked,
       speedClassField,
       drivingSpeedCatMap,
       serviceSpeedCatMap,
       classSpeedMap: drivingSpeedCatMap,
+      meanderOverrideDefaults,
       streetAttributeDefaults,
       selectedDumpId: String(customDumpSelect.value || ""),
       outputFields
@@ -16861,6 +17313,10 @@ function initRouteSequencerControls() {
     const demandField = String(settings.demandField || "");
     const serviceField = String(settings.serviceField || "");
     const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    const serviceStopsBeforeDeadhead = settings.serviceStopsBeforeDeadhead == null
+      ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+      : settings.serviceStopsBeforeDeadhead !== false;
+    const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(settings.meanderOverrideDefaults);
     const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults);
     const dumpSource = String(settings.dumpSource || "both");
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
@@ -16951,6 +17407,8 @@ function initRouteSequencerControls() {
         timeAtEndMinutes: settings.timeAtEndMinutes,
         breakMinutesList,
         forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
+        serviceStopsBeforeDeadhead,
+        meanderOverrideDefaults,
         streetAttributeDefaults
       });
       if (plan) plans.push(plan);
@@ -17035,6 +17493,10 @@ function initRouteSequencerControls() {
     const demandField = String(settings.demandField || "");
     const serviceField = String(settings.serviceField || "");
     const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
+    const serviceStopsBeforeDeadhead = settings.serviceStopsBeforeDeadhead == null
+      ? ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD
+      : settings.serviceStopsBeforeDeadhead !== false;
+    const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(settings.meanderOverrideDefaults);
     const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults);
     const dumpSource = String(settings.dumpSource || "both");
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
@@ -17111,6 +17573,8 @@ function initRouteSequencerControls() {
         fallbackSpeedMph,
         fallbackServiceSpeedMph,
         forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
+        serviceStopsBeforeDeadhead,
+        meanderOverrideDefaults,
         streetAttributeDefaults
       });
       if (plan) plans.push(plan);
@@ -17231,10 +17695,13 @@ function initRouteSequencerControls() {
     defaultSpeedInput,
     sequenceIncrementInput,
     streetClassFieldInput,
+    serviceStopsBeforeDeadheadToggle,
     allowUTurnsOnlyInCuldesacsToggle,
     discourageUTurnsToggle,
     meanderServiceInput,
     sameSideServiceInput,
+    meanderOverrideDrivingInput,
+    meanderOverrideWalkingInput,
     uTurnProrateDrivingInput,
     uTurnProrateWalkingInput,
     dumpSourceSelect,
@@ -20457,10 +20924,11 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
   const ws = wb.Sheets[wb.SheetNames[0]];
 
   const rows = preMappedRows || XLSX.utils.sheet_to_json(ws);
-  ensureCanonicalRecordFields(rows);
-  ensureServiceTimeField(rows);
-  ensureExistBackupColumns(rows);
+  const canonicalFieldsSynced = ensureCanonicalRecordFields(rows);
+  const serviceTimeFieldAdded = ensureServiceTimeField(rows);
+  const backupColumnsAdded = ensureExistBackupColumns(rows);
   syncSetSegmentMatchStatusFields(rows);
+  const schemaAdjustedByTdsPak = canonicalFieldsSynced || serviceTimeFieldAdded || backupColumnsAdded;
 
   // store globally for saving later
   window._currentRows = rows;
@@ -20564,6 +21032,10 @@ if (labelText) {
   refreshAttributeStatus();
 
   if (globalBounds.isValid()) map.fitBounds(globalBounds);
+  if (schemaAdjustedByTdsPak) {
+    syncCurrentWorkbookSheetFromRows();
+    queueWorkbookCloudSave("Schema Sync");
+  }
 }
 
 
@@ -20648,7 +21120,7 @@ async function listFiles() {
 
   const ul = document.getElementById("savedFiles");
   ul.innerHTML = "";
-  const routeFiles = data.filter(file => !isRouteSummaryFileName(file.name));
+  const routeFiles = data.filter(file => !isRouteSummaryFileName(file.name) && !isSystemCloudFileName(file.name));
   const allFileNames = data.map(f => f.name);
   cleanupSummaryAttachments(allFileNames);
   const sortSelect = document.getElementById("savedFilesSortSelect");
@@ -20854,7 +21326,7 @@ async function uploadRouteSummaryAndAttach(file) {
     if (listErr) throw listErr;
 
     const routeFileNames = files
-      .filter(f => !isRouteSummaryFileName(f.name))
+      .filter(f => !isRouteSummaryFileName(f.name) && !isSystemCloudFileName(f.name))
       .map(f => f.name);
 
     hideLoading();
@@ -21964,6 +22436,9 @@ initLayerManagerControls();
 initFacilitiesControls();
 syncRouteSequencerFacilitiesLayer();
 initRouteSequencerControls();
+initSharedFacilitiesCloudSync().catch(error => {
+  console.warn("Unable to initialize shared facilities cloud sync:", error);
+});
 initSetSegmentIdSideControls();
 
 
