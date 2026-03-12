@@ -3022,6 +3022,27 @@ body.sun-mode .road-attributes-table-wrap td {
   overflow-y: auto;
 }
 
+/* Keep all Route+Day entries reachable in long files */
+#routeDayLayers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+#routeDayContent:not(.collapsed) {
+  max-height: min(60vh, 680px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+@media (max-width: 900px) {
+  #routeDayContent:not(.collapsed) {
+    max-height: 50dvh;
+  }
+}
+
 #routeCheckboxes label,
 #dayCheckboxes label {
   display: flex;
