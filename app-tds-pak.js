@@ -86,6 +86,11 @@ function storageSet(name, value) {
   localStorage.setItem(storageKey(name), String(value));
 }
 
+const RIGHT_SIDEBAR_ARROW_COLLAPSED = "\u276E";
+const RIGHT_SIDEBAR_ARROW_EXPANDED = "\u276F";
+const SUMMARY_ARROW_COLLAPSED = "\u25B2";
+const SUMMARY_ARROW_EXPANDED = "\u25BC";
+
 // Header tools menu links (shared by all app pages).
 const HEADER_TOOL_LINKS = [
   { label: "Cart Delivery App", href: "./index.html" },
@@ -149,7 +154,6 @@ const STREET_NETWORK_MANAGER_PASSWORD = "Austin1";
 
 document.addEventListener("DOMContentLoaded", () => {
   initApp();
-  document.addEventListener("DOMContentLoaded", initApp);
 // ================= SUN MODE TOGGLE =================
 
 const sunToggle = document.getElementById("sunModeToggle");
@@ -5078,7 +5082,7 @@ function renderStreetAttributeTable() {
   if (nextBtn) nextBtn.disabled = attributeState.page >= totalPages;
   if (status) {
     const scopeLabel = attributeState.selectedOnly ? "selected scope" : "loaded scope";
-    status.textContent = `${streetAttributeSelectedIds.size} selected â€¢ ${rows.length} visible (${scopeLabel})`;
+    status.textContent = `${streetAttributeSelectedIds.size} selected \u2022 ${rows.length} visible (${scopeLabel})`;
   }
 
   if (!rows.length) {
@@ -5092,7 +5096,7 @@ function renderStreetAttributeTable() {
   }
   empty.style.display = "none";
 
-  const sortIndicator = key => (attributeState.sortKey === key ? (attributeState.sortDir > 0 ? " â–²" : " â–¼") : "");
+  const sortIndicator = key => (attributeState.sortKey === key ? (attributeState.sortDir > 0 ? " \u25B2" : " \u25BC") : "");
   let html = "<thead><tr><th>Sel</th><th>#</th>";
   headers.forEach(h => {
     html += `<th><button type="button" data-sort="${h}">${labels[h]}${sortIndicator(h)}</button></th>`;
@@ -7790,7 +7794,7 @@ function updateStats() {
 
     const [r,d] = key.split("|");
     const li = document.createElement("li");
-    li.textContent = `Route ${r} â€“ ${dayName(d)}: ${visible}`;
+    li.textContent = `Route ${r} \u2013 ${dayName(d)}: ${visible}`;
     list.appendChild(li);
   });
 }
@@ -8425,7 +8429,7 @@ function openColumnMappingPrompt(headers, initialMapping, fileName, sampleByHead
         const value = picked ? sampleByHeader[picked] : "";
         sample.textContent = picked
           ? `Sample: ${String(value || "(blank)").slice(0, 80)}`
-          : "Sample: â€”";
+          : "Sample: \u2014";
       };
 
       select.value = initialMapping[field.key] || "";
@@ -8835,8 +8839,8 @@ function compileFieldCalculatorExpression(expressionText, headers) {
   });
 
   let normalized = rewrittenWithFields
-    .replace(/[Ã—]/g, "*")
-    .replace(/[Ã·]/g, "/")
+    .replace(/[\u00D7\u2715]/g, "*")
+    .replace(/[\u00F7]/g, "/")
     .replace(/\^/g, "**")
     .trim();
 
@@ -9476,7 +9480,7 @@ function refreshAttributeStatus() {
     ? streetAttributeSelectedIds.size
     : attributeState.selectedRowIds.size;
   const visibleCount = attributeState.lastVisibleRows.length;
-  status.textContent = `${selectedCount} selected â€¢ ${visibleCount} visible`;
+  status.textContent = `${selectedCount} selected \u2022 ${visibleCount} visible`;
 }
 
 function syncSelectedStopsHeaderCount(count) {
@@ -13003,6 +13007,7 @@ const ROUTE_SEQUENCER_DEFAULT_SPEED_MPH = 35;
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH = 30;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD = "speed_cat";
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD = true;
+const ROUTE_SEQUENCER_REQUIRE_NETWORK_ONLY = true;
 const ROUTE_SEQUENCER_MEANDER_OVERRIDE_KEEP = "keep_meander";
 const ROUTE_SEQUENCER_MEANDER_OVERRIDE_SAME_SIDE = "same_side";
 const ROUTE_SEQUENCER_DEFAULT_MEANDER_OVERRIDE_DEFAULTS = Object.freeze({
@@ -14637,6 +14642,7 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
   const candidateList = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
   if (!candidateList.length) return null;
   const travelMode = normalizeRouteSequencerTravelMode(travelOptions?.travelMode);
+  const requireNetworkOnly = travelOptions?.requireNetworkOnly !== false;
   const candidateAdjustmentFn = typeof travelOptions?.candidateAdjustmentFn === "function"
     ? travelOptions.candidateAdjustmentFn
     : null;
@@ -14660,6 +14666,10 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
       travelMode,
       adjustment: normalizeRouteSequencerCandidateAdjustment(null)
     };
+  }
+
+  if (requireNetworkOnly && (!graph || !currentPoint.nodeKey)) {
+    return null;
   }
 
   let networkDistances = null;
@@ -14690,7 +14700,8 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
       miles = Number(networkRoute.miles);
       usedNetwork = Number.isFinite(minutes) && Number.isFinite(miles);
     }
-    if (!Number.isFinite(minutes) || !Number.isFinite(miles)) {
+    if (requireNetworkOnly && !usedNetwork) return;
+    if (!requireNetworkOnly && (!Number.isFinite(minutes) || !Number.isFinite(miles))) {
       minutes = estimateRouteSequencerTravelMinutes(
         currentPoint,
         candidate,
@@ -14964,6 +14975,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   const dumpPoints = Array.isArray(options.dumpPoints) ? options.dumpPoints.filter(Boolean) : [];
   const breakMinutesList = parseRouteSequencerBreakMinutesList(options.breakMinutesList);
   const graph = options.graph || null;
+  const requireNetworkOnly = options.requireNetworkOnly !== false;
   const startDepot = options.startDepot || null;
   const endDepot = options.endDepot || null;
   const forceDumpBeforeEnd = !!options.forceDumpBeforeEnd;
@@ -14974,6 +14986,9 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
   const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
   const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(options.meanderOverrideDefaults);
+  if (requireNetworkOnly && (!graph || !(graph.nodes instanceof Map) || !graph.nodes.size)) {
+    return null;
+  }
 
   let fixedFirstStop = null;
   let fixedLastStop = null;
@@ -15014,8 +15029,11 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
     totalDriveMinutes += driveMinutes;
     totalDriveMiles += driveMiles;
-    if (pickResult?.usedNetwork) networkLegs += 1;
-    else fallbackLegs += 1;
+    const hasTravelLeg = driveMinutes > 1e-9 || driveMiles > 1e-9;
+    if (hasTravelLeg) {
+      if (pickResult?.usedNetwork) networkLegs += 1;
+      else fallbackLegs += 1;
+    }
     return { driveMinutes, driveMiles, baseDriveMinutes, drivePenaltyMinutes, adjustment };
   };
 
@@ -15120,6 +15138,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     {
       travelMode: "service",
       fallbackServiceSpeedMph,
+      requireNetworkOnly,
       candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
         buildRouteSequencerServiceCandidateAdjustment(
           fromPoint,
@@ -15165,7 +15184,10 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     if (!candidates.length) break;
 
     let nextStopPick = pickServiceStopCandidate(candidates);
-    if (!nextStopPick?.point) break;
+    if (!nextStopPick?.point) {
+      if (requireNetworkOnly) return null;
+      break;
+    }
     let nextStop = nextStopPick.point;
     let nextDemand = Math.max(0, Number(nextStop?.demand) || 0);
     const enforceCapacity = Number.isFinite(capacityTons) && capacityTons > 0;
@@ -15199,11 +15221,12 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
       if (dumpPick?.point && appendDumpVisit(dumpPick, "capacity-before-next-stop")) {
         continue;
       }
+      if (requireNetworkOnly) return null;
     }
 
     unserved.delete(nextStop.id);
@@ -15218,10 +15241,12 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
       if (dumpPick?.point) {
         appendDumpVisit(dumpPick, "capacity-reached");
+      } else if (requireNetworkOnly) {
+        return null;
       }
     }
   }
@@ -15239,10 +15264,12 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
       if (dumpPick?.point) {
         appendDumpVisit(dumpPick, "capacity-before-last-stop");
+      } else if (requireNetworkOnly) {
+        return null;
       }
     }
 
@@ -15254,6 +15281,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       {
         travelMode: "service",
         fallbackServiceSpeedMph,
+        requireNetworkOnly,
         candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
           buildRouteSequencerServiceCandidateAdjustment(
             fromPoint,
@@ -15263,28 +15291,10 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
             meanderOverrideDefaults
           )
       }
-    )
-      || {
-        point: fixedLastStop,
-        minutes: estimateRouteSequencerTravelMinutes(currentPoint, fixedLastStop, fallbackSpeedMph, {
-          travelMode: "service",
-          fallbackServiceSpeedMph
-        }),
-        miles: estimateRouteSequencerTravelMiles(currentPoint, fixedLastStop),
-        usedNetwork: false,
-        adjustment: normalizeRouteSequencerCandidateAdjustment(
-          buildRouteSequencerServiceCandidateAdjustment(
-            currentPoint,
-            fixedLastStop,
-            estimateRouteSequencerTravelMinutes(currentPoint, fixedLastStop, fallbackSpeedMph, {
-              travelMode: "service",
-              fallbackServiceSpeedMph
-            }),
-            streetAttributeDefaults,
-            meanderOverrideDefaults
-          )
-        )
-      };
+    );
+    if (!pick?.point) {
+      return null;
+    }
     appendStopVisit(fixedLastStop, pick);
   }
 
@@ -15300,10 +15310,12 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
       if (dumpPick?.point) {
         appendDumpVisit(dumpPick, "final-before-end");
+      } else if (requireNetworkOnly) {
+        return null;
       }
     }
 
@@ -15312,17 +15324,11 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       [endDepot],
       graph,
       fallbackSpeedMph,
-      { travelMode: "driving", fallbackServiceSpeedMph }
-    )
-      || {
-        point: endDepot,
-        minutes: estimateRouteSequencerTravelMinutes(currentPoint, endDepot, fallbackSpeedMph, {
-          travelMode: "driving",
-          fallbackServiceSpeedMph
-        }),
-        miles: estimateRouteSequencerTravelMiles(currentPoint, endDepot),
-        usedNetwork: false
-      };
+      { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
+    );
+    if (!depotPick?.point) {
+      return null;
+    }
     const { driveMinutes, driveMiles } = applyDriveLeg(depotPick);
     events.push({
       type: "endDepot",
@@ -15379,6 +15385,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   });
 
   const graph = options.graph || null;
+  const requireNetworkOnly = options.requireNetworkOnly !== false;
   const capacityTons = Number(options.capacityTons);
   const dumpPoints = Array.isArray(options.dumpPoints) ? options.dumpPoints.filter(Boolean) : [];
   const breakMinutesList = parseRouteSequencerBreakMinutesList(options.breakMinutesList);
@@ -15399,6 +15406,9 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
   const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
   const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(options.meanderOverrideDefaults);
+  if (requireNetworkOnly && (!graph || !(graph.nodes instanceof Map) || !graph.nodes.size)) {
+    return null;
+  }
 
   const stopVisits = [];
   const events = [];
@@ -15416,6 +15426,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   let totalOtherMinutes = 0;
   let networkLegs = 0;
   let fallbackLegs = 0;
+  let failedNetworkOnly = false;
   const maxExistingSequence = orderedStops.reduce((maxValue, stopPoint) => {
     const seq = Number(stopPoint?.sequenceOrder);
     if (Number.isFinite(seq) && seq > maxValue) return seq;
@@ -15431,8 +15442,11 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
     const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
     totalDriveMinutes += driveMinutes;
     totalDriveMiles += driveMiles;
-    if (pickResult?.usedNetwork) networkLegs += 1;
-    else fallbackLegs += 1;
+    const hasTravelLeg = driveMinutes > 1e-9 || driveMiles > 1e-9;
+    if (hasTravelLeg) {
+      if (pickResult?.usedNetwork) networkLegs += 1;
+      else fallbackLegs += 1;
+    }
     return { driveMinutes, driveMiles, baseDriveMinutes, drivePenaltyMinutes, adjustment };
   };
 
@@ -15513,6 +15527,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   }
 
   orderedStops.forEach((stopPoint, index) => {
+    if (failedNetworkOnly) return;
     const nextDemand = Math.max(0, Number(stopPoint?.demand) || 0);
     const wouldExceedCapacity = Number.isFinite(capacityTons)
       && capacityTons > 0
@@ -15525,46 +15540,51 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
-      if (dumpPick?.point) appendDumpVisit(dumpPick, "capacity-before-next-stop");
+      if (dumpPick?.point) {
+        appendDumpVisit(dumpPick, "capacity-before-next-stop");
+      } else if (requireNetworkOnly) {
+        failedNetworkOnly = true;
+        return;
+      }
     }
 
-    const pick = currentPoint
-      ? (
-          pickNearestRouteSequencerCandidate(
-            currentPoint,
-            [stopPoint],
-            graph,
-            fallbackSpeedMph,
-            {
-              travelMode: "service",
-              fallbackServiceSpeedMph,
-              candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
-                buildServiceCandidateAdjustment(fromPoint, candidate, minutes)
-            }
-          )
-          || {
-            point: stopPoint,
-            minutes: estimateRouteSequencerTravelMinutes(currentPoint, stopPoint, fallbackSpeedMph, {
-              travelMode: "service",
-              fallbackServiceSpeedMph
-            }),
-            miles: estimateRouteSequencerTravelMiles(currentPoint, stopPoint),
-            usedNetwork: false,
-            adjustment: normalizeRouteSequencerCandidateAdjustment(
-              buildServiceCandidateAdjustment(
-                currentPoint,
-                stopPoint,
-                estimateRouteSequencerTravelMinutes(currentPoint, stopPoint, fallbackSpeedMph, {
-                  travelMode: "service",
-                  fallbackServiceSpeedMph
-                })
-              )
-            )
-          }
-        )
+    let pick = currentPoint
+      ? pickNearestRouteSequencerCandidate(
+        currentPoint,
+        [stopPoint],
+        graph,
+        fallbackSpeedMph,
+        {
+          travelMode: "service",
+          fallbackServiceSpeedMph,
+          requireNetworkOnly,
+          candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
+            buildServiceCandidateAdjustment(fromPoint, candidate, minutes)
+        }
+      )
       : { point: stopPoint, minutes: 0, miles: 0, usedNetwork: false };
+
+    if (!pick?.point && currentPoint && !requireNetworkOnly) {
+      const fallbackMinutes = estimateRouteSequencerTravelMinutes(currentPoint, stopPoint, fallbackSpeedMph, {
+        travelMode: "service",
+        fallbackServiceSpeedMph
+      });
+      pick = {
+        point: stopPoint,
+        minutes: fallbackMinutes,
+        miles: estimateRouteSequencerTravelMiles(currentPoint, stopPoint),
+        usedNetwork: false,
+        adjustment: normalizeRouteSequencerCandidateAdjustment(
+          buildServiceCandidateAdjustment(currentPoint, stopPoint, fallbackMinutes)
+        )
+      };
+    }
+    if (!pick?.point) {
+      failedNetworkOnly = true;
+      return;
+    }
 
     const { driveMinutes, driveMiles, adjustment } = applyDriveLeg(pick);
     const demand = Math.max(0, Number(stopPoint?.demand) || 0);
@@ -15627,11 +15647,17 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
-      if (dumpPick?.point) appendDumpVisit(dumpPick, "capacity-reached");
+      if (dumpPick?.point) {
+        appendDumpVisit(dumpPick, "capacity-reached");
+      } else if (requireNetworkOnly) {
+        failedNetworkOnly = true;
+      }
     }
   });
+
+  if (failedNetworkOnly) return null;
 
   if (endDepot) {
     const needsFinalDump = forceDumpBeforeEnd
@@ -15645,31 +15671,33 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
         dumpPoints,
         graph,
         fallbackSpeedMph,
-        { travelMode: "driving", fallbackServiceSpeedMph }
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       );
       if (dumpPick?.point) appendDumpVisit(dumpPick, "final-before-end");
+      else if (requireNetworkOnly) return null;
     }
 
-    const depotPick = currentPoint
-      ? (
-        pickNearestRouteSequencerCandidate(
-          currentPoint,
-          [endDepot],
-          graph,
-          fallbackSpeedMph,
-          { travelMode: "driving", fallbackServiceSpeedMph }
-        )
-        || {
-          point: endDepot,
-          minutes: estimateRouteSequencerTravelMinutes(currentPoint, endDepot, fallbackSpeedMph, {
-            travelMode: "driving",
-            fallbackServiceSpeedMph
-          }),
-          miles: estimateRouteSequencerTravelMiles(currentPoint, endDepot),
-          usedNetwork: false
-        }
+    let depotPick = currentPoint
+      ? pickNearestRouteSequencerCandidate(
+        currentPoint,
+        [endDepot],
+        graph,
+        fallbackSpeedMph,
+        { travelMode: "driving", fallbackServiceSpeedMph, requireNetworkOnly }
       )
       : { point: endDepot, minutes: 0, miles: 0, usedNetwork: false };
+    if (!depotPick?.point && currentPoint && !requireNetworkOnly) {
+      depotPick = {
+        point: endDepot,
+        minutes: estimateRouteSequencerTravelMinutes(currentPoint, endDepot, fallbackSpeedMph, {
+          travelMode: "driving",
+          fallbackServiceSpeedMph
+        }),
+        miles: estimateRouteSequencerTravelMiles(currentPoint, endDepot),
+        usedNetwork: false
+      };
+    }
+    if (!depotPick?.point) return null;
 
     const { driveMinutes, driveMiles } = applyDriveLeg(depotPick);
     events.push({
@@ -16637,6 +16665,7 @@ function initRouteSequencerControls() {
   openBtn.dataset.routeSequencerBound = "1";
   loadRouteSequencerSettings();
   let routeSequencerTaskRunning = false;
+  let routeSequencerOpenCheckRunning = false;
 
   const setStatus = (message, kind = "") => {
     statusNode.textContent = String(message || "");
@@ -17191,6 +17220,28 @@ function initRouteSequencerControls() {
     openBtn.classList.add("active");
   };
 
+  const openModalWithBackendNotice = async () => {
+    if (routeSequencerOpenCheckRunning) return;
+    routeSequencerOpenCheckRunning = true;
+    try {
+    let backendRunning = false;
+    try {
+      backendRunning = await checkLocalStreetBackendAvailability(true);
+    } catch {
+      backendRunning = false;
+    }
+    if (!backendRunning) {
+      alert(
+        "Street Network backend is not running.\n\n" +
+        "Open Street Network Manager to start the backend before sequencing."
+      );
+    }
+    openModal();
+    } finally {
+      routeSequencerOpenCheckRunning = false;
+    }
+  };
+
   const closeModal = () => {
     modal.style.display = "none";
     openBtn.classList.remove("active");
@@ -17321,6 +17372,7 @@ function initRouteSequencerControls() {
     const dumpSource = String(settings.dumpSource || "both");
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
     const sequenceField = String(outputFields.sequence || "").trim();
+    const requireNetworkOnly = ROUTE_SEQUENCER_REQUIRE_NETWORK_ONLY;
 
     if (!sequenceField) {
       setStatus("Choose a Sequence Output field before Evaluate Sequence.", "error");
@@ -17337,9 +17389,19 @@ function initRouteSequencerControls() {
         fallbackServiceSpeedMph
       }, fallbackSpeedMph)
       : null;
+    const hasGraph = !!(graph && Number(graph.nodeCount) > 0 && Number(graph.edgeCount) > 0);
+    if (requireNetworkOnly && !hasGraph) {
+      setStatus(
+        "Street-network-only sequencing is enabled. Start the Street backend and load street segments before Evaluate Sequence.",
+        "error"
+      );
+      renderRouteSequencerResultsList(resultsNode, []);
+      clearSequenceLayerData();
+      return;
+    }
     const graphSummary = graph
       ? `${graph.nodeCount.toLocaleString()} nodes / ${graph.edgeCount.toLocaleString()} edges`
-      : "No street graph (fallback direct travel)";
+      : "No street graph";
     setStatus(`Travel graph ready: ${graphSummary}. Evaluating existing sequence values...`);
 
     let landfillPoints = [];
@@ -17370,6 +17432,7 @@ function initRouteSequencerControls() {
     let skippedRouteDayCount = 0;
     let missingSequenceStops = 0;
     let groupsWithoutAnySequence = 0;
+    let networkBlockedRouteDayCount = 0;
 
     for (let i = 0; i < routeDayKeys.length; i += 1) {
       const key = routeDayKeys[i];
@@ -17408,10 +17471,12 @@ function initRouteSequencerControls() {
         breakMinutesList,
         forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
         serviceStopsBeforeDeadhead,
+        requireNetworkOnly,
         meanderOverrideDefaults,
         streetAttributeDefaults
       });
       if (plan) plans.push(plan);
+      else if (requireNetworkOnly) networkBlockedRouteDayCount += 1;
 
       setStatus(`Evaluating Route+Day unit ${i + 1} of ${routeDayKeys.length} from "${sequenceField}"...`);
       if (i % 4 === 0) {
@@ -17420,10 +17485,17 @@ function initRouteSequencerControls() {
     }
 
     if (!plans.length) {
-      setStatus(
-        `Evaluate Sequence could not run. No Route+Day group had usable numeric sequence values in "${sequenceField}".`,
-        "error"
-      );
+      if (networkBlockedRouteDayCount > 0) {
+        setStatus(
+          `Evaluate Sequence could not run. ${networkBlockedRouteDayCount.toLocaleString()} Route+Day group(s) could not be connected on the loaded street network.`,
+          "error"
+        );
+      } else {
+        setStatus(
+          `Evaluate Sequence could not run. No Route+Day group had usable numeric sequence values in "${sequenceField}".`,
+          "error"
+        );
+      }
       renderRouteSequencerResultsList(resultsNode, []);
       clearSequenceLayerData();
       return;
@@ -17456,8 +17528,11 @@ function initRouteSequencerControls() {
     const partialNote = missingSequenceStops
       ? ` ${missingSequenceStops.toLocaleString()} stop(s) were missing sequence values and were placed after sequenced stops.`
       : "";
+    const networkBlockedNote = networkBlockedRouteDayCount
+      ? ` ${networkBlockedRouteDayCount.toLocaleString()} route/day group(s) could not be connected on the street network and were skipped.`
+      : "";
     setStatus(
-      `Evaluate Sequence complete from "${sequenceField}": ${plans.length.toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups, ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min.${skipNote}${noSeqNote}${partialNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      `Evaluate Sequence complete from "${sequenceField}": ${plans.length.toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups, ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min.${skipNote}${noSeqNote}${partialNote}${networkBlockedNote} Updated rows: ${updatedRows.toLocaleString()}.`,
       "success"
     );
   };
@@ -17500,6 +17575,7 @@ function initRouteSequencerControls() {
     const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(settings.streetAttributeDefaults);
     const dumpSource = String(settings.dumpSource || "both");
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
+    const requireNetworkOnly = ROUTE_SEQUENCER_REQUIRE_NETWORK_ONLY;
 
     if (!demandField) {
       setStatus("Choose a Demand field (Tons) before running Auto Sequence.", "error");
@@ -17521,9 +17597,19 @@ function initRouteSequencerControls() {
         fallbackServiceSpeedMph
       }, fallbackSpeedMph)
       : null;
+    const hasGraph = !!(graph && Number(graph.nodeCount) > 0 && Number(graph.edgeCount) > 0);
+    if (requireNetworkOnly && !hasGraph) {
+      setStatus(
+        "Street-network-only sequencing is enabled. Start the Street backend and load street segments before Auto Sequence.",
+        "error"
+      );
+      renderRouteSequencerResultsList(resultsNode, []);
+      clearSequenceLayerData();
+      return;
+    }
     const graphSummary = graph
       ? `${graph.nodeCount.toLocaleString()} nodes / ${graph.edgeCount.toLocaleString()} edges`
-      : "No street graph (fallback direct travel)";
+      : "No street graph";
     setStatus(`Travel graph ready: ${graphSummary}. Gathering facilities...`);
 
     let landfillPoints = [];
@@ -17552,6 +17638,7 @@ function initRouteSequencerControls() {
       return;
     }
     let skippedRouteDayCount = 0;
+    let networkBlockedRouteDayCount = 0;
 
     for (let i = 0; i < routeDayKeys.length; i += 1) {
       const key = routeDayKeys[i];
@@ -17574,10 +17661,12 @@ function initRouteSequencerControls() {
         fallbackServiceSpeedMph,
         forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
         serviceStopsBeforeDeadhead,
+        requireNetworkOnly,
         meanderOverrideDefaults,
         streetAttributeDefaults
       });
       if (plan) plans.push(plan);
+      else if (requireNetworkOnly) networkBlockedRouteDayCount += 1;
       setStatus(`Sequencing Route+Day unit ${i + 1} of ${routeDayKeys.length}...`);
       if (i % 4 === 0) {
         await new Promise(resolve => setTimeout(resolve, 0));
@@ -17585,7 +17674,14 @@ function initRouteSequencerControls() {
     }
 
     if (!plans.length) {
-      setStatus("No route/day stops were available to sequence.", "error");
+      if (networkBlockedRouteDayCount > 0) {
+        setStatus(
+          `Auto Sequence could not run. ${networkBlockedRouteDayCount.toLocaleString()} Route+Day group(s) could not be connected on the loaded street network.`,
+          "error"
+        );
+      } else {
+        setStatus("No route/day stops were available to sequence.", "error");
+      }
       renderRouteSequencerResultsList(resultsNode, []);
       clearSequenceLayerData();
       return;
@@ -17612,14 +17708,27 @@ function initRouteSequencerControls() {
     const skipNote = skippedRouteDayCount
       ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
       : "";
+    const networkBlockedNote = networkBlockedRouteDayCount
+      ? ` ${networkBlockedRouteDayCount.toLocaleString()} route/day group(s) could not be connected on the street network and were skipped.`
+      : "";
     setStatus(
-      `Auto Sequence complete: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      `Auto Sequence complete: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote}${networkBlockedNote} Updated rows: ${updatedRows.toLocaleString()}.`,
       "success"
     );
   };
 
-  openBtn.addEventListener("click", openModal);
-  if (openBtnMobile) openBtnMobile.addEventListener("click", openModal);
+  openBtn.addEventListener("click", () => {
+    openModalWithBackendNotice().catch(error => {
+      console.warn("Unable to verify Street Network backend before opening Sequence:", error);
+    });
+  });
+  if (openBtnMobile) {
+    openBtnMobile.addEventListener("click", () => {
+      openModalWithBackendNotice().catch(error => {
+        console.warn("Unable to verify Street Network backend before opening Sequence (mobile):", error);
+      });
+    });
+  }
   closeBtn.addEventListener("click", closeModal);
   modal.addEventListener("click", event => {
     if (event.target === modal) closeModal();
@@ -19900,7 +20009,7 @@ function renderAttributeTable() {
 
   const sortIndicator = (key) => {
     if (attributeState.sortKey !== key) return "";
-    return attributeState.sortDir > 0 ? " â–²" : " â–¼";
+    return attributeState.sortDir > 0 ? " \u25B2" : " \u25BC";
   };
 
   let html = "<thead><tr><th>Sel</th><th>#</th>";
@@ -21219,7 +21328,7 @@ async function listFiles() {
     delBtn.onclick = async () => {
       const entered = prompt("Enter password to delete this file:");
       if (entered !== DELETE_PASSWORD) {
-        alert("âŒ Incorrect password. File not deleted.");
+        alert("\u274C Incorrect password. File not deleted.");
         return;
       }
 
@@ -21239,7 +21348,7 @@ async function listFiles() {
         setSummaryAttachments(map);
       }
 
-      alert("âœ… File deleted successfully.");
+      alert("\u2705 File deleted successfully.");
       listFiles();
     };
     actions.appendChild(delBtn);
@@ -21301,7 +21410,7 @@ async function uploadFile(file) {
     processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
     listFiles();
 
-    hideLoading("Upload Complete âœ…");
+    hideLoading("Upload Complete \u2705");
 
   } catch (error) {
     console.error("UPLOAD ERROR:", error);
@@ -21605,7 +21714,7 @@ function showRouteSummary(rows, headers) {
 
   // Always show summary immediately after loading.
   panel.classList.remove("collapsed");
-  btn.textContent = "\u25BC";
+  btn.textContent = SUMMARY_ARROW_EXPANDED;
   panel.style.height = `${targetHeight}px`;
 
   // iOS standalone occasionally needs a repaint after dynamic table injection.
@@ -21640,14 +21749,14 @@ function autoCollapseSidebarsForSummary() {
   if (toggleSidebarBtn) toggleSidebarBtn.setAttribute("aria-expanded", "false");
   if (sidebar) sidebar.classList.remove("open");
   if (overlay) overlay.classList.remove("show");
-  if (mobileMenuBtn) mobileMenuBtn.textContent = "â˜°";
+  if (mobileMenuBtn) mobileMenuBtn.textContent = "\u2630";
 
   // Right sidebar: collapse desktop and hide mobile panel.
   if (selectionBox) {
     selectionBox.classList.add("collapsed");
     selectionBox.classList.remove("show");
   }
-  if (toggleSelectionBtn) toggleSelectionBtn.textContent = "â®";
+  if (toggleSelectionBtn) toggleSelectionBtn.textContent = RIGHT_SIDEBAR_ARROW_COLLAPSED;
 
   setTimeout(() => map.invalidateSize(), 180);
 }
@@ -21742,7 +21851,7 @@ const isMobile = window.innerWidth <= 900;
 
 if (panel && btn && !isMobile) {
   panel.classList.remove("collapsed");
-  btn.textContent = "â–¼";
+  btn.textContent = SUMMARY_ARROW_EXPANDED;
 }
 
 
@@ -21760,7 +21869,9 @@ function toggleSummary() {
   panel.classList.toggle("collapsed");
 
   // flip arrow direction
-  btn.textContent = panel.classList.contains("collapsed") ? "â–²" : "â–¼";
+  btn.textContent = panel.classList.contains("collapsed")
+    ? SUMMARY_ARROW_COLLAPSED
+    : SUMMARY_ARROW_EXPANDED;
 }
 // ===== PLACE LOCATE BUTTON BASED ON SCREEN SIZE =====
 function placeLocateButton() {
@@ -21828,13 +21939,15 @@ const selectionClearShapeBtn = document.getElementById("selectionClearShapeBtn")
 
 // Start with the right sidebar closed on initial page load.
 if (selectionBox) selectionBox.classList.add("collapsed");
-if (toggleSelectionBtn) toggleSelectionBtn.textContent = "â®";
+if (toggleSelectionBtn) toggleSelectionBtn.textContent = RIGHT_SIDEBAR_ARROW_COLLAPSED;
 
 // Toggle sidebar open/closed
 if (selectionBox && toggleSelectionBtn) {
   toggleSelectionBtn.onclick = () => {
     const collapsed = selectionBox.classList.toggle("collapsed");
-    toggleSelectionBtn.textContent = collapsed ? "â®" : "â¯";
+    toggleSelectionBtn.textContent = collapsed
+      ? RIGHT_SIDEBAR_ARROW_COLLAPSED
+      : RIGHT_SIDEBAR_ARROW_EXPANDED;
   };
 }
 
@@ -22535,7 +22648,7 @@ if (mobileMenuBtn && sidebar && overlay) {
     }
     const open = sidebar.classList.toggle("open");
 
-    mobileMenuBtn.textContent = open ? "âœ•" : "â˜°";
+    mobileMenuBtn.textContent = open ? "\u2715" : "\u2630";
     overlay.classList.toggle("show", open);
     if (open) {
       sidebar.scrollTop = 0;
@@ -22550,7 +22663,7 @@ if (mobileMenuBtn && sidebar && overlay) {
   overlay.addEventListener("click", () => {
     sidebar.classList.remove("open");
     overlay.classList.remove("show");
-    mobileMenuBtn.textContent = "â˜°";
+    mobileMenuBtn.textContent = "\u2630";
   });
 }
 // ===== MOBILE SELECTION TOGGLE =====
@@ -22590,7 +22703,7 @@ if (mobileSelBtn && selectionBox) {
     // Start collapsed on initial load (desktop + mobile)
     panel.classList.add("collapsed");
     panel.style.height = "40px";
-    if (toggleBtn) toggleBtn.textContent = "â–²";
+    if (toggleBtn) toggleBtn.textContent = SUMMARY_ARROW_COLLAPSED;
 
     // Drag resize (mouse + touch/pen) while preserving button clicks in header
     header.addEventListener("pointerdown", e => {
@@ -22616,7 +22729,7 @@ if (mobileSelBtn && selectionBox) {
       // If user drags upward from collapsed state, immediately reveal summary content.
       if (panel.classList.contains("collapsed") && newHeight > minHeight + 2) {
         panel.classList.remove("collapsed");
-        if (toggleBtn) toggleBtn.textContent = "Ã¢â€“Â¼";
+        if (toggleBtn) toggleBtn.textContent = SUMMARY_ARROW_EXPANDED;
       }
     });
 
@@ -22628,10 +22741,10 @@ if (mobileSelBtn && selectionBox) {
       if (panel.offsetHeight <= minHeight + 2) {
         panel.classList.add("collapsed");
         panel.style.height = "40px";
-        if (toggleBtn) toggleBtn.textContent = "Ã¢â€“Â²";
+        if (toggleBtn) toggleBtn.textContent = SUMMARY_ARROW_COLLAPSED;
       } else {
         panel.classList.remove("collapsed");
-        if (toggleBtn) toggleBtn.textContent = "Ã¢â€“Â¼";
+        if (toggleBtn) toggleBtn.textContent = SUMMARY_ARROW_EXPANDED;
         storageSet("summaryHeight", panel.offsetHeight);
       }
 
@@ -22649,7 +22762,7 @@ if (toggleBtn) {
    if (isCollapsed) {
   storageSet("summaryHeight", panel.offsetHeight);
   panel.style.height = "40px";
-  toggleBtn.textContent = "â–²";
+  toggleBtn.textContent = SUMMARY_ARROW_COLLAPSED;
 } else {
   let restored = storageGet("summaryHeight");
 
@@ -22658,7 +22771,7 @@ if (toggleBtn) {
   }
 
   panel.style.height = restored + "px";
-  toggleBtn.textContent = "â–¼";
+  toggleBtn.textContent = SUMMARY_ARROW_EXPANDED;
 }
 
   };
@@ -22857,7 +22970,7 @@ if (toggleBtn) {
           <body class="${summaryPopoutTheme === "sun" ? "sun-mode" : "dark-mode"}">
             <div class="summary-shell">
               <div class="summary-header">
-                <button class="summary-back-btn" onclick="returnToMap()">â† Back to Map</button>
+                <button class="summary-back-btn" onclick="returnToMap()">&#8592; Back to Map</button>
                 <h2 class="summary-title">Route Summary</h2>
                 <span class="summary-note">Scroll to view all columns and rows</span>
               </div>
@@ -23644,7 +23757,7 @@ if (toggleBtn) {
             <div class="shell">
               <div class="head">
                 <div class="head-left">
-                  <button class="summary-back-btn" onclick="returnToMap()">â† Back to Map</button>
+                  <button class="summary-back-btn" onclick="returnToMap()">&#8592; Back to Map</button>
                   <h2 class="title">Route Summary Visualization</h2>
                 </div>
                 <span class="meta">Rows: ${rows.length.toLocaleString()} | Columns: ${headers.length.toLocaleString()}</span>
@@ -24086,7 +24199,7 @@ if (resetBtn) {
     if (panel && btn) {
       panel.classList.add("collapsed");
       panel.style.height = "40px";
-      btn.textContent = "â–²";
+      btn.textContent = SUMMARY_ARROW_COLLAPSED;
     }
   });
 }
@@ -24101,8 +24214,8 @@ if (locateBtn) {
   locateBtn.addEventListener("click", () => {
     if (!tracking) {
       startLiveTracking();
-      locateBtn.textContent = "â– ";
-      locateBtn.classList.add("tracking");   // ðŸ”´ turns button red
+      locateBtn.textContent = "\u25A0";
+      locateBtn.classList.add("tracking"); // turns button red
       tracking = true;
     } else {
       if (watchId !== null) {
@@ -24117,8 +24230,8 @@ if (locateBtn) {
 window.removeEventListener("deviceorientation", updateHeading);
 
 
-      locateBtn.textContent = "ðŸ“";
-      locateBtn.classList.remove("tracking"); // ðŸ”µ back to blue
+      locateBtn.textContent = "\u{1F4CD}";
+      locateBtn.classList.remove("tracking"); // back to blue
       tracking = false;
     }
   });
@@ -24910,6 +25023,12 @@ if (routesToggle && routesContent) {
 
   listFiles();
 }
+
+
+
+
+
+
 
 
 

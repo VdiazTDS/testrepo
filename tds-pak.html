@@ -27,8 +27,7 @@
  <div class="header-top">
 
   <button id="downloadFullExcelBtn" class="download-btn" title="Download Full Excel">
-    ⬇
-  </button>
+    &#8595;</button>
 
   <div class="title-with-tools">
     <h1>TDS-PAK</h1>
@@ -144,8 +143,8 @@
     <button id="attributeTableBtnMobile" class="primary-btn" title="Open Attribute Table">Table</button>
     <button id="setSegmentIdSideBtnMobile" class="primary-btn" title="Set Segment ID and Side">Seg ID</button>
     <button id="updateFieldBtnMobile" class="primary-btn" title="Update field values">Update</button>
-    <button id="mobileMenuBtn">☰ Menu</button>
-    <button id="locateMeBtn" class="primary-btn">📍</button>
+    <button id="mobileMenuBtn">&#9776; Menu</button>
+    <button id="locateMeBtn" class="primary-btn">&#128205;</button>
   </div>
   <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
   <input type="file" id="summaryFileInput" accept=".xlsx,.xls,.csv" hidden>
@@ -204,7 +203,7 @@
 <div class="filter-group">
   <div class="filter-header collapsible-header" id="routeDayToggle">
     <div class="routes-title">
-      <span class="arrow">▶</span>
+      <span class="arrow">&#9654;</span>
       <strong>Route + Day Layers</strong>
     </div>
     <div class="routes-buttons">
@@ -218,29 +217,11 @@
   </div>
 </div>
 
-<div class="filter-group sequence-layer-group">
-  <div class="filter-header collapsible-header" id="sequenceLayerToggleHeader">
-    <div class="days-title">
-      <span class="arrow">&#9654;</span>
-      <strong>Sequence Layer</strong>
-    </div>
-  </div>
-  <div id="sequenceLayerContent" class="collapsible-content collapsed">
-    <label class="service-day-label-master sequence-layer-master">
-      <input type="checkbox" id="sequenceLayerEnabled" />
-      Show Sequence Layer
-    </label>
-    <div id="sequenceLayerStatus" class="service-day-label-empty sequence-layer-status">
-      Run Sequence to generate route arrows.
-    </div>
-  </div>
-</div>
-
   <div class="filter-group">
 
   <div class="filter-header collapsible-header" id="routesToggle">
     <div class="routes-title">
-      <span class="arrow">▶</span>
+      <span class="arrow">&#9654;</span>
       <strong>Routes</strong>
     </div>
 
@@ -263,7 +244,7 @@
       
        <div class="filter-header collapsible-header" id="daysToggle">
     <div class="days-title">
-      <span class="arrow">▶</span>
+      <span class="arrow">&#9654;</span>
       <strong>Days</strong>
     </div>
 
@@ -282,7 +263,7 @@
     <div class="filter-group service-day-label-group">
       <div class="filter-header collapsible-header" id="serviceDayLabelLayerToggle">
         <div class="days-title">
-          <span class="arrow">▶</span>
+          <span class="arrow">&#9654;</span>
           <strong>Service Day Label Layer</strong>
         </div>
         <div class="days-buttons">
@@ -314,10 +295,28 @@
       </div>
     </div>
 
+    <div class="filter-group sequence-layer-group">
+      <div class="filter-header collapsible-header" id="sequenceLayerToggleHeader">
+        <div class="days-title">
+          <span class="arrow">&#9654;</span>
+          <strong>Sequence Layer</strong>
+        </div>
+      </div>
+      <div id="sequenceLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master sequence-layer-master">
+          <input type="checkbox" id="sequenceLayerEnabled" />
+          Show Sequence Layer
+        </label>
+        <div id="sequenceLayerStatus" class="service-day-label-empty sequence-layer-status">
+          Run Sequence to generate route arrows.
+        </div>
+      </div>
+    </div>
+
     <div class="filter-group texas-landfills-group">
       <div class="filter-header collapsible-header" id="texasLandfillsLayerToggleHeader">
         <div class="days-title">
-          <span class="arrow">▶</span>
+          <span class="arrow">&#9654;</span>
           <strong>Texas Landfills Layer</strong>
         </div>
       </div>
@@ -440,7 +439,7 @@
 
 
 
-<button id="toggleSelectionBtn" class="sidebar-toggle-right">❯</button>
+<button id="toggleSelectionBtn" class="sidebar-toggle-right">&#10095;</button>
 
 </div> <!-- end app-container -->
 <div id="attributeTablePanel" class="attribute-table-panel collapsed closed" aria-hidden="true">
@@ -490,20 +489,18 @@
 
   <div class="bottom-summary-header">
   <div class="resize-hint">
-    ⠿ Drag up to resize
-  </div>
+    Drag up to resize</div>
 
 
     <button id="popoutSummaryBtn" class="primary-btn">
-  ↗ Open Summary
-</button>
+  &#8599; Open Summary</button>
 
     <button id="visualizeSummaryBtn" class="primary-btn">Visualize Summary</button>
 
 
     <span class="summary-title">Route Summary</span>
 
-    <button id="summaryToggleBtn" class="primary-btn collapse-btn">▲</button>
+    <button id="summaryToggleBtn" class="primary-btn collapse-btn">&#9650;</button>
 
 
   </div>
@@ -1683,6 +1680,9 @@
 </div>
 </body>
 </html>
+
+
+
 
 
 
