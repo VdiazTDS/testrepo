@@ -34,8 +34,10 @@ const SUPABASE_URL = "https://lffazhbwvorwxineklsy.supabase.co";
 const SUPABASE_KEY = "sb_publishable_Lfh2zlIiTSMB0U-Fe5o6Jg_mJ1qkznh";
 const BUCKET = "excel-files";
 const SHARED_FACILITIES_CLOUD_FILE = "__tds_pak_shared_facilities.xlsx";
+const SUMMARY_ATTACH_CLOUD_FILE = "__tds_pak_summary_attachments.json";
 const SHARED_FACILITIES_SHEET_NAME = "Facilities";
 const SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS = 1200;
+const SUMMARY_ATTACH_CLOUD_SAVE_DEBOUNCE_MS = 700;
 // ===== CURRENT EXCEL STATE =====
 window._currentRows = null;
 window._currentWorkbook = null;
@@ -814,23 +816,169 @@ function isRouteSummaryFileName(fileName) {
 
 function isSystemCloudFileName(fileName) {
   const lower = String(fileName || "").trim().toLowerCase();
-  return lower === SHARED_FACILITIES_CLOUD_FILE.toLowerCase();
+  return (
+    lower === SHARED_FACILITIES_CLOUD_FILE.toLowerCase() ||
+    lower === SUMMARY_ATTACH_CLOUD_FILE.toLowerCase()
+  );
 }
 
 const SUMMARY_ATTACH_STORAGE_KEY = storageKey("summaryAttachments");
+let summaryAttachmentsCache = null;
+let summaryAttachmentsInitPromise = null;
+let summaryAttachmentsCloudSaveTimer = null;
+let summaryAttachmentsCloudSaveInFlight = null;
+let summaryAttachmentsCloudSaveQueued = false;
 
-function getSummaryAttachments() {
+function normalizeSummaryAttachmentsMap(map) {
+  const normalized = {};
+  if (!map || typeof map !== "object") return normalized;
+
+  Object.entries(map).forEach(([routeName, summaryName]) => {
+    const route = String(routeName ?? "").trim();
+    const summary = String(summaryName ?? "").trim();
+    if (!route || !summary) return;
+    normalized[route] = summary;
+  });
+
+  return normalized;
+}
+
+function readSummaryAttachmentsFromLocalStorage() {
   try {
     const raw = localStorage.getItem(SUMMARY_ATTACH_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return normalizeSummaryAttachmentsMap(parsed);
   } catch (_) {
     return {};
   }
 }
 
+function writeSummaryAttachmentsToLocalStorage(map) {
+  localStorage.setItem(
+    SUMMARY_ATTACH_STORAGE_KEY,
+    JSON.stringify(normalizeSummaryAttachmentsMap(map))
+  );
+}
+
+function summaryAttachmentMapsEqual(a, b) {
+  const left = normalizeSummaryAttachmentsMap(a);
+  const right = normalizeSummaryAttachmentsMap(b);
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every(key => left[key] === right[key]);
+}
+
+async function loadSummaryAttachmentsFromCloud() {
+  const { data } = sb.storage.from(BUCKET).getPublicUrl(SUMMARY_ATTACH_CLOUD_FILE);
+  const publicUrl = data?.publicUrl;
+  if (!publicUrl) return {};
+
+  const response = await fetch(publicUrl, { cache: "no-store" });
+  if (!response.ok) {
+    if (response.status === 404) return {};
+
+    // Supabase can return 400 for missing objects, depending on bucket policy/settings.
+    if (response.status === 400) {
+      const text = (await response.text().catch(() => "")).toLowerCase();
+      if (text.includes("not found") || text.includes("no such object")) {
+        return {};
+      }
+    }
+
+    throw new Error(`Failed to load summary attachments (HTTP ${response.status}).`);
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  return normalizeSummaryAttachmentsMap(payload);
+}
+
+async function saveSummaryAttachmentsToCloud(map) {
+  const payload = JSON.stringify(normalizeSummaryAttachmentsMap(map), null, 2);
+  const blob = new Blob([payload], { type: "application/json" });
+  const { error } = await sb.storage
+    .from(BUCKET)
+    .upload(SUMMARY_ATTACH_CLOUD_FILE, blob, {
+      upsert: true,
+      contentType: "application/json"
+    });
+
+  if (error) throw error;
+}
+
+function scheduleSummaryAttachmentsCloudSave() {
+  if (summaryAttachmentsCloudSaveTimer) clearTimeout(summaryAttachmentsCloudSaveTimer);
+  summaryAttachmentsCloudSaveTimer = setTimeout(() => {
+    summaryAttachmentsCloudSaveTimer = null;
+    void flushSummaryAttachmentsCloudSave();
+  }, SUMMARY_ATTACH_CLOUD_SAVE_DEBOUNCE_MS);
+}
+
+async function flushSummaryAttachmentsCloudSave() {
+  if (summaryAttachmentsCloudSaveInFlight) {
+    summaryAttachmentsCloudSaveQueued = true;
+    return summaryAttachmentsCloudSaveInFlight;
+  }
+
+  const mapToSave = normalizeSummaryAttachmentsMap(
+    summaryAttachmentsCache || readSummaryAttachmentsFromLocalStorage()
+  );
+
+  summaryAttachmentsCloudSaveInFlight = saveSummaryAttachmentsToCloud(mapToSave)
+    .catch(error => {
+      console.warn("Unable to save shared summary attachments:", error);
+    })
+    .finally(() => {
+      summaryAttachmentsCloudSaveInFlight = null;
+      if (summaryAttachmentsCloudSaveQueued) {
+        summaryAttachmentsCloudSaveQueued = false;
+        scheduleSummaryAttachmentsCloudSave();
+      }
+    });
+
+  return summaryAttachmentsCloudSaveInFlight;
+}
+
+async function ensureSummaryAttachmentsInitialized() {
+  if (summaryAttachmentsCache) return summaryAttachmentsCache;
+  if (summaryAttachmentsInitPromise) return summaryAttachmentsInitPromise;
+
+  summaryAttachmentsInitPromise = (async () => {
+    const localMap = readSummaryAttachmentsFromLocalStorage();
+    let cloudMap = {};
+
+    try {
+      cloudMap = await loadSummaryAttachmentsFromCloud();
+    } catch (error) {
+      console.warn("Unable to load shared summary attachments:", error);
+    }
+
+    // Keep cloud values authoritative for conflicts, while still migrating local-only links.
+    const mergedMap = normalizeSummaryAttachmentsMap({ ...localMap, ...cloudMap });
+    summaryAttachmentsCache = mergedMap;
+    writeSummaryAttachmentsToLocalStorage(summaryAttachmentsCache);
+
+    if (!summaryAttachmentMapsEqual(mergedMap, cloudMap)) {
+      scheduleSummaryAttachmentsCloudSave();
+    }
+
+    return summaryAttachmentsCache;
+  })().finally(() => {
+    summaryAttachmentsInitPromise = null;
+  });
+
+  return summaryAttachmentsInitPromise;
+}
+
+function getSummaryAttachments() {
+  const map = summaryAttachmentsCache || readSummaryAttachmentsFromLocalStorage();
+  return { ...map };
+}
+
 function setSummaryAttachments(map) {
-  localStorage.setItem(SUMMARY_ATTACH_STORAGE_KEY, JSON.stringify(map || {}));
+  summaryAttachmentsCache = normalizeSummaryAttachmentsMap(map);
+  writeSummaryAttachmentsToLocalStorage(summaryAttachmentsCache);
+  scheduleSummaryAttachmentsCloudSave();
 }
 
 function setRouteSummaryAttachment(routeFileName, summaryFileName) {
@@ -21990,6 +22138,12 @@ async function listFiles() {
   const ul = document.getElementById("savedFiles");
   if (!ul) return;
 
+  try {
+    await ensureSummaryAttachmentsInitialized();
+  } catch (error) {
+    console.warn("Summary attachment sync init failed before rendering saved files:", error);
+  }
+
   ul.innerHTML = "";
   const cloudFiles = Array.isArray(data) ? data : [];
   const routeFiles = cloudFiles.filter(file => !isRouteSummaryFileName(file.name) && !isSystemCloudFileName(file.name));
@@ -22348,6 +22502,7 @@ async function uploadRouteSummaryAndAttach(file) {
   if (!file) return;
 
   try {
+    await ensureSummaryAttachmentsInitialized();
     showLoading("Uploading route summary...");
 
     const { error } = await sb.storage
@@ -22694,6 +22849,12 @@ async function loadSummaryFor(routeFileName) {
   if (error) {
     console.error("LIST ERROR:", error);
     return;
+  }
+
+  try {
+    await ensureSummaryAttachmentsInitialized();
+  } catch (syncError) {
+    console.warn("Summary attachment sync init failed before loading summary:", syncError);
   }
 
   const summaryName = resolveSummaryForRoute(routeFileName, data);
